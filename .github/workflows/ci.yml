@@ -748,7 +748,7 @@ jobs:
       - name: Current Rust collector negative controls
         shell: pwsh
         run: |
-          cargo test --locked -p okx-trading-engine --example native_finance_acceptance
+          cargo test --locked -p okx-native-finance-check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Mandatory current Rust financial property acceptance
@@ -758,7 +758,7 @@ jobs:
           # The old Native/Worker finance driver is retired. Its properties
           # remain in the reviewed current Rust map; missing evidence BLOCKS
           # this full gate rather than falling back to historical26 results.
-          cargo run --locked -p okx-trading-engine --example native_finance_acceptance > "$env:RUNNER_TEMP\native-finance-full.json"
+          cargo run --locked -p okx-native-finance-check > "$env:RUNNER_TEMP\native-finance-full.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Exactly the roster excluded by the parallel regression step.
           $head = (git rev-parse HEAD).Trim()
@@ -1467,7 +1467,7 @@ jobs:
           # Match the single Cargo selection in the financial collector.
           cargo test --locked --no-run --lib -p okx-domain-core -p okx-trade-execution -p okx-trading-engine -p okx-ipc-contracts -p okx-market-runtime
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_FINANCIAL_LIBTEST_BUILD_FAILED' }
-          cargo build --locked -p okx-trading-engine --example native_finance_acceptance
+          cargo build --locked -p okx-native-finance-check
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_COLLECTOR_BUILD_FAILED' }
       - name: Record non-acceptance test-cache evidence
         shell: pwsh

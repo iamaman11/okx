@@ -46,7 +46,7 @@ class FeedbackTests(unittest.TestCase):
             r"(?ms)^  trading_engine_acceptance_windows:\n(.*?)(?=^  [a-z_-]+:|\Z)", workflow
         )
         self.assertIsNotNone(acceptance)
-        self.assertIn("cargo run --locked -p okx-trading-engine --example native_finance_acceptance", acceptance.group(1))
+        self.assertIn("cargo run --locked -p okx-native-finance-check", acceptance.group(1))
 
     @staticmethod
     def source_witness():

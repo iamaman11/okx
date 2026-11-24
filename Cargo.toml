@@ -6,6 +6,7 @@ members = [
     "crates/okx-ipc-contracts",
     "crates/okx-github",
     "crates/okx-trading-engine",
+    "crates/okx-native-finance-check",
     "crates/okx-host-controller",
     "crates/okx-host-protocol",
     "crates/okx-host-launcher",

@@ -6,7 +6,7 @@ and a CI job is evidence. They are not interchangeable.
 
 ## Four application owners
 
-The product has four logical owners across 18 Cargo packages. Shared
+The workspace has four logical owners across 19 Cargo packages. Shared
 libraries are compile-time dependencies. The source paths describe ownership
 in the workspace. Runtime boundaries are tracked separately.
 
@@ -68,6 +68,7 @@ checks and usable artifact, and is not yet proved for Engine changes.
 | --- | --- | --- |
 | `okx-trading-engine` | `okx-agent` | Trading process: accounts, positions, financial decisions, exchange sends and recovery |
 | `okx-trade-execution` | `okx-execution` | Engine-owned RiskBook, finance/SQLite and order execution; **not** another process |
+| `okx-native-finance-check` | Engine's `native_finance_acceptance` example | CI-only executable that runs the financial witness binaries and verifies exact-tree receipts |
 | `okx-domain-core` | `okx-kernel` | Shared financial/domain facts and deterministic rules; no I/O or Research time-series implementation |
 | `okx-ipc-contracts` | `okx-protocol` | Shared versioned Engine/Research IPC and typed command contracts |
 | `okx-host-protocol` | new | Host installation/control command and result protocol for CONTROL and MCP bridge; no trading ownership |

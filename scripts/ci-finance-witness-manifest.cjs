@@ -9,8 +9,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const sourcePath = path.join(__dirname, '..', 'crates', 'okx-trading-engine',
-  'examples', 'native_finance_acceptance', 'manifest.rs');
+const sourcePath = path.join(__dirname, '..', 'crates', 'okx-native-finance-check',
+  'src', 'manifest.rs');
 const packages = new Set(['okx-domain-core', 'okx-trade-execution',
   'okx-trading-engine', 'okx-ipc-contracts', 'okx-market-runtime', 'repository']);
 

@@ -20,6 +20,7 @@ ALLOWED = {
     "okx-trade-execution": {"okx-api", "okx-analysis", "okx-domain-core", "okx-observation"},
     "okx-ipc-contracts": {"okx-domain-core"},
     "okx-github": set(),
+    "okx-native-finance-check": set(),
     "okx-cli": {"okx-api"},
     "okx-host-launcher": set(),
     "okx-host-protocol": {"okx-ipc-contracts"},

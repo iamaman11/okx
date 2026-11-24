@@ -45,7 +45,9 @@ For a full Native change, the protected `windows-native` aggregate requires
 **all four** `trading-engine-acceptance-windows`, `trading-engine-regressions-windows`,
 `trading-engine-build-windows` and `trading-safety-acceptance-windows` to succeed.
 The complete budgeted financial collector and isolated OS/SQL/process fixtures
-remain on one runner. Independent remaining regressions run on a separate
+remain on one runner. The `okx-native-finance-check` CI tool builds and tests
+its own validation code without linking Engine, then runs the actual Cargo
+test binaries for the verified source tree. Independent remaining regressions run on a separate
 Windows runner, deriving their exact financial-witness exclusions from the
 current collector manifest. The full Windows package is built in parallel
 from the **same exact source tree**; publication waits for all four jobs.

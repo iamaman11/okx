@@ -160,7 +160,7 @@ function validate(yaml, fileNames) {
   assert.match(regression, /2 passed; 0 failed;/);
   assert.match(regression, /BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED/);
   assert.match(regression, /\$manifestJson = & node scripts\/ci-finance-witness-manifest\.cjs/);
-  assert.doesNotMatch(regression, /cargo run[^\n]*native_finance_acceptance -- --list/);
+  assert.doesNotMatch(regression, /cargo run[^\n]*(?:native_finance_acceptance|okx-native-finance-check) -- --list/);
   assert.match(regression, /K9 worker two-heavy cancellation latency evidence/);
   assert.doesNotMatch(regression, /Mandatory current Rust financial property acceptance|Isolated Native pending-fill crash recovery|name: okx-windows-bundle-/);
   const build = job('trading_engine_build_windows');
@@ -189,7 +189,7 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(prime, /shared-key: trading-engine-release-windows/);
   assert.match(prime, /cache-on-failure: false/);
   assert.match(prime, /cargo test --locked --no-run --all-targets/);
-  assert.match(prime, /cargo build --locked -p okx-trading-engine --example native_finance_acceptance/);
+  assert.match(prime, /cargo build --locked -p okx-native-finance-check/);
   assert.doesNotMatch(prime, /gh release|actions\/upload-artifact|cargo run|cargo build --locked --release/);
   assert.match(prime, /FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED/);
   const windows = job('required_windows');
@@ -268,7 +268,7 @@ assert.throws(() => validate(source.replace('RESEARCH_BASE_PROOF_REQUIRED', 'BYP
 assert.throws(() => validate(source.replace('.commits[-1].sha == $head', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_OWNER_ONLY"', 'true'), workflows));
 assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-manifest.cjs --verify-report', 'echo skipped'), workflows));
-assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list'), workflows));
+assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-native-finance-check -- --list'), workflows));
 assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
 assert.throws(() => validate(source.replace('"trading-engine-acceptance-windows","trading-engine-regressions-windows",', '"trading-engine-acceptance-windows",'), workflows));
 assert.throws(() => validate(source.replace('shared-key: trading-engine-release-windows', 'shared-key: trading-engine-tests-windows'), workflows));
