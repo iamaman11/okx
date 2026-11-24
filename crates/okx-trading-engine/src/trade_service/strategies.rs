@@ -291,40 +291,14 @@ impl TradeService {
         let result = result.map_err(err)?;
         Ok(completed(json!({"instance":result})))
     }
-    pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-        let mut timer = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { break; }
-                }
-                _ = timer.tick() => {
-                    let turn = self.maintenance_turn();
-                    tokio::pin!(turn);
-                    tokio::select! {
-                        _ = &mut turn => {}
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() {
-                                // Only test-local attribution. The 10-second
-                                // maintenance drain and production shutdown
-                                // behavior are intentionally unchanged.
-
-
-                                let drained = tokio::time::timeout(
-                                    Duration::from_secs(10), &mut turn
-                                ).await;
-
-
-                                let _ = drained;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    pub async fn run(&self, shutdown: tokio::sync::watch::Receiver<bool>) {
+        tokio::join!(
+            run_periodic_turn(shutdown.clone(), || self.recovery_turn()),
+            run_periodic_turn(shutdown, || self.strategy_decisions_turn()),
+        );
     }
-    async fn maintenance_turn(&self) {
+
+    async fn recovery_turn(&self) {
         // One existing maintenance owner. The recovery scheduler provides
         // bounded retry spacing for the campaign, while independent account
         // capture keeps advancing cursors every two seconds. No archive
@@ -376,108 +350,112 @@ impl TradeService {
                 };
                 let _ = self.reconcile_restored(&r).await;
 
-                let reconcile = async {
-                    let account = config.account_key.wire();
-                    let mut offset = self.recovery_schedule.lock().await.page(&account);
-                    let mut result = r
+                let account = config.account_key.wire();
+                let mut offset = self.recovery_schedule.lock().await.page(&account);
+                let mut result = r
+                    .execution
+                    .store
+                    .reconcilable_intents_page(deadline(), RECOVERY_BATCH, offset)
+                    .await;
+                if result.as_ref().is_ok_and(Vec::is_empty) && offset != 0 {
+                    // The candidate set shrank after successful recovery.
+                    // Wrap rather than starving fresh lower-index entries.
+                    offset = 0;
+                    result = r
                         .execution
                         .store
-                        .reconcilable_intents_page(deadline(), RECOVERY_BATCH, offset)
+                        .reconcilable_intents_page(deadline(), RECOVERY_BATCH, 0)
                         .await;
-                    if result.as_ref().is_ok_and(Vec::is_empty) && offset != 0 {
-                        // The candidate set shrank after successful recovery.
-                        // Wrap rather than starving fresh lower-index entries.
-                        offset = 0;
-                        result = r
-                            .execution
-                            .store
-                            .reconcilable_intents_page(deadline(), RECOVERY_BATCH, 0)
+                }
+                match result {
+                    Ok(intents) => {
+                        self.recovery_schedule
+                            .lock()
+                            .await
+                            .advance_page(&account, offset, intents.len());
+                        stream::iter(intents)
+                            .for_each_concurrent(2, |intent| {
+                                let r = &r;
+                                let account = account.clone();
+                                async move {
+                                    let scheduled = self
+                                        .recovery_schedule
+                                        .lock()
+                                        .await
+                                        .due(&account, &intent.intent_id, Instant::now());
+                                    if !scheduled {
+                                        return;
+                                    }
+
+                                    let result = self.status_intent(r, &intent.intent_id, None).await;
+
+                                    let settled = result.as_ref().is_ok_and(|value| {
+                                        value["data"]["central_release"]["state"] == "verified"
+                                            || value["data"]["central_release"]["state"]
+                                                == "not_required"
+                                    });
+                                    let incident = {
+                                        let mut schedule = self.recovery_schedule.lock().await;
+                                        if settled {
+                                            schedule.finish(&account, &intent.intent_id);
+                                            false
+                                        } else {
+                                            schedule.overdue_incident(
+                                                &account,
+                                                &intent.intent_id,
+                                                intent.deadline,
+                                                now(),
+                                            )
+                                        }
+                                    };
+                                    if incident {
+                                        let reason = match &result {
+                                            Ok(value) => value["reason_code"]
+                                                .as_str()
+                                                .or_else(|| {
+                                                    value["data"]["central_release"]
+                                                        ["reason_code"]
+                                                        .as_str()
+                                                })
+                                                .unwrap_or("RECONCILIATION_NOT_TERMINAL"),
+                                            Err(_) => "RECONCILIATION_READBACK_FAILED",
+                                        };
+                                        eprintln!(
+                                            "OKX_RECOVERY_INCIDENT_V1 account={} intent={} reason={} state=UNRESOLVED_OVER_30S",
+                                            account, intent.intent_id, reason
+                                        );
+                                    }
+                                }
+                            })
                             .await;
                     }
-                    match result {
-                        Ok(intents) => {
-                            self.recovery_schedule
-                                .lock()
-                                .await
-                                .advance_page(&account, offset, intents.len());
-                            stream::iter(intents)
-                                .for_each_concurrent(2, |intent| {
-                                    let r = &r;
-                                    let account = account.clone();
-                                    async move {
-                                        let scheduled = self
-                                            .recovery_schedule
-                                            .lock()
-                                            .await
-                                            .due(&account, &intent.intent_id, Instant::now());
-                                        if !scheduled {
-                                            return;
-                                        }
-
-                                        let result = self.status_intent(r, &intent.intent_id, None).await;
-
-                                        let settled = result.as_ref().is_ok_and(|value| {
-                                            value["data"]["central_release"]["state"] == "verified"
-                                                || value["data"]["central_release"]["state"]
-                                                    == "not_required"
-                                        });
-                                        let incident = {
-                                            let mut schedule = self.recovery_schedule.lock().await;
-                                            if settled {
-                                                schedule.finish(&account, &intent.intent_id);
-                                                false
-                                            } else {
-                                                schedule.overdue_incident(
-                                                    &account,
-                                                    &intent.intent_id,
-                                                    intent.deadline,
-                                                    now(),
-                                                )
-                                            }
-                                        };
-                                        if incident {
-                                            let reason = match &result {
-                                                Ok(value) => value["reason_code"]
-                                                    .as_str()
-                                                    .or_else(|| {
-                                                        value["data"]["central_release"]
-                                                            ["reason_code"]
-                                                            .as_str()
-                                                    })
-                                                    .unwrap_or("RECONCILIATION_NOT_TERMINAL"),
-                                                Err(_) => "RECONCILIATION_READBACK_FAILED",
-                                            };
-                                            eprintln!(
-                                                "OKX_RECOVERY_INCIDENT_V1 account={} intent={} reason={} state=UNRESOLVED_OVER_30S",
-                                                account, intent.intent_id, reason
-                                            );
-                                        }
-                                    }
-                                })
-                                .await;
-                        }
-                        Err(_) => {
-                            eprintln!(
-                                "OKX_RECOVERY_SCAN_ERROR_V1 account={} state=SQL_READ_FAILED",
-                                account
-                            );
-                        }
+                    Err(_) => {
+                        eprintln!(
+                            "OKX_RECOVERY_SCAN_ERROR_V1 account={} state=SQL_READ_FAILED",
+                            account
+                        );
                     }
-                };
-                let decisions = async {
-                    if let Ok(instances) =
-                        r.execution.store.strategy_instances(deadline()).await
-                    {
-                        for instance in instances.into_iter().filter(|i| i.enabled) {
-                            let _ = self.strategy_turn(&r, &instance).await;
-                        }
-                    }
-                };
-                tokio::join!(reconcile, decisions);
-
+                }
             })
             .await;
     }
+
+    async fn strategy_decisions_turn(&self) {
+        use futures_util::{StreamExt, stream};
+        stream::iter(self.accounts.list().await)
+            .for_each_concurrent(4, |config| async move {
+                let Some(r) = self.accounts.resolve(&config.alias).await else {
+                    return;
+                };
+                if let Ok(instances) = r.execution.store.strategy_instances(deadline()).await {
+                    for instance in instances.into_iter().filter(|i| i.enabled) {
+                        let _ = self.strategy_turn(&r, &instance).await;
+                    }
+                }
+            })
+            .await;
+    }
+
     async fn strategy_turn(
         &self,
         r: &Arc<AccountResources>,
@@ -665,6 +643,71 @@ impl TradeService {
         }
         Ok(())
     }
+}
+
+// Each lane owns at most one turn at a time. In particular, a Research
+// response can delay new signals without delaying the next recovery scan.
+async fn run_periodic_turn<F>(
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut start_turn: impl FnMut() -> F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    let mut timer = tokio::time::interval(Duration::from_secs(1));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let stopping = async {
+        let _ = shutdown.wait_for(|stop| *stop).await;
+    };
+    tokio::pin!(stopping);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut stopping => break,
+            _ = timer.tick() => {}
+        }
+        let turn = start_turn();
+        tokio::pin!(turn);
+        tokio::select! {
+            biased;
+            _ = &mut stopping => {
+                let _ = tokio::time::timeout(Duration::from_secs(10), &mut turn).await;
+                break;
+            }
+            _ = &mut turn => {}
+        }
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(start_paused = true)]
+async fn pending_strategy_turn_does_not_delay_a_second_recovery_turn() {
+    use tokio::sync::{Notify, mpsc, watch};
+
+    let (stop, shutdown) = watch::channel(false);
+    let (events, mut recovery_turns) = mpsc::unbounded_channel();
+    let strategy_started = Notify::new();
+    let strategy_release = Notify::new();
+
+    let recovery = run_periodic_turn(shutdown.clone(), || async {
+        events.send(()).unwrap();
+    });
+    let strategies = run_periodic_turn(shutdown, || async {
+        strategy_started.notify_one();
+        strategy_release.notified().await;
+    });
+    let assert_progress = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            strategy_started.notified().await;
+            assert_eq!(recovery_turns.recv().await, Some(()));
+            assert_eq!(recovery_turns.recv().await, Some(()));
+        })
+        .await
+        .expect("recovery did not advance while the strategy turn was held");
+
+        stop.send(true).unwrap();
+        strategy_release.notify_one();
+    };
+    tokio::join!(recovery, strategies, assert_progress);
 }
 
 fn validate_strategy_risk_budget_usd(
