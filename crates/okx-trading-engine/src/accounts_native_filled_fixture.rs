@@ -146,13 +146,23 @@ pub(super) fn keep_captured_readiness_current(
                     if *stopped.borrow() { break; }
                 }
                 _ = tick.tick() => {
-                    service
+                    let result = service
                         .install_captured_empty_campaign_opening(
                             &authority,
                             Instant::now() + Duration::from_secs(4),
                         )
-                        .await
-                        .expect("original captured campaign readiness remains verifiable");
+                        .await;
+                    match result {
+                        Ok(()) => {}
+                        // The six original history cursors advance on a separate
+                        // two-second source turn. A sliding `now - 2s` cutoff
+                        // can briefly overtake that verified watermark; the
+                        // production owner correctly refuses to refresh it.
+                        // Retry on the next real capture, never fabricate a
+                        // cursor or relax the five-second readiness fence.
+                        Err(reason) if reason == "ENTRY_BASELINE_CAPTURE_PENDING" => {}
+                        Err(reason) => panic!("original captured campaign readiness failed: {reason}"),
+                    }
                 }
             }
         }
@@ -164,7 +174,8 @@ pub(super) async fn stop_captured_readiness(
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
 ) {
-    stop.send(true).unwrap();
+    // Preserve the original worker panic (if any), not a secondary SendError.
+    let _ = stop.send(true);
     tokio::time::timeout(Duration::from_secs(5), task)
         .await
         .unwrap()
@@ -224,51 +235,68 @@ pub(super) async fn opened_market_with_public_client(
     // that *production* source owner to advance all six durable frontiers
     // through the opening cutoff. This synchronizes to actual source evidence
     // rather than racing the scheduler or manufacturing SQL readiness.
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let through_ms = jiff::Timestamp::now()
-                .as_millisecond()
-                .saturating_sub(1_900);
-            let state = fixture
-                ._account
-                .execution
-                .store
-                .source_capture_state(Instant::now() + Duration::from_secs(2))
-                .await
-                .expect("original account source state remains readable");
-            let complete = [
-                state.cursors.spot.as_ref(),
-                state.cursors.margin.as_ref(),
-                state.cursors.swap.as_ref(),
-                state.cursors.futures.as_ref(),
-                state.cursors.options.as_ref(),
-                state.cursors.bills.as_ref(),
-            ]
-            .into_iter()
-            .all(|cursor| {
-                cursor.is_some_and(|cursor| {
-                    cursor.generation > 0
-                        && cursor.cursor.is_empty()
-                        && cursor.coverage_gaps.is_empty()
-                        && cursor.watermark >= through_ms
-                })
-            });
-            if complete {
-                break;
+    let opening_until = Instant::now() + Duration::from_secs(8);
+    loop {
+        tokio::time::timeout_at(opening_until.into(), async {
+            loop {
+                let through_ms = jiff::Timestamp::now()
+                    .as_millisecond()
+                    .saturating_sub(1_900);
+                let state = fixture
+                    ._account
+                    .execution
+                    .store
+                    .source_capture_state(Instant::now() + Duration::from_secs(2))
+                    .await
+                    .expect("original account source state remains readable");
+                let complete = [
+                    state.cursors.spot.as_ref(),
+                    state.cursors.margin.as_ref(),
+                    state.cursors.swap.as_ref(),
+                    state.cursors.futures.as_ref(),
+                    state.cursors.options.as_ref(),
+                    state.cursors.bills.as_ref(),
+                ]
+                .into_iter()
+                .all(|cursor| {
+                    cursor.is_some_and(|cursor| {
+                        cursor.generation > 0
+                            && cursor.cursor.is_empty()
+                            && cursor.coverage_gaps.is_empty()
+                            && cursor.watermark >= through_ms
+                    })
+                });
+                if complete {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("six real captured source frontiers cover the opening interval");
-    fixture
-        .trade
-        .install_captured_empty_campaign_opening(
-            &fixture.authority,
-            Instant::now() + Duration::from_secs(4),
-        )
+        })
         .await
-        .expect("production captured-source opening before external fills");
+        .expect("six real captured source frontiers cover the opening interval");
+        match fixture
+            .trade
+            .install_captured_empty_campaign_opening(
+                &fixture.authority,
+                Instant::now() + Duration::from_secs(4),
+            )
+            .await
+        {
+            Ok(()) => break,
+            // A read of complete cursors is not atomic with the production
+            // opening call: `through = now - 2s` advances meanwhile. Only
+            // this precise capture-lag result can retry, using the next
+            // independently published SQL frontiers and the original owner.
+            Err(reason) if reason == "ENTRY_BASELINE_CAPTURE_PENDING" => {
+                assert!(
+                    Instant::now() < opening_until,
+                    "original source capture never caught up to the opening cutoff"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(reason) => panic!("production captured-source opening failed: {reason}"),
+        }
+    }
     assert!(
         fixture
             .owner
