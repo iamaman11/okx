@@ -103,14 +103,17 @@ def classify(pages):
             return "full"
         return "research"
     if categories & {"host-controller", "host-launcher"}:
-        if "cloudflare" in categories:
-            return "full"
         # CONTROL consumes Launcher: either change needs both owner and
         # consumer checks; the distinct scope remains visible in CI evidence.
         return "host-controller" if "host-controller" in categories else "host-launcher"
     if "cloudflare" in categories:
         return "cloudflare"
     return "docs"
+
+
+def edge_changed(pages):
+    files = verified_entries(pages)
+    return files is not None and any(category(entry["filename"]) == "cloudflare" for entry in files)
 
 
 def dependency_candidate(pages):
@@ -136,14 +139,11 @@ def dependency_candidate(pages):
             kinds.add("research")
         elif path in _HOST_MANIFESTS or category(path) in {"host-controller", "host-launcher"}:
             kinds.add("host")
-        elif category(path) in {"docs", "cloudflare"}:
-            if category(path) == "cloudflare" and "host" in kinds:
-                return "none"
-        else:
+        elif category(path) not in {"docs", "cloudflare"}:
             return "none"
     if kinds == {"research"}:
         return "research"
-    if kinds == {"host"} and not any(category(entry["filename"]) == "cloudflare" for entry in files):
+    if kinds == {"host"}:
         return "host-controller" if any(path.startswith("crates/okx-host-controller/") for path in manifests +
                                    [entry["filename"] for entry in files]) else "host-launcher"
     return "none"
@@ -196,6 +196,10 @@ def _self_test() -> None:
     }
     for wanted, selections in cases.items():
         assert all(classify(pages) == wanted for pages in selections)
+    host_and_edge = files("crates/okx-host-controller/src/main.rs", "cloudflare/okx-mcp/src/mcp.ts")
+    assert classify(host_and_edge) == "host-controller"
+    assert edge_changed(host_and_edge)
+    assert not edge_changed(files("crates/okx-host-controller/src/main.rs", "README.md"))
     unsafe = [
         [], [[]], [[{}]],
         files("crates/okx-domain-core/src/query_plan.rs"),
@@ -209,7 +213,6 @@ def _self_test() -> None:
         files("crates/okx-host-controller/src/migration.json"),
         files("crates/okx-host-launcher/src/main.rs", "crates/okx-trading-engine/src/main.rs"),
         files("crates/okx-host-controller/src/main.rs", "crates/okx-ipc-contracts/src/lib.rs"),
-        files("crates/okx-host-controller/src/main.rs", "cloudflare/okx-mcp/src/mcp.ts"),
         files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs"),
         files("Cargo.toml"), files("Cargo.lock"),
         files("crates/okx-research-service/Cargo.toml"),
@@ -238,6 +241,7 @@ def _self_test() -> None:
         ("host-controller", files("crates/okx-host-controller/Cargo.toml", "Cargo.lock")),
         ("host-controller", files("crates/okx-host-controller/Cargo.toml", "crates/okx-host-launcher/Cargo.toml")),
         ("host-launcher", files("crates/okx-host-launcher/Cargo.toml", "Cargo.lock")),
+        ("host-launcher", files("crates/okx-host-launcher/Cargo.toml", "cloudflare/okx-mcp/src/mcp.ts")),
     ):
         assert classify(selection) == "full"  # never grant scope before Cargo proof
         assert dependency_candidate(selection) == wanted
@@ -245,7 +249,6 @@ def _self_test() -> None:
         files("Cargo.lock"), files("Cargo.toml", "crates/okx-research-service/Cargo.toml"),
         files("crates/okx-ipc-contracts/Cargo.toml", "Cargo.lock"),
         files("crates/okx-host-launcher/Cargo.toml", "crates/okx-research-service/Cargo.toml"),
-        files("crates/okx-host-launcher/Cargo.toml", "cloudflare/okx-mcp/src/mcp.ts"),
         files("crates/okx-research-service/Cargo.toml", ".github/workflows/ci.yml"),
         [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "removed"}]],
         [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "renamed", "previous_filename": "x"}]],
@@ -258,7 +261,9 @@ def _self_test() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--dependency-candidate", action="store_true")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--dependency-candidate", action="store_true")
+    output.add_argument("--edge-changed", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         _self_test()
@@ -267,7 +272,10 @@ def main() -> int:
         pages = json.load(sys.stdin)
     except (ValueError, UnicodeError):
         return 1
-    print(dependency_candidate(pages) if args.dependency_candidate else classify(pages))
+    if args.edge_changed:
+        print("true" if edge_changed(pages) else "false")
+    else:
+        print(dependency_candidate(pages) if args.dependency_candidate else classify(pages))
     return 0
 
 

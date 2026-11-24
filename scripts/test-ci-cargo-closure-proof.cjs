@@ -45,6 +45,8 @@ const head = metadata(), before = metadata(base);
 
 assert.equal(verify(before, head, research, 'research').protected_closures_identical, true);
 assert.equal(verify(before, head, host, 'host-controller').target, 'x86_64-pc-windows-msvc');
+assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock',
+  'cloudflare/okx-mcp/src/mcp.ts'), 'host-controller').protected_closures_identical, true);
 assert.equal(verify(before, head, files('crates/okx-host-launcher/Cargo.toml'),
   'host-launcher').protected_closures_identical, true);
 

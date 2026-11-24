@@ -155,6 +155,7 @@ jobs:
       native_proof: ${{ steps.classify.outputs.native_proof }}
       component_scope: ${{ steps.proven_scope.outputs.scope }}
       research_only: ${{ steps.classify.outputs.research_only }}
+      edge_required: ${{ steps.classify.outputs.edge_required }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
@@ -177,6 +178,7 @@ jobs:
           set -euo pipefail
           scope=full
           candidate=none
+          edge=false
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base="$PR_BASE"
           elif [[ "$FORCED_PUSH" != true ]]; then
@@ -197,6 +199,7 @@ jobs:
                ' "$RUNNER_TEMP/ci-compare.json" >/dev/null; then
             jq -c '[.files]' "$RUNNER_TEMP/ci-compare.json" > "$RUNNER_TEMP/ci-files.json"
             scope="$(python3 -B scripts/check_ci_native_scope.py < "$RUNNER_TEMP/ci-files.json")"
+            edge="$(python3 -B scripts/check_ci_native_scope.py --edge-changed < "$RUNNER_TEMP/ci-files.json")"
             if [[ "${{ github.event_name }}" == "pull_request" ]]; then
               candidate="$(python3 -B scripts/check_ci_native_scope.py --dependency-candidate < "$RUNNER_TEMP/ci-files.json")"
             fi
@@ -205,6 +208,7 @@ jobs:
           case "$candidate" in none|research|host-controller|host-launcher) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "manifest_candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "edge_changed=$edge" >> "$GITHUB_OUTPUT"
           echo "FILE_SCOPE=$scope; MANIFEST_CANDIDATE=$candidate"
       # Only a narrow manifest+optional lock candidate incurs an extra Cargo
       # resolver check. Every other Ready PR keeps its existing fast selector.
@@ -291,6 +295,12 @@ jobs:
           fi
 
           scope="${{ steps.proven_scope.outputs.scope }}"
+          case "$scope" in
+            docs) edge_required=false ;;
+            host-controller|host-launcher) edge_required="${{ steps.file_scope.outputs.edge_changed }}" ;;
+            *) edge_required=true ;;
+          esac
+          echo "edge_required=$edge_required" >> "$GITHUB_OUTPUT"
           # Docs and Edge never need a lookup of accepted Native runs.
           if [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]; then
             echo "build_required=true" >> "$GITHUB_OUTPUT"
@@ -529,7 +539,7 @@ jobs:
   cloudflare_mcp_contracts:
     name: cloudflare-mcp-contracts
     needs: component_impact
-    if: needs.component_impact.outputs.build_required == 'true' && !contains(fromJSON('["docs","host-controller","host-launcher"]'), needs.component_impact.outputs.component_scope)
+    if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.edge_required == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -601,10 +611,10 @@ jobs:
           else
             test "${{ needs.rust_tests_linux.result }}" = "success"
           fi
-          if [[ "${{ needs.component_impact.outputs.component_scope }}" == "docs" || "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
-          else
+          if [[ "${{ needs.component_impact.outputs.edge_required }}" == "true" ]]; then
             test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
+          else
+            test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
           fi
           echo "REPOSITORY_GUARD_AND_LINUX=PASS"
 
@@ -1114,6 +1124,11 @@ jobs:
         run: |
           set -euo pipefail
           test "${{ needs.component_impact.result }}" = "success"
+          if [[ "${{ needs.component_impact.outputs.build_required }}" == "true" && "${{ needs.component_impact.outputs.edge_required }}" == "true" ]]; then
+            test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
+          else
+            test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
+          fi
           if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
@@ -1134,7 +1149,6 @@ jobs:
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "success"
-            test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.research_service_tests_windows.outputs.base_head }}"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
@@ -1144,7 +1158,6 @@ jobs:
             test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.host_controller_launcher_checks.result }}" = "success"
             test "${{ needs.research_service_tests_windows.result }}" = "skipped"
-            test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
             echo "WINDOWS_NATIVE_PROOF=HOST_COMPONENTS_TESTED_NO_ENGINE_REBUILD"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
@@ -1155,11 +1168,6 @@ jobs:
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "skipped"
-            if [[ "$scope" == "docs" ]]; then
-              test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
-            else
-              test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
-            fi
             echo "WINDOWS_NATIVE_PROOF=COMPONENT_${scope}_NO_NATIVE_SOURCE_CHANGED"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           else

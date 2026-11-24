@@ -79,6 +79,7 @@ function validate(yaml, fileNames) {
   assert.match(classify, /scope="\$\{\{ steps.proven_scope.outputs.scope \}\}"/);
   assert.match(classify, /compare\/\$base\.\.\.\$CHECKED_HEAD/);
   assert.match(classify, /\.commits\[-1\]\.sha == \$head/);
+  assert.match(classify, /host-controller\|host-launcher\) edge_required="\$\{\{ steps\.file_scope\.outputs\.edge_changed \}\}"/);
   assert.doesNotMatch(classify, /pulls\/\$PR_NUMBER\/files|prepare-research-release\.ps1/);
   assert.match(classify, /"research_only=true" >> "\$GITHUB_OUTPUT"/);
   assert.match(classify, /native_proof=RESEARCH_OWNER_ONLY/);
@@ -115,6 +116,7 @@ function validate(yaml, fileNames) {
   const edge = job('cloudflare_mcp_contracts');
   assert.doesNotMatch(linux, /npm ci|npm run check|test-native-finance-retirement-do\.mjs|actions\/setup-node@/);
   assert.match(edge, /npm ci --ignore-scripts --no-audit --no-fund/);
+  assert.match(edge, /needs\.component_impact\.outputs\.edge_required == 'true'/);
   assert.match(edge, /npm run check/);
   assert.match(edge, /node scripts\/test-native-finance-retirement-do\.mjs/);
   const engine = job('trading_engine_acceptance_windows');

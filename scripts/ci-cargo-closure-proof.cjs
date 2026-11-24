@@ -44,7 +44,7 @@ function candidateFiles(input, scope) {
   if (!files.every(file => {
     if (file === 'Cargo.lock' || docs(file)) return true;
     if (scope === 'research') return research(file) || file.startsWith('cloudflare/okx-mcp/');
-    return host(file) || HOST.has(file);
+    return host(file) || HOST.has(file) || file.startsWith('cloudflare/okx-mcp/');
   })) throw Error('MIXED_OR_UNSAFE_CARGO_DIFF');
   // A second owner's Cargo.toml can change the Rust feature graph even when
   // a filtered resolver misses an optional target. Such PRs always run full.

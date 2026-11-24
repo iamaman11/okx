@@ -145,7 +145,8 @@ CI classifies the diff for the exact commits in the GitHub event. Docs-only
 changes use the protected classification and aggregate checks. Edge changes
 also run the Worker contract job. Both routes skip Rust setup, Cargo audit,
 Windows jobs and Native release publication. Research and Host changes run
-their owner jobs. A Research release verifies and fetches the accepted Native
+their owner jobs. A Host and Edge change runs their two component jobs without
+rebuilding the Engine. A Research release verifies and fetches the accepted Native
 base once, in the job that assembles the artifact.
 
 On the Windows production dependency graph, `okx-analysis`, `okx-strategy-core`
