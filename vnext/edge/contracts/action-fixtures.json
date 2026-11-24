@@ -1,0 +1,2641 @@
+[
+  {
+    "tool": "accounts",
+    "action": "list",
+    "positive": {
+      "action": "list"
+    },
+    "negative": [
+      {
+        "action": "list",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
+      }
+    ]
+  },
+  {
+    "tool": "accounts",
+    "action": "status",
+    "positive": {
+      "action": "status",
+      "account": "fixture"
+    },
+    "negative": [
+      {
+        "action": "status",
+        "account": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "accounts",
+    "action": "connect",
+    "positive": {
+      "action": "connect",
+      "idempotency_key": "command_0001",
+      "credential_ref": "fixture",
+      "alias": "fixture",
+      "limits": {
+        "max_modelled_loss_usdt": "1",
+        "max_order_loss_usdt": "1",
+        "max_notional_usdt": "1",
+        "max_leverage": "1",
+        "max_daily_realized_loss_usdt": "1",
+        "max_drawdown_ratio": "1",
+        "allowed_instruments": [
+          "fixture"
+        ]
+      },
+      "enabled": true
+    },
+    "negative": [
+      {
+        "action": "connect",
+        "idempotency_key": "command_0001",
+        "credential_ref": "fixture",
+        "alias": "fixture",
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        },
+        "enabled": true,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "idempotency_key": "command_0001",
+        "credential_ref": "fixture",
+        "alias": "fixture",
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        },
+        "enabled": true
+      },
+      {
+        "action": 12,
+        "idempotency_key": "command_0001",
+        "credential_ref": "fixture",
+        "alias": "fixture",
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        },
+        "enabled": true
+      }
+    ]
+  },
+  {
+    "tool": "accounts",
+    "action": "pause",
+    "positive": {
+      "action": "pause",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "expected_revision": 0
+    },
+    "negative": [
+      {
+        "action": "pause",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0
+      }
+    ]
+  },
+  {
+    "tool": "accounts",
+    "action": "set_limits",
+    "positive": {
+      "action": "set_limits",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "expected_revision": 0,
+      "limits": {
+        "max_modelled_loss_usdt": "1",
+        "max_order_loss_usdt": "1",
+        "max_notional_usdt": "1",
+        "max_leverage": "1",
+        "max_daily_realized_loss_usdt": "1",
+        "max_drawdown_ratio": "1",
+        "allowed_instruments": [
+          "fixture"
+        ]
+      }
+    },
+    "negative": [
+      {
+        "action": "set_limits",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0,
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0,
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        }
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "expected_revision": 0,
+        "limits": {
+          "max_modelled_loss_usdt": "1",
+          "max_order_loss_usdt": "1",
+          "max_notional_usdt": "1",
+          "max_leverage": "1",
+          "max_daily_realized_loss_usdt": "1",
+          "max_drawdown_ratio": "1",
+          "allowed_instruments": [
+            "fixture"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "list",
+    "positive": {
+      "action": "list",
+      "account": "fixture"
+    },
+    "negative": [
+      {
+        "action": "list",
+        "account": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "status",
+    "positive": {
+      "action": "status",
+      "account": "fixture",
+      "instance_id": "fixture"
+    },
+    "negative": [
+      {
+        "action": "status",
+        "account": "fixture",
+        "instance_id": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "instance_id": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "instance_id": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "create",
+    "positive": {
+      "action": "create",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture",
+      "definition_id": "fixture",
+      "version": 1,
+      "parameters": {
+        "fast": 1,
+        "slow": 2
+      },
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "budget_usd": "1"
+    },
+    "negative": [
+      {
+        "action": "create",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "definition_id": "fixture",
+        "version": 1,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "budget_usd": "1",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "definition_id": "fixture",
+        "version": 1,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "budget_usd": "1"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "definition_id": "fixture",
+        "version": 1,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "budget_usd": "1"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "update",
+    "positive": {
+      "action": "update",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture",
+      "expected_revision": 0,
+      "parameters": {
+        "fast": 1,
+        "slow": 2
+      },
+      "budget_usd": "1"
+    },
+    "negative": [
+      {
+        "action": "update",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 0,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "budget_usd": "1",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 0,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "budget_usd": "1"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 0,
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "budget_usd": "1"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "start",
+    "positive": {
+      "action": "start",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture"
+    },
+    "negative": [
+      {
+        "action": "start",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "capital_assign",
+    "positive": {
+      "action": "capital_assign",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture",
+      "direction": "assign",
+      "amount_usd": "1",
+      "expected_authority_revision": 1
+    },
+    "negative": [
+      {
+        "action": "capital_assign",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "direction": "assign",
+        "amount_usd": "1",
+        "expected_authority_revision": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "direction": "assign",
+        "amount_usd": "1",
+        "expected_authority_revision": 1
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "direction": "assign",
+        "amount_usd": "1",
+        "expected_authority_revision": 1
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "screen",
+    "positive": {
+      "action": "screen",
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "fields": [
+        "returns"
+      ],
+      "limit": 1,
+      "instruments": [
+        "BTC-USDT-SWAP"
+      ]
+    },
+    "negative": [
+      {
+        "action": "screen",
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "fields": [
+          "returns"
+        ],
+        "limit": 1,
+        "instruments": [
+          "BTC-USDT-SWAP"
+        ],
+        "raw_rpc": "forbidden"
+      },
+      {
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "fields": [
+          "returns"
+        ],
+        "limit": 1,
+        "instruments": [
+          "BTC-USDT-SWAP"
+        ]
+      },
+      {
+        "action": 12,
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "fields": [
+          "returns"
+        ],
+        "limit": 1,
+        "instruments": [
+          "BTC-USDT-SWAP"
+        ]
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "instruments",
+    "positive": {
+      "action": "instruments",
+      "asset": "fixture"
+    },
+    "negative": [
+      {
+        "action": "instruments",
+        "asset": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "asset": "fixture"
+      },
+      {
+        "action": 12,
+        "asset": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "snapshot",
+    "positive": {
+      "action": "snapshot",
+      "instrument": "fixture"
+    },
+    "negative": [
+      {
+        "action": "snapshot",
+        "instrument": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "instrument": "fixture"
+      },
+      {
+        "action": 12,
+        "instrument": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "microstructure",
+    "positive": {
+      "action": "microstructure",
+      "instrument": "fixture"
+    },
+    "negative": [
+      {
+        "action": "microstructure",
+        "instrument": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "instrument": "fixture"
+      },
+      {
+        "action": 12,
+        "instrument": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "market",
+    "action": "capabilities",
+    "positive": {
+      "action": "capabilities"
+    },
+    "negative": [
+      {
+        "action": "capabilities",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "record_decision",
+    "positive": {
+      "action": "record_decision",
+      "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "name": "fixture",
+      "hypothesis": "fixture",
+      "status": "accepted",
+      "reason": "fixture"
+    },
+    "negative": [
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": 12,
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": " ",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "яяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяя",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": " ",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "яяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяя",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": " "
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "яяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяя"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "approved_to_trade",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "fixture",
+        "expected_decision_id": "wrong"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "fixture",
+        "status": "accepted",
+        "reason": "fixture",
+        "account": "a"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"",
+        "status": "accepted",
+        "reason": "fixture"
+      },
+      {
+        "action": "record_decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "fixture",
+        "hypothesis": "\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\",
+        "status": "accepted",
+        "reason": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "decision",
+    "positive": {
+      "action": "decision",
+      "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "negative": [
+      {
+        "action": "decision",
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "action": 12,
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "backtest",
+    "positive": {
+      "action": "backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "parameters": {
+        "fast": 9,
+        "slow": 21
+      }
+    },
+    "negative": [
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        }
+      },
+      {
+        "action": 12,
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        }
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "benchmark",
+    "positive": {
+      "action": "benchmark",
+      "idempotency_key": "command_0001"
+    },
+    "negative": [
+      {
+        "action": "benchmark",
+        "idempotency_key": "command_0001",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "idempotency_key": "command_0001"
+      },
+      {
+        "action": 12,
+        "idempotency_key": "command_0001"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "status",
+    "positive": {
+      "action": "status",
+      "job_id": "fixture"
+    },
+    "negative": [
+      {
+        "action": "status",
+        "job_id": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "job_id": "fixture"
+      },
+      {
+        "action": 12,
+        "job_id": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "cancel",
+    "positive": {
+      "action": "cancel",
+      "job_id": "fixture",
+      "idempotency_key": "command_0001"
+    },
+    "negative": [
+      {
+        "action": "cancel",
+        "job_id": "fixture",
+        "idempotency_key": "command_0001",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "job_id": "fixture",
+        "idempotency_key": "command_0001"
+      },
+      {
+        "action": 12,
+        "job_id": "fixture",
+        "idempotency_key": "command_0001"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "result",
+    "positive": {
+      "action": "result",
+      "job_id": "fixture",
+      "limit": 1
+    },
+    "negative": [
+      {
+        "action": "result",
+        "job_id": "fixture",
+        "limit": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "job_id": "fixture",
+        "limit": 1
+      },
+      {
+        "action": 12,
+        "job_id": "fixture",
+        "limit": 1
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "capabilities",
+    "positive": {
+      "action": "capabilities"
+    },
+    "negative": [
+      {
+        "action": "capabilities",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "economics",
+    "positive": {
+      "action": "economics",
+      "cases": [
+        {
+          "instrument": "BTC-USDT",
+          "product": "spot",
+          "side": "long",
+          "quantity": "2",
+          "entry_price": "100",
+          "exit_price": "110",
+          "fees": {
+            "currency": "USDT",
+            "amount": "0"
+          },
+          "funding": {
+            "currency": "USDT",
+            "amount": "0"
+          }
+        }
+      ],
+      "data_mode": "counterfactual"
+    },
+    "negative": [
+      {
+        "action": "economics",
+        "cases": [
+          {
+            "instrument": "BTC-USDT",
+            "product": "spot",
+            "side": "long",
+            "quantity": "2",
+            "entry_price": "100",
+            "exit_price": "110",
+            "fees": {
+              "currency": "USDT",
+              "amount": "0"
+            },
+            "funding": {
+              "currency": "USDT",
+              "amount": "0"
+            }
+          }
+        ],
+        "data_mode": "counterfactual",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "cases": [
+          {
+            "instrument": "BTC-USDT",
+            "product": "spot",
+            "side": "long",
+            "quantity": "2",
+            "entry_price": "100",
+            "exit_price": "110",
+            "fees": {
+              "currency": "USDT",
+              "amount": "0"
+            },
+            "funding": {
+              "currency": "USDT",
+              "amount": "0"
+            }
+          }
+        ],
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": 12,
+        "cases": [
+          {
+            "instrument": "BTC-USDT",
+            "product": "spot",
+            "side": "long",
+            "quantity": "2",
+            "entry_price": "100",
+            "exit_price": "110",
+            "fees": {
+              "currency": "USDT",
+              "amount": "0"
+            },
+            "funding": {
+              "currency": "USDT",
+              "amount": "0"
+            }
+          }
+        ],
+        "data_mode": "counterfactual"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "validate",
+    "positive": {
+      "action": "validate",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "parameters": {
+        "fast": 1,
+        "slow": 2
+      },
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "counterfactual"
+    },
+    "negative": [
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": 12,
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "preview",
+    "positive": {
+      "action": "preview",
+      "account": "fixture",
+      "operation": "open",
+      "strategy_instance": "fixture",
+      "instrument": "fixture",
+      "side": "long",
+      "sizing": {
+        "contracts": "1"
+      },
+      "order": {
+        "type": "fok",
+        "max_slippage_bps": 0
+      },
+      "protection": {
+        "stop_distance_bps": 50
+      }
+    },
+    "negative": [
+      {
+        "action": "preview",
+        "account": "fixture",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "protection": {
+          "stop_distance_bps": 50
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "protection": {
+          "stop_distance_bps": 50
+        }
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "protection": {
+          "stop_distance_bps": 50
+        }
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "execute",
+    "positive": {
+      "action": "execute",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "operation": "open",
+      "strategy_instance": "fixture",
+      "instrument": "fixture",
+      "side": "long",
+      "sizing": {
+        "contracts": "1"
+      },
+      "order": {
+        "type": "fok",
+        "max_slippage_bps": 0
+      },
+      "expires_in_ms": 1,
+      "protection": {
+        "stop_distance_bps": 50
+      }
+    },
+    "negative": [
+      {
+        "action": "execute",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "expires_in_ms": 1,
+        "protection": {
+          "stop_distance_bps": 50
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "expires_in_ms": 1,
+        "protection": {
+          "stop_distance_bps": 50
+        }
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "operation": "open",
+        "strategy_instance": "fixture",
+        "instrument": "fixture",
+        "side": "long",
+        "sizing": {
+          "contracts": "1"
+        },
+        "order": {
+          "type": "fok",
+          "max_slippage_bps": 0
+        },
+        "expires_in_ms": 1,
+        "protection": {
+          "stop_distance_bps": 50
+        }
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "status",
+    "positive": {
+      "action": "status",
+      "account": "fixture",
+      "reference": "fixture"
+    },
+    "negative": [
+      {
+        "action": "status",
+        "account": "fixture",
+        "reference": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "reference": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "reference": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "cancel",
+    "positive": {
+      "action": "cancel",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "reference": "fixture"
+    },
+    "negative": [
+      {
+        "action": "cancel",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "close",
+    "positive": {
+      "action": "close",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "reference": "fixture",
+      "expires_in_ms": 1
+    },
+    "negative": [
+      {
+        "action": "close",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture",
+        "expires_in_ms": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture",
+        "expires_in_ms": 1
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "reference": "fixture",
+        "expires_in_ms": 1
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "capabilities",
+    "positive": {
+      "action": "capabilities",
+      "account": "fixture"
+    },
+    "negative": [
+      {
+        "action": "capabilities",
+        "account": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "trade",
+    "action": "preflight",
+    "positive": {
+      "action": "preflight",
+      "account": "fixture"
+    },
+    "negative": [
+      {
+        "action": "preflight",
+        "account": "fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture"
+      },
+      {
+        "action": 12,
+        "account": "fixture"
+      }
+    ]
+  },
+  {
+    "tool": "portfolio",
+    "action": "summary",
+    "positive": {
+      "action": "summary",
+      "accounts": [
+        "fixture"
+      ],
+      "start_ms": 0,
+      "end_ms": 100000,
+      "limit": 1
+    },
+    "negative": [
+      {
+        "action": "summary",
+        "accounts": [
+          "fixture"
+        ],
+        "start_ms": 0,
+        "end_ms": 100000,
+        "limit": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "accounts": [
+          "fixture"
+        ],
+        "start_ms": 0,
+        "end_ms": 100000,
+        "limit": 1
+      },
+      {
+        "action": 12,
+        "accounts": [
+          "fixture"
+        ],
+        "start_ms": 0,
+        "end_ms": 100000,
+        "limit": 1
+      }
+    ]
+  },
+  {
+    "tool": "portfolio",
+    "action": "scenario",
+    "positive": {
+      "action": "scenario",
+      "equity_usd": "1",
+      "positions": [
+        {
+          "instrument": "fixture",
+          "side": "long",
+          "notional_usd": "1",
+          "margin_usd": "1",
+          "price_shock_bps": -10000,
+          "volatility_bps": 0,
+          "liquidity_cost_bps": 0
+        }
+      ],
+      "correlations": []
+    },
+    "negative": [
+      {
+        "action": "scenario",
+        "equity_usd": "1",
+        "positions": [
+          {
+            "instrument": "fixture",
+            "side": "long",
+            "notional_usd": "1",
+            "margin_usd": "1",
+            "price_shock_bps": -10000,
+            "volatility_bps": 0,
+            "liquidity_cost_bps": 0
+          }
+        ],
+        "correlations": [],
+        "raw_rpc": "forbidden"
+      },
+      {
+        "equity_usd": "1",
+        "positions": [
+          {
+            "instrument": "fixture",
+            "side": "long",
+            "notional_usd": "1",
+            "margin_usd": "1",
+            "price_shock_bps": -10000,
+            "volatility_bps": 0,
+            "liquidity_cost_bps": 0
+          }
+        ],
+        "correlations": []
+      },
+      {
+        "action": 12,
+        "equity_usd": "1",
+        "positions": [
+          {
+            "instrument": "fixture",
+            "side": "long",
+            "notional_usd": "1",
+            "margin_usd": "1",
+            "price_shock_bps": -10000,
+            "volatility_bps": 0,
+            "liquidity_cost_bps": 0
+          }
+        ],
+        "correlations": []
+      }
+    ]
+  },
+  {
+    "tool": "diagnostics",
+    "action": "explain",
+    "positive": {
+      "action": "explain",
+      "reference": "intent_fixture"
+    },
+    "negative": [
+      {
+        "action": "explain",
+        "reference": "intent_fixture",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "reference": "intent_fixture"
+      },
+      {
+        "action": 12,
+        "reference": "intent_fixture"
+      }
+    ]
+  },
+  {
+    "tool": "diagnostics",
+    "action": "runtime",
+    "positive": {
+      "action": "runtime"
+    },
+    "negative": [
+      {
+        "action": "runtime",
+        "raw_rpc": "forbidden"
+      },
+      {},
+      {
+        "action": 12
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "grid",
+    "positive": {
+      "action": "grid",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "variants": [
+        {
+          "fast": 9,
+          "slow": 21
+        }
+      ]
+    },
+    "negative": [
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 9,
+            "slow": 21
+          }
+        ],
+        "raw_rpc": "forbidden"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "backtest_batch",
+    "positive": {
+      "action": "backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "parameters": {
+        "fast": 9,
+        "slow": 21
+      }
+    },
+    "negative": [
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "ASSET0-USDT-SWAP",
+          "ASSET1-USDT-SWAP",
+          "ASSET2-USDT-SWAP",
+          "ASSET3-USDT-SWAP",
+          "ASSET4-USDT-SWAP",
+          "ASSET5-USDT-SWAP",
+          "ASSET6-USDT-SWAP",
+          "ASSET7-USDT-SWAP",
+          "ASSET8-USDT-SWAP"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "BTC-USDT-SWAP",
+          "BTC-USDT-SWAP"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        }
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "grid_batch",
+    "positive": {
+      "action": "grid",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "variants": [
+        {
+          "fast": 9,
+          "slow": 21
+        }
+      ]
+    },
+    "negative": [
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "ASSET0-USDT-SWAP",
+          "ASSET1-USDT-SWAP",
+          "ASSET2-USDT-SWAP",
+          "ASSET3-USDT-SWAP",
+          "ASSET4-USDT-SWAP",
+          "ASSET5-USDT-SWAP",
+          "ASSET6-USDT-SWAP",
+          "ASSET7-USDT-SWAP",
+          "ASSET8-USDT-SWAP"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 9,
+            "slow": 21
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "BTC-USDT-SWAP",
+          "BTC-USDT-SWAP"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 9,
+            "slow": 21
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 9,
+            "slow": 21
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "backtest_composition",
+    "positive": {
+      "action": "backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_momentum_confirm_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "parameters": {
+        "fast": 9,
+        "slow": 21
+      }
+    },
+    "negative": [
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "unregistered_source_code",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        }
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "grid_composition",
+    "positive": {
+      "action": "grid",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_momentum_confirm_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "variants": [
+        {
+          "fast": 9,
+          "slow": 21
+        }
+      ]
+    },
+    "negative": [
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "unregistered_source_code",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 9,
+            "slow": 21
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "validate_composition",
+    "positive": {
+      "action": "validate",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_momentum_confirm_v1",
+      "parameters": {
+        "fast": 1,
+        "slow": 2
+      },
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "counterfactual"
+    },
+    "negative": [
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "unregistered_source_code",
+        "parameters": {
+          "fast": 1,
+          "slow": 2
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "backtest_breakout",
+    "positive": {
+      "action": "backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "close_breakout_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "parameters": {
+        "lookback": 20
+      }
+    },
+    "negative": [
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "lookback": 1
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "lookback": 1001
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "lookback": 20
+        }
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "grid_breakout",
+    "positive": {
+      "action": "grid",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "close_breakout_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "variants": [
+        {
+          "lookback": 20
+        }
+      ]
+    },
+    "negative": [
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "lookback": 1
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "lookback": 1001
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 9,
+            "slow": 21
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "lookback": 20
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "validate_breakout",
+    "positive": {
+      "action": "validate",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "close_breakout_v1",
+      "parameters": {
+        "lookback": 20
+      },
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "counterfactual"
+    },
+    "negative": [
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "parameters": {
+          "lookback": 1
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "parameters": {
+          "lookback": 1001
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "close_breakout_v1",
+        "parameters": {
+          "fast": 9,
+          "slow": 21
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "parameters": {
+          "lookback": 20
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "backtest_period_bounds",
+    "positive": {
+      "action": "backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "parameters": {
+        "fast": 999,
+        "slow": 1000
+      }
+    },
+    "negative": [
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 999,
+          "slow": 1001
+        }
+      },
+      {
+        "action": "backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "parameters": {
+          "fast": 1000,
+          "slow": 1000
+        }
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "grid_period_bounds",
+    "positive": {
+      "action": "grid",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "variants": [
+        {
+          "fast": 999,
+          "slow": 1000
+        }
+      ]
+    },
+    "negative": [
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 999,
+            "slow": 1001
+          }
+        ]
+      },
+      {
+        "action": "grid",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "variants": [
+          {
+            "fast": 1000,
+            "slow": 1000
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "validate_period_bounds",
+    "positive": {
+      "action": "validate",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 1000,
+      "start_ms": 1,
+      "end_ms": 100001,
+      "strategy_id": "ema_cross_v1",
+      "parameters": {
+        "fast": 999,
+        "slow": 1000
+      },
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "counterfactual"
+    },
+    "negative": [
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "parameters": {
+          "fast": 999,
+          "slow": 1001
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      },
+      {
+        "action": "validate",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 1000,
+        "start_ms": 1,
+        "end_ms": 100001,
+        "strategy_id": "ema_cross_v1",
+        "parameters": {
+          "fast": 1000,
+          "slow": 1000
+        },
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "counterfactual"
+      }
+    ]
+  }
+]

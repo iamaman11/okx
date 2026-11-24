@@ -1,0 +1,68 @@
+import {defaultHandler} from './auth.js';
+import {RuntimeSession} from './runtime_session.js';
+import {initial,account} from './account_governance.test.js';
+import {FRAME_SCHEMA} from './shared.js';
+class Storage{map=new Map();async get(k:string){return structuredClone(this.map.get(k));}async list(opts:{prefix:string;limit:number}){return new Map([...this.map.entries()].filter(([key])=>key.startsWith(opts.prefix)).slice(0,opts.limit));}async put(k:string,v:any){this.map.set(k,structuredClone(v));}async delete(keys:string[]){let n=0;for(const key of keys)if(this.map.delete(key))n++;return n;}async transaction(fn:any){const backup=structuredClone(this.map);try{return await fn(this);}catch(e){this.map=backup;throw e;}}}
+const storage=new Storage(),owner=new RuntimeSession({storage},{} as any);
+let calls=0;const env:any={MCP_OWNER_SECRET:'fixture_secret',RUNTIME:{idFromName:()=>0,get:()=>({fetch:(r:Request)=>{calls++;return owner.fetch(r);}})}};
+const releaseHealth:any=await(await defaultHandler.fetch(new Request('https://fixture/health'),
+ {...env,RELEASE_SOURCE_TREE:'a'.repeat(40)})).json();
+if(releaseHealth.status!=='ok'||releaseHealth.release_source_tree!=='a'.repeat(40))
+ throw Error('health must expose the exact Worker deploy source tree');
+const unboundHealth:any=await(await defaultHandler.fetch(new Request('https://fixture/health'),
+ {...env,RELEASE_SOURCE_TREE:'not-a-git-tree'})).json();
+if(unboundHealth.release_source_tree!==null)throw Error('health must not invent Worker provenance');
+console.log('health_worker_release_tree_readback PASS');
+const body={configuration:initial,operation_id:'initialize_0001',contract:FRAME_SCHEMA,release_sha256:'a'.repeat(64)};
+const req=(auth?:string,payload=body)=>new Request('https://fixture/installation/initialize',{method:'POST',headers:auth?{authorization:auth}:{},body:JSON.stringify(payload)});
+if((await defaultHandler.fetch(req(),env)).status!==401||calls!==0)throw Error('initialize must authenticate owner');
+if((await defaultHandler.fetch(req('Bearer fixture_secret'),env)).status!==200)throw Error('owner initialization failed');
+if((await defaultHandler.fetch(req('Bearer fixture_secret'),env)).status!==200)throw Error('lost init response exact retry');
+if((await defaultHandler.fetch(req('Bearer fixture_secret',{...body,release_sha256:'b'.repeat(64)}),env)).status!==409)throw Error('init same key changed body conflict');
+if(!storage.map.has('account_access_v1')||!storage.map.has('installation_release_v1')||storage.map.has('risk_meta_v2'))throw Error('configuration initialization not atomic or creates financial state');
+const lower=new Request('https://fixture/account-governance/campaign-limit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:0,campaign_loss_limit_usd:'8',idempotency_key:'lower_campaign_01'})});
+if((await defaultHandler.fetch(lower,env)).status!==401)throw Error('campaign reduction must authenticate owner');
+const lowerAuthorized=new Request('https://fixture/account-governance/campaign-limit',{method:'POST',headers:{authorization:'Bearer fixture_secret','content-type':'application/json'},body:JSON.stringify({expected_revision:0,campaign_loss_limit_usd:'8',idempotency_key:'lower_campaign_01'})});
+if((await defaultHandler.fetch(lowerAuthorized,env)).status!==200)throw Error('owner lowers campaign without resetting installation');
+console.log('owner_install_init_auth_body_bound PASS');
+
+const inspection=(token?:string)=>new Request('https://fixture/installation/inspect',{
+ method:'GET',headers:token?{authorization:token}:{}
+});
+const forwardedBefore=calls;
+if((await defaultHandler.fetch(inspection(),env)).status!==401||calls!==forwardedBefore)
+ throw Error('installation inspect must reject unauthenticated request before DO');
+const snapshot=JSON.stringify([...storage.map.entries()]);
+const inspected:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
+if(inspected.schema!=='okx.installation-inspection/v1'||inspected.state!=='BOUND'
+ ||inspected.accounts_total!==0||inspected.finance_authority!=='native'||'risk' in inspected
+ ||JSON.stringify([...storage.map.entries()])!==snapshot)
+ throw Error('owner inspection must be read-only with bounded safe summary');
+if(JSON.stringify(inspected).includes('fixture_secret')||'budget' in inspected)
+ throw Error('inspection must not disclose secrets or financial amounts');
+
+const accountTemplate=account;
+storage.map.set('account_access_v1',{...initial,revision:1,accounts:[{...accountTemplate,explicit_pause:true}]});
+const pausedPolicy:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
+if(pausedPolicy.account_access?.length!==1||pausedPolicy.account_access[0].id!=='primary'
+ ||pausedPolicy.account_access[0].environment!=='real'
+ ||pausedPolicy.account_access[0].enabled!==true
+ ||pausedPolicy.account_access[0].explicit_pause!==true
+ ||pausedPolicy.real_accounts_enabled!==0||pausedPolicy.all_new_real_risk_paused!==true)
+ throw Error('owner inspection must report original paused real account policy');
+if(JSON.stringify(pausedPolicy).includes(accountTemplate.uid_fingerprint)
+ ||JSON.stringify(pausedPolicy).includes(accountTemplate.account_key))
+ throw Error('owner inspection cannot disclose UID fingerprint or account key');
+storage.map.set('account_access_v1',{...initial,revision:1,accounts:[accountTemplate]});
+const openPolicy:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
+if(openPolicy.real_accounts_enabled!==1||openPolicy.all_new_real_risk_paused!==false)
+ throw Error('active real account must be reported as non-paused');
+storage.map.set('account_access_v1',{...initial});
+storage.map.set('risk_entry_v2:fixture_01',{state:'UNKNOWN'});
+const unsettled:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
+if('risk' in unsettled||unsettled.finance_authority!=='native'||storage.map.get('risk_entry_v2:fixture_01').state!=='UNKNOWN')
+ throw Error('configuration inspection must preserve and never interpret historical financial data');
+storage.map.delete('account_access_v1');
+const missing:any=await(await defaultHandler.fetch(inspection('Bearer fixture_secret'),env)).json();
+if(missing.state!=='MISSING_OR_INVALID')throw Error('missing governance must fail closed');
+console.log('owner_only_installation_inspection_no_mutation PASS');

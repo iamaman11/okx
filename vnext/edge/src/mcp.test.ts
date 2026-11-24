@@ -1,0 +1,443 @@
+import {mcpApi,projectNativeResponse} from './mcp.js';
+import {payloadFixtures} from './execution_tools.test.js';
+const ctx={auth:{scope:['mcp:use']}};
+// Model-visible trading operations are separately named and have no caller
+// action selector. The legacy test fixtures continue to describe native calls.
+const publicArgs=(name:string,args:any)=>{
+ if(name!=='trade')return {name,arguments:args};
+ const {action,...input}=args;
+ return {name:'trade.'+action,arguments:input};
+};
+const call=(method:string,params?:unknown)=>mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})}),{} as any,ctx);
+const response=await call('tools/list'),body:any=await response.json();
+const bytes=new TextEncoder().encode(JSON.stringify(body)).byteLength;
+
+for(const action of ['preview','execute','status','cancel','close','capabilities','preflight']){
+ const tool=body.result.tools.find((t:any)=>t.name==='trade.'+action);
+ if(!tool||!tool.inputSchema||'action' in tool.inputSchema.properties||
+   !tool.annotations||tool.annotations.openWorldHint!==false||
+   tool.annotations.readOnlyHint!==['preview','status','capabilities','preflight'].includes(action)||
+   tool.annotations.destructiveHint!==['execute','cancel','close'].includes(action))
+  throw Error('truthful trade metadata missing '+action);
+}
+if(body.result.tools.some((t:any)=>t.name==='trade'))throw Error('generic trade must not remain model-callable');
+
+if(body.result.tools.length!==13||bytes>24576)throw Error(`tools budget ${bytes}`);
+for(const fixture of payloadFixtures){const r:any=await(await call('tools/call',publicArgs(fixture.tool,fixture.negative[0]))).json();if(r.error?.code!==-32602)throw Error('negative dispatched');}
+console.log(`tools_list_actual_serialized PASS 13 tools ${bytes} bytes`);
+
+const fixture=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!;
+const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json({status:'FAILED',reason:'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT',retryable:false})})}};
+const unknown:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:2,method:'tools/call',params:publicArgs('trade',fixture.positive)})}),env,ctx)).json();
+if(unknown.result.structuredContent.status!=='unknown'||unknown.result.structuredContent.retryable!==false||!unknown.result.structuredContent.request_id||!unknown.result.structuredContent.as_of_ms)throw Error('unknown outcome common shell');
+
+const nestedUnknown:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_unknown',status:'completed',quality:'FRESH',warnings:['native_warning'],result:{status:'UNKNOWN',reason_code:'POSTING_UNKNOWN',intent_id:'intent_398'}});
+if(nestedUnknown.status!=='unknown'||nestedUnknown.reason_code!=='POSTING_UNKNOWN'||nestedUnknown.retryable!==false||nestedUnknown.data.intent_id!=='intent_398'||nestedUnknown.warnings[0]!=='native_warning')throw Error('nested UNKNOWN must not become completed');
+console.log("mcp_nested_failure_preserves_reason_code PASS");
+
+const failedEnvelope:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_failed',status:'failed',quality:'NOT_READY',warnings:[],failure:{code:'RESPONSE_TOO_LARGE',message:'native result bounded',retryable:false}});
+if(failedEnvelope.status!=='failed'||failedEnvelope.reason_code!=='RESPONSE_TOO_LARGE'||failedEnvelope.data!==null)throw Error('native envelope failure must keep exact failure code');
+
+// Rust TradeService and Strategies currently return a second, strictly bounded
+// completed shell. The public MCP must present only the typed product, with
+// native request identity, freshness and failure safety intact.
+const completedBusiness={status:'completed',as_of_ms:1780000000000,
+ data:{admission:'preview_only',plan:{risk_usd:'1'},quality:'complete'},
+ quality:{state:'not_evaluated'},warnings:['service_warning']};
+const once:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_preview_once',
+ status:'completed',quality:'FRESH',warnings:['native_warning'],result:completedBusiness});
+if(once.status!=='completed'||once.request_id!=='req_preview_once'||
+ once.as_of_ms!==completedBusiness.as_of_ms||once.data.admission!=='preview_only'||
+ 'status' in once.data||'data' in once.data||once.quality!=='complete'||
+ once.warnings.join(',')!=='native_warning,service_warning')
+ throw Error('strict completed business result not projected once');
+const strategies:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_strategies_once',
+ status:'completed',quality:'FRESH',warnings:[],
+ result:{status:'completed',as_of_ms:1780000000001,
+         data:{instances:[]},quality:{state:'not_evaluated'},warnings:[]}});
+if(strategies.status!=='completed'||!Array.isArray(strategies.data.instances)||
+ 'status' in strategies.data)throw Error('nested strategy list response');
+const fakeExtra:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_extra',
+ status:'completed',quality:'FRESH',warnings:[],
+ result:{...completedBusiness,extra_untyped:'not_a_completed_shell'}});
+if(fakeExtra.data.extra_untyped!=='not_a_completed_shell'||
+ fakeExtra.data.data.admission!=='preview_only')
+ throw Error('untyped business result was unwrapped by shape');
+const stillUnknown:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_trade_unknown',
+ status:'completed',quality:'FRESH',warnings:[],
+ result:{status:'unknown',reason_code:'EXCHANGE_POST_OUTCOME_UNKNOWN',intent_id:'intent_398'}});
+if(stillUnknown.status!=='unknown'||stillUnknown.reason_code!=='EXCHANGE_POST_OUTCOME_UNKNOWN'||
+ stillUnknown.retryable!==false||stillUnknown.data.intent_id!=='intent_398')
+ throw Error('UNKNOWN outcome erased by completed response projection');
+console.log('native_completed_business_envelope_once PASS');
+
+const queuedJob:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_job',status:'completed',quality:'FRESH',warnings:[],result:{id:'job_398',state:'queued',progress:0}});
+if(queuedJob.status!=='accepted'||queuedJob.job_id!=='job_398'||queuedJob.data.state!=='queued')throw Error('queued job must remain accepted with an id');
+console.log("mcp_queued_job_remains_accepted PASS");
+
+// Candidate counters are native job facts. MCP preserves them without
+// upgrading running/interrupted jobs or recalculating their progress.
+const candidateProgress={phase:'evaluating_candidates',completed_candidates:1,
+ total_candidates:64,completed_work_units:66,total_work_units:193};
+for(const [state,status,progress] of [['running','accepted',33],['interrupted','failed',33],['completed','completed',100]] as const){
+ const projected:any=projectNativeResponse({schema:'okx.agent.response/v1',
+  request_id:'req_candidate_progress',status:'completed',quality:'FRESH',warnings:[],
+  result:{id:'a'.repeat(64),state,progress,candidate_progress:candidateProgress}});
+ if(projected.status!==status||projected.job_id!=='a'.repeat(64)||
+    projected.data.progress!==progress||JSON.stringify(projected.data.candidate_progress)!==JSON.stringify(candidateProgress))
+  throw Error('MCP lost or reinterpreted native candidate progress');
+}
+console.log('mcp_native_candidate_progress_preserved PASS');
+
+const partial:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_partial',status:'completed',quality:'DEGRADED',warnings:[],result:{rows:[],quality:'partial'}});
+if(partial.status!=='partial'||partial.quality!=='partial')throw Error('partial native quality must remain partial');
+
+// P0.2: manual is an account-capital attribution label, not a second
+// independently funded strategy. Its empty non-additive row must not degrade
+// a verified account, but genuinely missing capital must stay partial.
+const manualWindow={scope_id:'strategy:manual',currency:'USD',coverage:'NOT_APPLICABLE',
+ opening_equity:null,current_equity:null,flows:null,pnl:null,
+ opening_as_of:null,current_as_of:null};
+const manualRow={kind:'nav',capital_scope:'account',additive_with_account_nav:false,
+ coverage_reason:'MANUAL_USES_ACCOUNT_CAPITAL',window:manualWindow};
+const accountRow={kind:'nav',capital_scope:'account',additive_with_account_nav:false,
+ coverage_reason:null,window:{scope_id:'account',currency:'USD',coverage:'COMPLETE',
+ opening_equity:'100',current_equity:'100',flows:'0',pnl:'0',
+ opening_as_of:1,current_as_of:2}};
+const portfolioEnvelope=(rows:any[],quality='complete')=>projectNativeResponse({
+ schema:'okx.agent.response/v1',request_id:'req_finance_p02',status:'completed',
+ quality:'FRESH',warnings:[],result:{rows,quality,diagnostics:[]}});
+const manualSummary:any=portfolioEnvelope([accountRow,manualRow]);
+if(manualSummary.status!=='completed'||manualSummary.quality!=='complete'||
+ manualSummary.data.rows.length!==2||manualSummary.data.rows[1].window.current_equity!==null)
+ throw Error('P0.2 manual account-capital label incorrectly degrades complete portfolio');
+// The Rust finance owner marks incomplete sources PARTIAL. The Worker
+// must never upgrade that evidence, including for a manual-shaped row.
+for(const unknown of [
+ {...manualRow,window:{...manualWindow,coverage:'PARTIAL'}},
+ {...manualRow,capital_scope:'strategy',window:{...manualWindow,coverage:'PARTIAL'}},
+ {...manualRow,additive_with_account_nav:true,window:{...manualWindow,coverage:'PARTIAL'}},
+ {...manualRow,coverage_reason:'STRATEGY_CAPITAL_PROVENANCE_MISSING',
+  window:{...manualWindow,coverage:'PARTIAL'}},
+ {...manualRow,window:{...manualWindow,coverage:'PARTIAL',current_equity:'10'}},
+ {kind:'nav',capital_scope:'strategy',coverage_reason:'STRATEGY_CAPITAL_PROVENANCE_MISSING',
+  window:{...manualWindow,coverage:'PARTIAL',scope_id:'strategy:ema_cross'}},
+]){
+ const response:any=portfolioEnvelope([accountRow,unknown]);
+ if(response.status!=='partial'||response.quality!=='partial')
+  throw Error('P0.2 unknown/duplicate strategy capital promoted to complete portfolio');
+}
+const missingAccount:any=portfolioEnvelope([{...accountRow,
+ window:{...accountRow.window,coverage:'PARTIAL'}},manualRow]);
+if(missingAccount.status!=='partial')throw Error('P0.2 manual label hid missing account capital');
+const markedPartial:any=portfolioEnvelope([accountRow,manualRow],'partial');
+if(markedPartial.status!=='partial')throw Error('P0.2 authoritative partial quality overruled by manual');
+console.log('mcp_finance_manual_is_account_capital_without_false_partial PASS');
+
+const oversized='x'.repeat(13_000);
+const budgetEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json({schema:'okx.agent.response/v1',request_id:'req_native_large',status:'completed',quality:'FRESH',warnings:[],result:{rows:[oversized]}})})}};
+const budget:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:3,method:'tools/call',params:{name:'market',arguments:payloadFixtures.find(x=>x.tool==='market')!.positive}})}),budgetEnv,ctx)).json();
+const budgetResult=budget.result.structuredContent;
+if(budgetResult.status!=='failed'||budgetResult.reason_code!=='RESPONSE_TOO_LARGE'||budgetResult.data.response_budget_bytes!==12_288||budgetResult.data.response_bytes<=12_288)throw Error('oversized native result must terminalize as bounded MCP failure');
+
+// T01/T15: the read-only on-demand typed catalogue is larger than a normal
+// decision packet. Keep every descriptor while retaining a finite bound and
+// preserving the ordinary 12 KiB limit established above.
+const catalogCall=async(padding:number):Promise<any>=>{
+ const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json({
+  schema:'okx.agent.response/v1',request_id:'req_native_catalog',status:'completed',quality:'FRESH',warnings:[],
+  result:{schema:'okx.market.capabilities/v1',operators:[{name:'returns',version:1,unit:'ratio'}],
+   composition:{operations:[{op:'rolling_range',version:1,input_unit:'price'}]},details:'x'.repeat(padding)}
+ })})}};
+ const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+  jsonrpc:'2.0',id:4,method:'tools/call',params:{name:'market',arguments:{action:'capabilities'}}
+ })}),env,ctx)).json();
+ return reply.result.structuredContent;
+};
+const catalog=await catalogCall(13_000);
+if(catalog.status!=='completed'||catalog.data.schema!=='okx.market.capabilities/v1'||
+ catalog.data.operators[0].unit!=='ratio'||catalog.data.composition.operations[0].op!=='rolling_range'||
+ catalog.data.details.length!==13_000)throw Error('typed market capability descriptor lost at the public 12 KiB boundary');
+const oversizedCatalog=await catalogCall(21_000);
+if(oversizedCatalog.status!=='failed'||oversizedCatalog.reason_code!=='RESPONSE_TOO_LARGE'||
+ oversizedCatalog.data.response_budget_bytes!==20_480||oversizedCatalog.data.response_bytes<=20_480)
+ throw Error('catalogue exception must still terminate above its own finite 20 KiB bound');
+console.log('market_capabilities_20k_only_preserves_descriptors_and_finite_bound PASS');
+
+const nativeResponse=(response:unknown):any=>({RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json(response)})}});
+const mcpResponse=async(tool:string,args:unknown,response:unknown,releaseTree?:string):Promise<any>=>{
+ const env={...nativeResponse(response),RELEASE_SOURCE_TREE:releaseTree};
+ const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:99,method:'tools/call',params:publicArgs(tool,args)})}),env,ctx)).json();
+ if(reply.error)throw Error(JSON.stringify(reply.error));
+ return reply.result.structuredContent;
+};
+
+// P0 #537: an optional user graph must reach the Native request unchanged.
+// Otherwise different hypotheses can silently reuse the flat market job.
+const graphBase={action:'screen',instruments:['BTC-USDT'],fields:['returns'],
+ timeframe_ms:60_000,start_ms:1795366800000,end_ms:1795374000000,limit:50};
+const graphVariants=[
+ graphBase,
+ {...graphBase,composition:{version:'okx.market.composition/v1',
+  steps:[{id:'width',op:'rolling_range',input:'close',period:3}],result_steps:['width']}},
+ {...graphBase,composition:{version:'okx.market.composition/v1',steps:[
+  {id:'change',op:'returns_series',input:'close'},
+  {id:'avg3',op:'rolling_mean',input:'change',period:3},
+  {id:'positive',op:'greater_than',input:'avg3',threshold:0},
+  {id:'turn_on',op:'rising_edge',input:'positive'}],result_steps:['avg3','turn_on']}},
+];
+const graphCalls:any[]=[];
+const graphEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
+ const native=JSON.parse(String(init.body));graphCalls.push(native);
+ const fields=native.operation.request.composition?.result_steps??[];
+ return Response.json({schema:'okx.agent.response/v1',request_id:native.request_id,
+  status:'completed',quality:'FRESH',warnings:[],result:{kind:'market',
+   job_id:'job-'+(fields.join('-')||'flat'),market_request_fingerprint:'hash-'+(fields.join('-')||'flat'),
+   result_artifact:'artifact-'+(fields.join('-')||'flat'),query_plan:{composition:native.operation.request.composition??null},
+   rows:[{metrics:{returns:-0.0073745589964719915,...(fields.includes('width')?{width:46.5}:{}),
+    ...(fields.includes('avg3')?{avg3:-0.00031571803975194435,turn_on:false}:{})}}]}});
+}})}};
+const graphResults:any[]=[];
+for(const args of graphVariants){
+ const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:91,method:'tools/call',params:{name:'market',arguments:args}})}),graphEnv,ctx)).json();
+ if(reply.error)throw Error('MCP graph rejected: '+JSON.stringify(reply.error));
+ graphResults.push(reply.result.structuredContent);
+ const sent=graphCalls.at(-1);
+ if(sent.schema!=='okx.agent.request/v1'||sent.operation.type!=='market'||
+   JSON.stringify(sent.operation.request)!==JSON.stringify(args))
+  throw Error('MCP graph definition lost before Native dispatch');
+}
+if(new Set(graphResults.map(r=>r.data.job_id)).size!==3||
+ new Set(graphResults.map(r=>r.data.market_request_fingerprint)).size!==3||
+ new Set(graphResults.map(r=>r.data.result_artifact)).size!==3||
+ graphResults[0].data.rows[0].metrics.width!==undefined||
+ graphResults[1].data.rows[0].metrics.width!==46.5||
+ graphResults[2].data.rows[0].metrics.avg3!==-0.00031571803975194435||
+ graphResults[2].data.rows[0].metrics.turn_on!==false||
+ !body.result.tools.find((tool:any)=>tool.name==='market')?.description.includes('composition'))
+ throw Error('MCP graph projection or public invocation guidance lost');
+console.log('P0_mcp_three_graphs_forwarded_and_distinct PASS');
+// Exercise the real Worker MCP projection/dispatch for 100 independent read-only
+// requests. The Durable Object is a deterministic fixture, not a physical network SLA.
+let inFlightRead=0,maxInFlightRead=0,nativeReadCount=0;
+const readOnlyEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>{
+ nativeReadCount++;inFlightRead++;maxInFlightRead=Math.max(maxInFlightRead,inFlightRead);
+ await Promise.resolve();inFlightRead--;
+ return Response.json({schema:'okx.agent.response/v1',request_id:'fake_readonly_native',
+   status:'completed',quality:'FRESH',warnings:[],
+   result:{schema:'okx.research.capabilities/v1',strategy_ids:['ema_cross_v1']}});
+}})}};
+const hundred=await Promise.all(Array.from({length:100},async(_,i)=>{
+ const res=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+   jsonrpc:'2.0',id:i+100,method:'tools/call',params:{name:'research',arguments:{action:'capabilities'}}
+ })}),readOnlyEnv,ctx);
+ return res.json() as Promise<any>;
+}));
+if(nativeReadCount!==100||maxInFlightRead<2||hundred.length!==100||
+ hundred.some((x:any,i:number)=>x.id!==i+100||x.result?.structuredContent?.status!=='completed'||
+ x.result?.structuredContent?.data?.schema!=='okx.research.capabilities/v1'||x.error))
+ throw Error('100 concurrent Worker read-only fixture requests lost or incorrectly projected');
+console.log('worker_100_concurrent_readonly_fixture PASS 100 native fixture reads zero real POST');
+
+// Eleven real Worker MCP routes through an in-memory DO with NO exchange access.
+// Success and business refusal: route fidelity, identity, retries, bounded shell.
+const fakeMutationActions:[string,string][]=[
+ ['accounts','connect'],['accounts','pause'],['accounts','resume'],['accounts','set_limits'],
+ ['strategies','create'],['strategies','update'],['strategies','start'],['strategies','stop'],
+ ['trade','execute'],['trade','cancel'],['trade','close'],
+];
+for(const [tool,action] of fakeMutationActions){
+ const fixture=payloadFixtures.find(x=>x.tool===tool&&x.action===action)
+  ?? (action==='resume'||action==='stop'
+    ?payloadFixtures.find(x=>x.tool===tool&&x.action===(action==='resume'?'pause':'start'))
+    :undefined);
+ if(!fixture)throw Error('missing mutation fixture '+tool+'.'+action);
+ const args={...fixture.positive,action};
+ for(const negative of [false,true]){
+  const visits:{path:string;request:any}[]=[];
+  const fakeHandler=async(url:string,init?:RequestInit)=>{
+   const path=new URL(url).pathname;
+   const request=init?.body?JSON.parse(String(init.body)):null;
+   visits.push({path,request});
+   if(negative)return Response.json({status:'failed',reason_code:'FAKE_VENUE_REJECTED',retryable:false});
+   if(path==='/dispatch'&&request?.operation?.type==='connect_account'){
+    const op=request.operation;
+    return Response.json({status:'completed',result:{alias:op.alias,credential_ref:op.credential_ref,
+     connect_operation_id:op.operation_id,configuration_digest:op.request_digest,
+     account_key:{venue:'okx',environment:'demo',verified_uid:'a'.repeat(64)}}});
+   }
+   if(path==='/account-governance')return Response.json({status:'CONFIGURED',revision:0,accounts:[]});
+   if(path==='/dispatch')return Response.json({schema:'okx.agent.response/v1',
+    request_id:'fake_mutation_native',status:'completed',quality:'FRESH',warnings:[],
+    result:{schema:'okx.fake-venue.fixture/v1',venue:'fake',exchange_post_count:0}});
+   return Response.json({status:'completed',data:{venue:'fake',exchange_post_count:0}});
+  };
+  const fake:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:fakeHandler})}};
+  const rpc:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+   body:JSON.stringify({jsonrpc:'2.0',id:902,method:'tools/call',params:publicArgs(tool,args)})}),fake,ctx)).json();
+  if(rpc.error||!rpc.result?.structuredContent)throw Error('mutation schema/dispatch failed '+tool+'.'+action+':'+JSON.stringify(rpc.error));
+  const envelope=rpc.result.structuredContent;
+  if(negative){
+   if(envelope.status!=='failed'||envelope.reason_code!=='FAKE_VENUE_REJECTED'||visits.length!==1)
+    throw Error('fake venue business refusal not preserved '+tool+'.'+action);
+  }else if(envelope.status!=='completed')throw Error('fake venue success not projected '+tool+'.'+action);
+  const first=visits[0];
+  const expectedPath=tool==='accounts'&&['pause','resume','set_limits'].includes(action)
+    ?(action==='set_limits'?'/account-governance/limits':'/account-governance/pause'):'/dispatch';
+  if(!first||first.path!==expectedPath)throw Error('wrong owner '+tool+'.'+action);
+  if(expectedPath==='/dispatch'){
+   const expectedType=tool==='accounts'?'connect_account':tool;
+   if(first.request?.operation?.type!==expectedType)throw Error('mutation operation lost '+tool+'.'+action);
+   if(tool!=='accounts'&&(first.request.operation.request?.action!==action||first.request.account!==args.account))
+    throw Error('mutation action/account lost '+tool+'.'+action);
+  }else if(expectedPath==='/account-governance/pause'){
+   if(first.request?.explicit_pause!==(action==='pause')||first.request?.account!==args.account)
+    throw Error('pause/resume action/account lost');
+  }else if(first.request?.action!==action||first.request?.account!==args.account)
+    throw Error('set_limits action/account lost');
+  if(tool==='accounts'&&action==='connect'&&!negative){
+   if(visits.length!==3||visits[1].path!=='/account-governance'||
+     visits[2].path!=='/account-governance/enroll'||
+     visits[2].request?.alias!==args.alias||visits[2].request?.credential_ref!==args.credential_ref)
+    throw Error('connect did not prove central enrollment binding');
+  }else if(visits.length!==1)throw Error('mutation dispatched repeatedly '+tool+'.'+action);
+ }
+}
+console.log('mcp_fake_venue_mutation_routes PASS 11 actions positive/negative 0 real exchange POST');
+
+const connectFixture=payloadFixtures.find(x=>x.tool==='accounts'&&x.action==='connect')!;
+const attachArgs={...connectFixture.positive,enabled:false};
+const attachedUid='a'.repeat(64),attachedKey='okx:demo:'+attachedUid;
+const attachedAccount={id:attachArgs.alias,label:attachArgs.label??attachArgs.alias,
+ account_key:attachedKey,uid_fingerprint:attachedUid,venue:'okx',environment:'demo',
+ identity_verified:true,enabled:true,explicit_pause:false,policy_revision:3,
+ limits:attachArgs.limits,strategies:[]};
+for(const variation of ['requires_pause','already_disabled','wrong_identity','unsafe_enable','pause_refused']){
+ const args={...attachArgs,enabled:variation==='unsafe_enable'};
+ const account={...attachedAccount,...(variation==='already_disabled'?{enabled:false}:{})};
+ if(variation==='wrong_identity')account.uid_fingerprint='b'.repeat(64);
+ const state={status:'CONFIGURED',revision:3,accounts:[account]};
+ const visits:{path:string;request:any}[]=[];
+ const fakeHandler=async(url:string,init?:RequestInit)=>{
+  const path=new URL(url).pathname;
+  const request=init?.body?JSON.parse(String(init.body)):null;
+  visits.push({path,request});
+  if(path==='/dispatch'){
+   const op=request.operation;
+   return Response.json({status:'completed',result:{alias:op.alias,credential_ref:op.credential_ref,
+    connect_operation_id:op.operation_id,configuration_digest:op.request_digest,
+    account_key:{venue:'okx',environment:'demo',verified_uid:attachedUid}}});
+  }
+  if(path==='/account-governance')return Response.json(state);
+  if(path==='/account-governance/pause'){
+   if(request.account!==args.alias||request.expected_revision!==3||
+      request.explicit_pause!==true||request.idempotency_key!==args.idempotency_key)
+    throw Error('unsafe attached account CAS pause');
+   if(variation==='pause_refused')return Response.json({status:'FAILED',reason:'STALE_ACCESS_REVISION'});
+   return Response.json({status:'CONFIGURED',configuration:{...state,revision:4,
+    accounts:[{...account,explicit_pause:true,policy_revision:4}]}});
+  }
+  if(path==='/account-governance/enroll'&&variation==='unsafe_enable'){
+   if(request.alias!==args.alias||request.enabled!==true)
+    throw Error('unsafe enrollment replay request changed');
+   // A new operation key cannot register a duplicate; the real DO owns
+   // exact original-key replay and refuses any new enable grant.
+   return Response.json({status:'FAILED',reason:'ACCOUNT_ALREADY_CONNECTED'});
+  }
+  throw Error('reattachment must not enroll or mutate an independent owner: '+path);
+ };
+ const fake:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:fakeHandler})}};
+ const rpc:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:913,method:'tools/call',
+   params:publicArgs('accounts',args)})}),fake,ctx)).json();
+ if(rpc.error||!rpc.result?.structuredContent)throw Error('verified reattach tool error '+JSON.stringify(rpc.error));
+ const outcome=rpc.result.structuredContent;
+ if(variation==='requires_pause'){
+  if(outcome.status!=='completed'||outcome.data.reattached_existing!==true||
+     outcome.data.configuration.accounts.length!==1||outcome.data.account.explicit_pause!==true||
+     visits.map(v=>v.path).join(',')!=='/dispatch,/account-governance,/account-governance/pause')
+   throw Error('existing verified account was not paused/reused exactly once');
+ }else if(variation==='already_disabled'){
+  if(outcome.status!=='completed'||outcome.data.reattached_existing!==true||
+    visits.map(v=>v.path).join(',')!=='/dispatch,/account-governance')
+   throw Error('already-disabled account created new central mutation');
+ }else{
+  const expected=variation==='wrong_identity'?'EXISTING_ACCOUNT_IDENTITY_MISMATCH':
+    variation==='unsafe_enable'?'ACCOUNT_ALREADY_CONNECTED':'STALE_ACCESS_REVISION';
+  const enrollmentVisits=visits.filter(v=>v.path==='/account-governance/enroll').length;
+  if(outcome.reason_code!==expected||!['failed','rejected'].includes(outcome.status)||
+    enrollmentVisits!==(variation==='unsafe_enable'?1:0))
+   throw Error('reattach failure not fail-closed '+variation+': '+JSON.stringify(outcome));
+ }
+}
+console.log('existing_verified_account_reattach_fail_closed PASS one account no venue POST');
+
+
+const rawFailure=(code:string)=>({schema:'okx.agent.response/v1',request_id:'native_fail_398',
+ status:'rejected',generated_at:'2026-10-23T00:00:00Z',quality:'NOT_READY',result_schema:'okx.product/v1',
+ result:null,failure:{code,message:code,retryable:false},warnings:[]});
+const nativeNotFound=await mcpResponse('research',{action:'status',job_id:'missing_job_398'},
+ {status:'completed',data:rawFailure('JOB_NOT_FOUND')});
+if(nativeNotFound.status!=='rejected'||nativeNotFound.reason_code!=='JOB_NOT_FOUND'||
+ nativeNotFound.data!==null||nativeNotFound.retryable!==false||
+ nativeNotFound.request_id!=='native_fail_398')throw Error('DO wrapped JOB_NOT_FOUND code lost');
+console.log('native_failure_code_passthrough PASS');
+
+const previewFixture=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='preview')!;
+const nativeNotional=await mcpResponse('trade',previewFixture.positive,
+ {status:'completed',result:rawFailure('ORDER_NOTIONAL_LIMIT')});
+if(nativeNotional.status!=='rejected'||nativeNotional.reason_code!=='ORDER_NOTIONAL_LIMIT'||
+ nativeNotional.data!==null)throw Error('DO wrapped ORDER_NOTIONAL_LIMIT code lost');
+
+const gridFixture=payloadFixtures.find(x=>x.tool==='research'&&x.action==='grid')!;
+const nativeQueued=await mcpResponse('research',gridFixture.positive,
+ {schema:'okx.agent.response/v1',request_id:'queued_native_398',status:'completed',quality:'FRESH',
+  result:{id:'queued_job_398',state:'queued',progress:0},failure:null,warnings:[]});
+if(nativeQueued.status!=='accepted'||nativeQueued.job_id!=='queued_job_398'||
+ nativeQueued.data.state!=='queued')throw Error('DO wrapped queued job projected complete');
+console.log('do_wrapped_queued_job_is_accepted PASS');
+
+const nativePartial=await mcpResponse('market',payloadFixtures.find(x=>x.tool==='market')!.positive,
+ {schema:'okx.agent.response/v1',request_id:'partial_398',status:'completed',quality:'FRESH',
+  result:{rows:[{instrument:'BTC-USDT-SWAP',quality:'partial',metrics:{returns:null}}]},failure:null,warnings:[]});
+if(nativePartial.status!=='partial'||nativePartial.data.rows[0].quality!=='partial')
+ throw Error('partial input row promoted to completed');
+console.log('partial_coverage_not_fresh PASS');
+
+const deliveredUnknown=await mcpResponse('trade',payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!.positive,
+ {schema:'okx.direct-transport.result/v1',status:'FAILED',reason:'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT',retryable:false});
+if(deliveredUnknown.status!=='unknown'||deliveredUnknown.retryable!==false||
+ deliveredUnknown.next_action!=='inspect_exact_intent')throw Error('UNKNOWN exchange outcome can be retried');
+const deterministicUnknown=projectNativeResponse({status:'FAILED',reason:'UNKNOWN_ACCOUNT',retryable:false});
+if(deterministicUnknown.status!=='failed'||deterministicUnknown.reason_code!=='UNKNOWN_ACCOUNT')
+ throw Error('deterministic unknown reason incorrectly became uncertain POST');
+console.log('transport_unknown_without_resubmit PASS');
+
+const invalidNative=projectNativeResponse({schema:'okx.agent.response/v1',status:'completed',result:{id:'bad'}});
+if(invalidNative.status!=='failed'||invalidNative.reason_code!=='INVALID_NATIVE_ENVELOPE')
+ throw Error('malformed native response must fail closed');
+
+const healthyRuntime=await mcpResponse('diagnostics',{action:'runtime'},
+ {schema:'okx.direct-transport.status/v1',status:'PASS',runtime_id:'windows-primary',
+  runtime_profile:'engine',connected:true,session_fresh:true,connection_generation:73},'b'.repeat(40));
+if(healthyRuntime.status!=='completed'||healthyRuntime.data.schema!=='okx.runtime-status/v1'||
+ healthyRuntime.data.transport.session_fresh!==true||healthyRuntime.data.transport.connection_generation!==73||
+ typeof healthyRuntime.data.tool_contract!=='string'||healthyRuntime.data.release_source_tree!=='b'.repeat(40))
+ throw Error('runtime must expose exact deployment source tree without claiming installed Windows proof');
+if(healthyRuntime.data.installation_verification.owner!=='WINDOWS_CONTROL'||
+ healthyRuntime.data.installation_verification.worker_independent_proof!=='NOT_PERFORMED'||
+ 'release_attestation' in healthyRuntime.data)
+ throw Error('authenticated WSS cannot imply independent installed-file proof');
+console.log('native_control_owner_without_worker_gh_attestation PASS');
+const offlineRuntime=await mcpResponse('diagnostics',{action:'runtime'},
+ {schema:'okx.direct-transport.status/v1',status:'OFFLINE',runtime_id:'windows-primary',
+  connected:false,session_fresh:false});
+if(offlineRuntime.status!=='partial'||offlineRuntime.data.reason_code!=='RUNTIME_SESSION_NOT_FRESH'||
+ offlineRuntime.data.transport.connected!==false||offlineRuntime.data.release_source_tree!==null)
+ throw Error('offline session promoted to fresh or invented deployment source tree');
+const corruptRuntime=await mcpResponse('diagnostics',{action:'runtime'},{status:'PASS'});
+if(corruptRuntime.status!=='failed'||corruptRuntime.reason_code!=='INVALID_RUNTIME_STATUS')
+ throw Error('malformed runtime observation accepted');
+console.log('diagnostics_runtime_freshness_and_negative PASS');

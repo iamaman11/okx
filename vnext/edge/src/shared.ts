@@ -1,0 +1,164 @@
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+
+export const FRAME_SCHEMA = "okx.direct-transport.frame/v2";
+export const MCP_PROTOCOL_VERSION = "2025-06-18";
+export const MCP_SERVER_VERSION = "0.8.0";
+export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-26.398";
+export const MAX_BODY_BYTES = 64 * 1024;
+export const MAX_INFLIGHT = 8;
+// Bounded admission: read-only requests wait, while mutation/status stays free.
+export const MAX_READ_INFLIGHT = MAX_INFLIGHT - 1;
+export const MAX_READ_WAITERS = 100;
+export const READ_QUEUE_WAIT_MS = 15_000;
+export const PONG_DEADLINE_MS = 2_000;
+export const ACK_DEADLINE_MS = 2_000;
+export const RESPONSE_DEADLINE_MS = 20_000;
+export const TOOL_TEXT_FALLBACK = "Structured result attached; use structuredContent for the typed payload.";
+export const TOOL_TEXT_FALLBACK_MAX_BYTES = 96;
+export const RUNTIME_NAME = "windows-primary";
+// A clean native-v2 installation must never inherit the legacy "primary"
+// Durable Object's account governance or historical financial namespace.
+// Changing this name selects a distinct persisted object; it does not delete
+// or migrate the previous one.
+export const RUNTIME_OBJECT_NAME = "primary-clean-v2";
+export const PUBLIC_ORIGIN = "https://okx-cloudflare-mcp.okx-794.workers.dev";
+
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+export interface Env {
+  OAUTH_KV: any;
+  RUNTIME: any;
+  MCP_OWNER_SECRET: string;
+  RUNTIME_TOKEN_SHA256: string;
+  /** Immutable source tree of this exact Worker deployment, set only by deploy CI. */
+  RELEASE_SOURCE_TREE?: string;
+  OAUTH_PROVIDER: OAuthHelpers;
+}
+
+// A deployment label, not independent attestation of Windows binaries.
+// The deploy workflow sets this from its exact Git source tree.
+export function workerReleaseSourceTree(env: Env): string | null {
+  const tree = env.RELEASE_SOURCE_TREE;
+  return typeof tree === "string" && /^[0-9a-f]{40}$/.test(tree) ? tree : null;
+}
+
+export type RuntimeProfile = "engine";
+export function decodeRuntimeProfile(value:unknown):RuntimeProfile|null{return value==="engine"?"engine":null;}
+
+export interface SocketAttachment {
+  runtimeId: string;
+  runtimeProfile?: RuntimeProfile;
+  sessionId: string;
+  generation: number;
+  hello: boolean;
+  installationId?: string;
+  sessionMode?: "finance" | "research_only";
+  /** Namespace asserted by the bearer-authenticated host, not key attestation. */
+  hostScope?: string;
+  agentPid?: number;
+  agentBinarySha256?: string;
+  agentIncarnation?: string;
+  connectedAtMs: number;
+  lastPongAtMs: number | null;
+}
+
+export interface Pending {
+  generation: number;
+  resolve: (value: any) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export function jsonRpc(id: Json, result: Json): Response {
+  return Response.json({ jsonrpc: "2.0", id, result });
+}
+
+export function jsonRpcError(id: Json, code: number, message: string): Response {
+  return Response.json({ jsonrpc: "2.0", id, error: { code, message } });
+}
+
+export function toolResult(value: Json): Json {
+  return {
+    content: [{ type: "text", text: TOOL_TEXT_FALLBACK }],
+    structuredContent: value,
+  };
+}
+
+export function transportFailure(reason: string, retryable = true): Json {
+  return {
+    schema: "okx.direct-transport.result/v1",
+    status: "FAILED",
+    reason,
+    retryable,
+  };
+}
+
+export function requestId(): string {
+  return `req_mcp_${crypto.randomUUID()}`;
+}
+
+export function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeToken(
+  value: unknown,
+  min: number,
+  max: number,
+): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase();
+  if (
+    normalized.length < min ||
+    normalized.length > max ||
+    !/^[A-Z0-9_-]+$/.test(normalized)
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+export function normalizeCode(value: unknown, min = 2, max = 64): string | null {
+  return normalizeToken(value, min, max);
+}
+
+export function normalizeInstrument(value: unknown): string | null {
+  return normalizeToken(value, 3, 64);
+}
+
+export async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export function sameHex(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    mismatch |= left.charCodeAt(i) ^ right.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+export async function runtimeStub(env: Env): Promise<any> {
+  const id = env.RUNTIME.idFromName(RUNTIME_OBJECT_NAME);
+  return env.RUNTIME.get(id);
+}
+
+export async function runtimeFetch(env: Env, path: string, init?: RequestInit): Promise<any> {
+  const stub = await runtimeStub(env);
+  const response = await stub.fetch(`https://runtime.internal${path}`, init);
+  return response.json();
+}
+
+export async function dispatchRuntime(
+  env: Env,
+  request: Record<string, unknown>,
+): Promise<Json> {
+  return runtimeFetch(env, "/dispatch", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}

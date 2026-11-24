@@ -1,0 +1,2283 @@
+{
+  "tools": [
+    {
+      "name": "accounts",
+      "description": "Accounts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "status",
+              "connect",
+              "pause",
+              "resume",
+              "set_limits"
+            ]
+          },
+          "account": {
+            "$ref": "#/$defs/t"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "credential_ref": {
+            "$ref": "#/$defs/t"
+          },
+          "alias": {
+            "$ref": "#/$defs/s"
+          },
+          "label": {
+            "$ref": "#/$defs/t"
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "max_modelled_loss_usdt": {
+                "$ref": "#/$defs/d"
+              },
+              "max_order_loss_usdt": {
+                "$ref": "#/$defs/d"
+              },
+              "max_notional_usdt": {
+                "$ref": "#/$defs/z"
+              },
+              "max_leverage": {
+                "$ref": "#/$defs/z"
+              },
+              "max_daily_realized_loss_usdt": {
+                "$ref": "#/$defs/z"
+              },
+              "max_drawdown_ratio": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(?:0(?:\\.[0-9]{1,27})?|1(?:\\.0{1,27})?)$",
+                    "maxLength": 29
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "allowed_instruments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s"
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "max_entry_usd": {
+                "$ref": "#/$defs/d"
+              }
+            },
+            "required": [
+              "max_modelled_loss_usdt",
+              "max_order_loss_usdt",
+              "max_notional_usdt",
+              "max_leverage",
+              "max_daily_realized_loss_usdt",
+              "max_drawdown_ratio",
+              "allowed_instruments"
+            ],
+            "additionalProperties": false
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "link_id": {
+            "$ref": "#/$defs/l"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "list"
+              },
+              "link_id": {
+                "$ref": "#/$defs/l"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "status"
+              },
+              "account": {},
+              "link_id": {
+                "$ref": "#/$defs/l"
+              }
+            },
+            "required": [
+              "action",
+              "account"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "connect"
+              },
+              "idempotency_key": {},
+              "credential_ref": {},
+              "alias": {},
+              "label": {},
+              "limits": {},
+              "enabled": {},
+              "link_id": {
+                "$ref": "#/$defs/l"
+              }
+            },
+            "required": [
+              "action",
+              "idempotency_key",
+              "credential_ref",
+              "alias",
+              "limits",
+              "enabled"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "enum": [
+                  "pause",
+                  "resume"
+                ]
+              },
+              "account": {},
+              "idempotency_key": {},
+              "expected_revision": {},
+              "link_id": {
+                "$ref": "#/$defs/l"
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "expected_revision"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "set_limits"
+              },
+              "account": {},
+              "idempotency_key": {},
+              "expected_revision": {},
+              "limits": {},
+              "link_id": {
+                "$ref": "#/$defs/l"
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "expected_revision",
+              "limits"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "$defs": {
+          "d": {
+            "type": "string",
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "l": {
+            "type": "string",
+            "pattern": "^link_[a-f0-9]{32}$"
+          },
+          "z": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/d"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "strategies",
+      "description": "Strategies; may trade.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "list"
+              },
+              "account": {
+                "$ref": "#/$defs/t"
+              }
+            },
+            "required": [
+              "action",
+              "account"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "status"
+              },
+              "account": {
+                "$ref": "#/$defs/t"
+              },
+              "instance_id": {
+                "$ref": "#/$defs/s"
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "instance_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "create"
+              },
+              "account": {
+                "$ref": "#/$defs/t"
+              },
+              "idempotency_key": {
+                "$ref": "#/$defs/k"
+              },
+              "instance_id": {
+                "$ref": "#/$defs/s"
+              },
+              "definition_id": {
+                "$ref": "#/$defs/s"
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1
+              },
+              "parameters": {
+                "$ref": "#/$defs/h"
+              },
+              "instruments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s"
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 9007199254740991
+              },
+              "budget_usd": {
+                "$ref": "#/$defs/d"
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "instance_id",
+              "definition_id",
+              "version",
+              "parameters",
+              "instruments",
+              "timeframe_ms",
+              "budget_usd"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "update"
+              },
+              "account": {
+                "$ref": "#/$defs/t"
+              },
+              "idempotency_key": {
+                "$ref": "#/$defs/k"
+              },
+              "instance_id": {
+                "$ref": "#/$defs/s"
+              },
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "parameters": {
+                "$ref": "#/$defs/h"
+              },
+              "budget_usd": {
+                "$ref": "#/$defs/d"
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "instance_id",
+              "expected_revision",
+              "parameters",
+              "budget_usd"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "enum": [
+                  "start",
+                  "stop"
+                ]
+              },
+              "account": {
+                "$ref": "#/$defs/t"
+              },
+              "idempotency_key": {
+                "$ref": "#/$defs/k"
+              },
+              "instance_id": {
+                "$ref": "#/$defs/s"
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "instance_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "capital_assign"
+              },
+              "account": {
+                "$ref": "#/$defs/t"
+              },
+              "idempotency_key": {
+                "$ref": "#/$defs/k"
+              },
+              "instance_id": {
+                "$ref": "#/$defs/s"
+              },
+              "direction": {
+                "enum": [
+                  "assign",
+                  "release"
+                ]
+              },
+              "amount_usd": {
+                "$ref": "#/$defs/d"
+              },
+              "expected_authority_revision": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "action",
+              "account",
+              "idempotency_key",
+              "instance_id",
+              "direction",
+              "amount_usd",
+              "expected_authority_revision"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "$defs": {
+          "d": {
+            "type": "string",
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "k": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "h": {
+            "type": "object",
+            "properties": {
+              "fast": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999
+              },
+              "slow": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 1000
+              }
+            },
+            "required": [
+              "fast",
+              "slow"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "market",
+      "description": "Market: graphs via screen + composition.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "enum": [
+                  "screen",
+                  "compare"
+                ]
+              },
+              "instruments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s"
+                },
+                "maxItems": 100,
+                "uniqueItems": true
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 2678400000
+              },
+              "start_ms": {
+                "$ref": "#/$defs/n"
+              },
+              "end_ms": {
+                "$ref": "#/$defs/n"
+              },
+              "universe": {
+                "type": "object",
+                "properties": {
+                  "instrument_type": {
+                    "enum": [
+                      "SPOT",
+                      "SWAP",
+                      "FUTURES"
+                    ]
+                  },
+                  "settle_currency": {
+                    "$ref": "#/$defs/b"
+                  },
+                  "after_instrument": {
+                    "$ref": "#/$defs/s"
+                  },
+                  "reference_generation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  },
+                  "rank_globally": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "instrument_type"
+                ],
+                "additionalProperties": false
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s"
+                },
+                "maxItems": 14,
+                "uniqueItems": true,
+                "minItems": 1
+              },
+              "composition": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "enum": [
+                      "okx.market.composition/v1"
+                    ]
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "$ref": "#/$defs/x"
+                        },
+                        "op": {
+                          "enum": [
+                            "returns_series",
+                            "rolling_mean",
+                            "rolling_max",
+                            "rolling_min",
+                            "rolling_range",
+                            "rolling_pearson",
+                            "rolling_zscore",
+                            "rolling_stddev",
+                            "add_series",
+                            "subtract_series",
+                            "divide_series",
+                            "and",
+                            "or",
+                            "lag",
+                            "greater_than",
+                            "greater_than_series",
+                            "less_than",
+                            "less_than_series",
+                            "rising_edge",
+                            "falling_edge",
+                            "forward_return_label"
+                          ]
+                        },
+                        "input": {
+                          "$ref": "#/$defs/x"
+                        },
+                        "other": {
+                          "$ref": "#/$defs/x"
+                        },
+                        "period": {
+                          "$ref": "#/$defs/y"
+                        },
+                        "threshold": {
+                          "type": "number"
+                        },
+                        "when": {
+                          "$ref": "#/$defs/x"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "op",
+                        "input"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 32
+                  },
+                  "result_steps": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/x"
+                    },
+                    "minItems": 1,
+                    "maxItems": 14
+                  }
+                },
+                "required": [
+                  "version",
+                  "steps",
+                  "result_steps"
+                ],
+                "additionalProperties": false
+              },
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "ema_period": {
+                    "$ref": "#/$defs/y"
+                  },
+                  "atr_period": {
+                    "$ref": "#/$defs/y"
+                  },
+                  "rsi_period": {
+                    "$ref": "#/$defs/y"
+                  },
+                  "budget": {
+                    "type": "number",
+                    "minimum": 1e-9,
+                    "maximum": 9007199254740991
+                  },
+                  "price": {
+                    "type": "number",
+                    "minimum": 1e-9,
+                    "maximum": 9007199254740991
+                  },
+                  "stop_distance": {
+                    "type": "number",
+                    "minimum": 1e-9,
+                    "maximum": 0.999999999
+                  },
+                  "notional": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "fee_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "slippage_bps": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "filters": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "field": {
+                      "$ref": "#/$defs/s"
+                    },
+                    "min": {
+                      "type": "number",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "max": {
+                      "type": "number",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "field"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 16,
+                "uniqueItems": true
+              },
+              "sort": {
+                "type": "object",
+                "properties": {
+                  "field": {
+                    "$ref": "#/$defs/s"
+                  },
+                  "descending": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "field"
+                ],
+                "additionalProperties": false
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "action",
+              "fields",
+              "timeframe_ms",
+              "start_ms",
+              "end_ms",
+              "limit"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "instruments"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "universe"
+                    ]
+                  }
+                ]
+              },
+              {
+                "if": {
+                  "properties": {
+                    "action": {
+                      "const": "compare"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "instruments"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "instruments"
+              },
+              "asset": {
+                "$ref": "#/$defs/b"
+              },
+              "settle_currency": {
+                "$ref": "#/$defs/b"
+              }
+            },
+            "required": [
+              "action",
+              "asset"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "snapshot"
+              },
+              "instrument": {
+                "$ref": "#/$defs/s"
+              }
+            },
+            "required": [
+              "action",
+              "instrument"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "microstructure"
+              },
+              "instrument": {
+                "$ref": "#/$defs/s"
+              },
+              "size_contracts": {
+                "type": "string",
+                "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+                "maxLength": 29
+              }
+            },
+            "required": [
+              "action",
+              "instrument"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "capabilities"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "$defs": {
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "b": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "x": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]{1,32}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "research",
+      "description": "Research.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "record_decision"
+              },
+              "job_id": {
+                "$ref": "#/$defs/j"
+              },
+              "result_id": {
+                "$ref": "#/$defs/a"
+              },
+              "expected_decision_id": {
+                "$ref": "#/$defs/a"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "\\S"
+              },
+              "hypothesis": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "\\S"
+              },
+              "status": {
+                "enum": [
+                  "accepted",
+                  "rejected",
+                  "deferred"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "pattern": "\\S"
+              }
+            },
+            "required": [
+              "action",
+              "job_id",
+              "result_id",
+              "name",
+              "hypothesis",
+              "status",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "decision"
+              },
+              "job_id": {
+                "$ref": "#/$defs/j"
+              },
+              "decision_id": {
+                "$ref": "#/$defs/a"
+              }
+            },
+            "required": [
+              "action",
+              "job_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "enum": [
+                  "backtest",
+                  "grid"
+                ]
+              },
+              "idempotency_key": {
+                "$ref": "#/$defs/k"
+              },
+              "instruments": {
+                "$ref": "#/$defs/u"
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 2678400000
+              },
+              "start_ms": {
+                "$ref": "#/$defs/n"
+              },
+              "end_ms": {
+                "$ref": "#/$defs/n"
+              },
+              "strategy_id": {
+                "$ref": "#/$defs/r"
+              },
+              "costs": {
+                "$ref": "#/$defs/c"
+              },
+              "data_mode": {
+                "enum": [
+                  "historical_observed",
+                  "counterfactual"
+                ]
+              },
+              "seed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "parameters": {
+                "$ref": "#/$defs/q"
+              },
+              "variants": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/q"
+                },
+                "maxItems": 64,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "action",
+              "idempotency_key",
+              "instruments",
+              "timeframe_ms",
+              "start_ms",
+              "end_ms",
+              "strategy_id",
+              "costs",
+              "data_mode"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "parameters"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "variants"
+                    ]
+                  }
+                ]
+              },
+              {
+                "if": {
+                  "properties": {
+                    "action": {
+                      "const": "backtest"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "parameters"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "action": {
+                      "const": "grid"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "variants"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "benchmark"
+              },
+              "idempotency_key": {
+                "$ref": "#/$defs/k"
+              }
+            },
+            "required": [
+              "action",
+              "idempotency_key"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "status"
+              },
+              "job_id": {
+                "$ref": "#/$defs/t"
+              }
+            },
+            "required": [
+              "action",
+              "job_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "cancel"
+              },
+              "job_id": {
+                "$ref": "#/$defs/t"
+              },
+              "idempotency_key": {
+                "$ref": "#/$defs/k"
+              }
+            },
+            "required": [
+              "action",
+              "job_id",
+              "idempotency_key"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "result"
+              },
+              "job_id": {
+                "$ref": "#/$defs/t"
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              },
+              "view": {
+                "enum": [
+                  "summary",
+                  "trades",
+                  "equity",
+                  "variants",
+                  "export"
+                ]
+              }
+            },
+            "required": [
+              "action",
+              "job_id",
+              "limit"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "capabilities"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "economics"
+              },
+              "cases": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "instrument": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "product": {
+                      "enum": [
+                        "spot",
+                        "linear_swap",
+                        "inverse_swap",
+                        "option"
+                      ]
+                    },
+                    "side": {
+                      "enum": [
+                        "long",
+                        "short"
+                      ]
+                    },
+                    "quantity": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "entry_price": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "exit_price": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "contract_type": {
+                      "enum": [
+                        "linear",
+                        "inverse"
+                      ]
+                    },
+                    "contract_value": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "contract_value_currency": {
+                      "$ref": "#/$defs/b"
+                    },
+                    "settle_currency": {
+                      "$ref": "#/$defs/b"
+                    },
+                    "fees": {
+                      "$ref": "#/$defs/e"
+                    },
+                    "funding": {
+                      "$ref": "#/$defs/e"
+                    }
+                  },
+                  "required": [
+                    "instrument",
+                    "product",
+                    "side",
+                    "quantity",
+                    "entry_price",
+                    "exit_price",
+                    "fees",
+                    "funding"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1,
+                "maxItems": 8
+              },
+              "data_mode": {
+                "$ref": "#/$defs/v"
+              }
+            },
+            "required": [
+              "action",
+              "cases",
+              "data_mode"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "validate"
+              },
+              "instruments": {
+                "$ref": "#/$defs/u"
+              },
+              "timeframe_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 2678400000
+              },
+              "start_ms": {
+                "$ref": "#/$defs/n"
+              },
+              "end_ms": {
+                "$ref": "#/$defs/n"
+              },
+              "range_mode": {
+                "enum": [
+                  "strict",
+                  "normalize"
+                ]
+              },
+              "strategy_id": {
+                "$ref": "#/$defs/r"
+              },
+              "parameters": {
+                "$ref": "#/$defs/q"
+              },
+              "costs": {
+                "$ref": "#/$defs/c"
+              },
+              "data_mode": {
+                "$ref": "#/$defs/v"
+              }
+            },
+            "required": [
+              "action",
+              "instruments",
+              "timeframe_ms",
+              "start_ms",
+              "end_ms",
+              "strategy_id",
+              "parameters",
+              "costs",
+              "data_mode"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "$defs": {
+          "d": {
+            "type": "string",
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "b": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16
+          },
+          "a": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "j": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "k": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "r": {
+            "enum": [
+              "ema_cross_v1",
+              "ema_momentum_confirm_v1",
+              "close_breakout_v1"
+            ]
+          },
+          "q": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "fast": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 999
+                  },
+                  "slow": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 1000
+                  }
+                },
+                "required": [
+                  "fast",
+                  "slow"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "lookback": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 1000
+                  }
+                },
+                "required": [
+                  "lookback"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "c": {
+            "type": "object",
+            "properties": {
+              "maker_fee_bps": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "taker_fee_bps": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "slippage_bps": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "funding_mode": {
+                "enum": [
+                  "observed",
+                  "zero_assumption"
+                ]
+              }
+            },
+            "required": [
+              "maker_fee_bps",
+              "taker_fee_bps",
+              "slippage_bps",
+              "funding_mode"
+            ],
+            "additionalProperties": false
+          },
+          "e": {
+            "type": "object",
+            "properties": {
+              "currency": {
+                "$ref": "#/$defs/b"
+              },
+              "amount": {
+                "type": "string",
+                "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+                "maxLength": 29
+              }
+            },
+            "required": [
+              "currency",
+              "amount"
+            ],
+            "additionalProperties": false
+          },
+          "u": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "maxItems": 8,
+            "uniqueItems": true,
+            "minItems": 1
+          },
+          "v": {
+            "enum": [
+              "counterfactual",
+              "historical_observed"
+            ]
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "portfolio",
+      "description": "Portfolio.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "enum": [
+                  "summary",
+                  "history"
+                ]
+              },
+              "accounts": {
+                "$ref": "#/$defs/w"
+              },
+              "start_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "end_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "strategies": {
+                "$ref": "#/$defs/w"
+              },
+              "currencies": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16
+                },
+                "maxItems": 32,
+                "uniqueItems": true
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              }
+            },
+            "required": [
+              "action",
+              "accounts",
+              "start_ms",
+              "end_ms",
+              "limit"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "scenario"
+              },
+              "equity_usd": {
+                "$ref": "#/$defs/d"
+              },
+              "positions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "instrument": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "side": {
+                      "enum": [
+                        "long",
+                        "short"
+                      ]
+                    },
+                    "notional_usd": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "margin_usd": {
+                      "$ref": "#/$defs/d"
+                    },
+                    "price_shock_bps": {
+                      "type": "integer",
+                      "minimum": -10000,
+                      "maximum": 10000
+                    },
+                    "volatility_bps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    },
+                    "liquidity_cost_bps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10000
+                    }
+                  },
+                  "required": [
+                    "instrument",
+                    "side",
+                    "notional_usd",
+                    "margin_usd",
+                    "price_shock_bps",
+                    "volatility_bps",
+                    "liquidity_cost_bps"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 8,
+                "uniqueItems": true
+              },
+              "correlations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "left": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 7
+                    },
+                    "right": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 7
+                    },
+                    "rho": {
+                      "type": "number",
+                      "minimum": -1,
+                      "maximum": 1
+                    }
+                  },
+                  "required": [
+                    "left",
+                    "right",
+                    "rho"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 28,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "action",
+              "equity_usd",
+              "positions",
+              "correlations"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "$defs": {
+          "d": {
+            "type": "string",
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "w": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "maxItems": 32,
+            "uniqueItems": true
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "diagnostics",
+      "description": "Diagnostics.",
+      "inputSchema": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "explain"
+              },
+              "reference": {
+                "$ref": "#/$defs/t"
+              },
+              "account": {
+                "$ref": "#/$defs/t"
+              },
+              "view": {
+                "enum": [
+                  "finance",
+                  "operation",
+                  "research",
+                  "storage"
+                ]
+              },
+              "cycle_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "anyOf": [
+                  {
+                    "required": [
+                      "account"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "reference"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "runtime"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "$defs": {
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.preview",
+      "description": "Preview; no order.",
+      "inputSchema": {
+        "properties": {
+          "account": {
+            "$ref": "#/$defs/t"
+          },
+          "operation": {
+            "enum": [
+              "open",
+              "add",
+              "reduce",
+              "close",
+              "replace"
+            ]
+          },
+          "strategy_instance": {
+            "$ref": "#/$defs/s"
+          },
+          "instrument": {
+            "$ref": "#/$defs/s"
+          },
+          "side": {
+            "enum": [
+              "long",
+              "short"
+            ]
+          },
+          "sizing": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "contracts": {
+                    "$ref": "#/$defs/d"
+                  }
+                },
+                "required": [
+                  "contracts"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "max_loss_usd": {
+                    "$ref": "#/$defs/d"
+                  }
+                },
+                "required": [
+                  "max_loss_usd"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "entry_budget_usd": {
+                    "$ref": "#/$defs/d"
+                  }
+                },
+                "required": [
+                  "entry_budget_usd"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "order": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "enum": [
+                  "limit",
+                  "market",
+                  "post_only",
+                  "ioc",
+                  "fok"
+                ]
+              },
+              "limit_price": {
+                "$ref": "#/$defs/d"
+              },
+              "reference": {
+                "$ref": "#/$defs/t"
+              },
+              "max_entry_usd": {
+                "$ref": "#/$defs/d"
+              },
+              "max_slippage_bps": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            },
+            "required": [
+              "type",
+              "max_slippage_bps"
+            ],
+            "additionalProperties": false
+          },
+          "protection": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "stop_price": {
+                    "$ref": "#/$defs/d"
+                  }
+                },
+                "required": [
+                  "stop_price"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "stop_distance_bps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "stop_distance_bps"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "account",
+          "operation",
+          "strategy_instance",
+          "instrument",
+          "side",
+          "sizing",
+          "order"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "open",
+                    "add",
+                    "replace"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "protection"
+              ]
+            }
+          }
+        ],
+        "type": "object",
+        "$defs": {
+          "d": {
+            "type": "string",
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.execute",
+      "description": "Real order; loss possible. Approval, limits, STOP required.",
+      "inputSchema": {
+        "properties": {
+          "account": {
+            "$ref": "#/$defs/t"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "operation": {
+            "enum": [
+              "open",
+              "add",
+              "reduce",
+              "close",
+              "replace"
+            ]
+          },
+          "strategy_instance": {
+            "$ref": "#/$defs/s"
+          },
+          "instrument": {
+            "$ref": "#/$defs/s"
+          },
+          "side": {
+            "enum": [
+              "long",
+              "short"
+            ]
+          },
+          "sizing": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "contracts": {
+                    "$ref": "#/$defs/d"
+                  }
+                },
+                "required": [
+                  "contracts"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "max_loss_usd": {
+                    "$ref": "#/$defs/d"
+                  }
+                },
+                "required": [
+                  "max_loss_usd"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "entry_budget_usd": {
+                    "$ref": "#/$defs/d"
+                  }
+                },
+                "required": [
+                  "entry_budget_usd"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "order": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "enum": [
+                  "limit",
+                  "market",
+                  "post_only",
+                  "ioc",
+                  "fok"
+                ]
+              },
+              "limit_price": {
+                "$ref": "#/$defs/d"
+              },
+              "reference": {
+                "$ref": "#/$defs/t"
+              },
+              "max_entry_usd": {
+                "$ref": "#/$defs/d"
+              },
+              "max_slippage_bps": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            },
+            "required": [
+              "type",
+              "max_slippage_bps"
+            ],
+            "additionalProperties": false
+          },
+          "protection": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "stop_price": {
+                    "$ref": "#/$defs/d"
+                  }
+                },
+                "required": [
+                  "stop_price"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "stop_distance_bps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "stop_distance_bps"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "expires_in_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000
+          }
+        },
+        "required": [
+          "account",
+          "idempotency_key",
+          "operation",
+          "strategy_instance",
+          "instrument",
+          "side",
+          "sizing",
+          "order",
+          "expires_in_ms"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "open",
+                    "add",
+                    "replace"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "protection"
+              ]
+            }
+          }
+        ],
+        "type": "object",
+        "$defs": {
+          "d": {
+            "type": "string",
+            "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "maxLength": 29
+          },
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.status",
+      "description": "Status.",
+      "inputSchema": {
+        "properties": {
+          "account": {
+            "$ref": "#/$defs/t"
+          },
+          "reference": {
+            "$ref": "#/$defs/t"
+          }
+        },
+        "required": [
+          "account",
+          "reference"
+        ],
+        "additionalProperties": false,
+        "type": "object",
+        "$defs": {
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.cancel",
+      "description": "Cancel order.",
+      "inputSchema": {
+        "properties": {
+          "account": {
+            "$ref": "#/$defs/t"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "reference": {
+            "$ref": "#/$defs/t"
+          }
+        },
+        "required": [
+          "account",
+          "idempotency_key",
+          "reference"
+        ],
+        "additionalProperties": false,
+        "type": "object",
+        "$defs": {
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.close",
+      "description": "Real close order.",
+      "inputSchema": {
+        "properties": {
+          "account": {
+            "$ref": "#/$defs/t"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "reference": {
+            "$ref": "#/$defs/t"
+          },
+          "expires_in_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000
+          }
+        },
+        "required": [
+          "account",
+          "idempotency_key",
+          "reference",
+          "expires_in_ms"
+        ],
+        "additionalProperties": false,
+        "type": "object",
+        "$defs": {
+          "t": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.capabilities",
+      "description": "Rights.",
+      "inputSchema": {
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "trade.preflight",
+      "description": "Readiness.",
+      "inputSchema": {
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    }
+  ]
+}

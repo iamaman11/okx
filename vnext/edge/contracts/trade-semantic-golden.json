@@ -1,0 +1,144 @@
+{
+  "schema": "okx.trade.semantic-golden/v1",
+  "numeric": {
+    "positive": [
+      [
+        "5",
+        "5"
+      ],
+      [
+        "5.0",
+        "5"
+      ],
+      [
+        "5.00",
+        "5"
+      ],
+      [
+        "0.0000000001",
+        "0.0000000001"
+      ],
+      [
+        "9999999999999999999999999999",
+        "9999999999999999999999999999"
+      ]
+    ],
+    "signed": [
+      [
+        "-0",
+        "0"
+      ],
+      [
+        "0.00",
+        "0"
+      ]
+    ],
+    "rejected": [
+      [
+        "0",
+        "DECIMAL_MUST_BE_POSITIVE"
+      ],
+      [
+        "0.00",
+        "DECIMAL_MUST_BE_POSITIVE"
+      ],
+      [
+        "99999999999999999999999999999",
+        "NUMERIC_RANGE"
+      ],
+      [
+        "1e-10",
+        "INVALID_DECIMAL_SYNTAX"
+      ],
+      [
+        " 5",
+        "INVALID_DECIMAL_SYNTAX"
+      ],
+      [
+        "NaN",
+        "INVALID_DECIMAL_SYNTAX"
+      ],
+      [
+        "01",
+        "INVALID_DECIMAL_SYNTAX"
+      ]
+    ],
+    "sum": [
+      "0.0000000001",
+      "0.0000000002",
+      "0.0000000003"
+    ]
+  },
+  "trade": {
+    "account_key": "okx:real:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variants": [
+      {
+        "action": "execute",
+        "idempotency_key": "semantic_trade_01",
+        "operation": "open",
+        "strategy_instance": "manual",
+        "instrument": "BTC-USDT-SWAP",
+        "side": "long",
+        "sizing": {
+          "max_loss_usd": "5.0"
+        },
+        "order": {
+          "type": "limit",
+          "limit_price": "100.00",
+          "reference": null,
+          "max_entry_usd": "6.003",
+          "max_slippage_bps": 5
+        },
+        "protection": {
+          "stop_price": "90.00"
+        },
+        "expires_in_ms": 10000
+      },
+      {
+        "expires_in_ms": 10000,
+        "side": "long",
+        "protection": {
+          "stop_price": "90"
+        },
+        "order": {
+          "max_slippage_bps": 5,
+          "max_entry_usd": "6.003",
+          "reference": null,
+          "type": "limit",
+          "limit_price": "100.0"
+        },
+        "sizing": {
+          "max_loss_usd": "5.00"
+        },
+        "instrument": "BTC-USDT-SWAP",
+        "strategy_instance": "manual",
+        "operation": "open",
+        "idempotency_key": "semantic_trade_01",
+        "action": "execute"
+      },
+      {
+        "expires_in_ms": 10000,
+        "side": "long",
+        "protection": {
+          "stop_price": "90"
+        },
+        "order": {
+          "type": "limit",
+          "limit_price": "100.000",
+          "max_entry_usd": "6.003",
+          "max_slippage_bps": 5
+        },
+        "sizing": {
+          "max_loss_usd": "5.00"
+        },
+        "instrument": "BTC-USDT-SWAP",
+        "strategy_instance": "manual",
+        "operation": "open",
+        "idempotency_key": "semantic_trade_01",
+        "action": "execute"
+      }
+    ],
+    "canonical_utf8_json": "{\"account_key\":\"okx:real:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"request\":{\"action\":\"execute\",\"expires_in_ms\":10000,\"idempotency_key\":\"semantic_trade_01\",\"instrument\":\"BTC-USDT-SWAP\",\"operation\":\"open\",\"order\":{\"limit_price\":\"100\",\"max_entry_usd\":\"6.003\",\"max_slippage_bps\":5,\"reference\":null,\"type\":\"limit\"},\"protection\":{\"stop_price\":\"90\"},\"side\":\"long\",\"sizing\":{\"max_loss_usd\":\"5\"},\"strategy_instance\":\"manual\"},\"schema\":\"okx.trade.semantic/v1\"}",
+    "sha256": "2989c9ccb1b407d4372e49bcb3bfcc19061752ae3412272bb9a1277b2288fba9"
+  }
+}

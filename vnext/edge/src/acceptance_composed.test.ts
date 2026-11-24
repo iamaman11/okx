@@ -1,0 +1,547 @@
+// #398 A2/A3: real Worker routing + actual central governance transaction owner,
+// with a stateful fake Agent/venue. Never classify this as live WSS/native SQL.
+import {mcpApi} from './mcp.js';
+import {RuntimeSession} from './runtime_session.js';
+import {FRAME_SCHEMA} from './shared.js';
+import {governanceRequest,initializeGovernance,enrollObservedAccount,setAccountPause,setAccountLimits} from './account_governance_store.js';
+import {initial,limits} from './account_governance.test.js';
+// Real acceptance fixture has a hard entry cap separate from campaign loss.
+const acceptanceEntryLimits={...limits,max_entry_usd:'10'};
+import type {Governance} from './account_governance.js';
+import {handleNativeRiskCommand} from './risk_authority.js';
+import {readRiskBook,inspectRisk,installCampaignEntryProof,openingDigest,type CampaignEntryOpeningSource} from './risk_book.js';
+
+function check(ok:unknown,message:string):asserts ok{if(!ok)throw Error(message);}
+class Storage {
+ map=new Map<string,any>();
+ private queue=Promise.resolve();
+ async get(key:string){return structuredClone(this.map.get(key));}
+ async put(key:string,value:unknown){this.map.set(key,structuredClone(value));}
+ async delete(keys:string[]){let count=0;for(const k of keys)if(this.map.delete(k))count++;return count;}
+ async transaction<T>(fn:(tx:Storage)=>Promise<T>):Promise<T>{
+  const preceding=this.queue;let unlock!:()=>void;
+  this.queue=new Promise<void>(resolve=>{unlock=resolve;});await preceding;
+  const original=structuredClone(this.map);
+  try{return await fn(this);}catch(error){this.map=original;throw error;}finally{unlock();}
+ }
+}
+const storage=new Storage();
+// This trace is emitted only during CI's native SQL bridge test. It records
+// actual Worker governance transactions, not mocked native acknowledgements.
+const nativePolicyTrace:{schema:string;source:string;events:Array<{
+ stage:string;governance:Record<string,unknown>;frame:Record<string,unknown>;frame_count:number}>}={
+ schema:'okx.a2.worker-sql-cas-trace/v1',
+ source:'mcpApi.fetch+account_governance_store.transaction',
+ events:[]
+};
+const policyFrames:Array<Record<string,unknown>>=[];
+const generation=4;
+const policySocket={
+ deserializeAttachment:()=>({runtimeId:'windows-primary',runtimeProfile:'engine',
+  sessionId:'session_test_012345',generation,hello:true,
+  connectedAtMs:Date.now()-1000,lastPongAtMs:Date.now()}),
+ send:(raw:string)=>{
+  const frame=JSON.parse(raw);
+  check(frame.type==='policy_snapshot'&&frame.schema===FRAME_SCHEMA,
+   'native policy fixture must observe only genuine RuntimeSession policy frames');
+  policyFrames.push(structuredClone(frame));
+ },
+ close:()=>{throw Error('no policy-frame send failures expected')}
+};
+const runtimeOwner=new RuntimeSession(
+ {storage,getWebSockets:()=>[policySocket]},{} as any);
+async function recordNativePolicy(stage:string):Promise<void>{
+ const snapshot=await governanceRequest(storage,'GET');
+ check(snapshot.status===200,'central CAS trace must come from committed storage');
+ const {status,access,readiness,last_admission,complete_all_account_census,
+  available_for_new_risk_usdt,...governance}=snapshot.body;
+ const frame=policyFrames.at(-1);
+ check(frame&&frame.type==='policy_snapshot','native bridge requires outbound DO WSS policy');
+ const outgoing=frame.snapshot as Record<string,unknown>;
+ check(JSON.stringify(outgoing.state)===JSON.stringify(governance),
+  'outbound DO frame must reflect committed central owner state');
+ nativePolicyTrace.events.push({
+  stage,governance:structuredClone(governance),frame:structuredClone(frame),
+  frame_count:policyFrames.length
+ });
+}
+check((await initializeGovernance(storage,initial)).status===200,'synthetic central installation');
+const ctx={auth:{scope:['mcp:use']}};
+let id=0,venuePostCount=0,transportCalls=0;
+const intents=new Map<string,{intent_id:string;state:string;plan:Record<string,unknown>;protected:boolean}>();
+const bodyHash=new Map<string,string>();
+const intentByKey=new Map<string,string>();
+// Only the synthetic Real Agent owns these fixture routing handles. The
+// actual independent RiskBook remains in the single Worker storage owner.
+const bridgeJson=(globalThis as any).process?.env?.OKX_E1_BRIDGE_SOURCE_JSON as string|undefined;
+const nativeSource=bridgeJson?JSON.parse(bridgeJson) as Record<string,unknown>:null;
+const nativeFixtureEntryUsd='5.0025'; // 1 linear contract @5, venue fee 0.0025, FX=1
+const realRiskByIntent=new Map<string,{
+  reservation:string;planHash:string;sequence:number;uid:string;
+  runId:string;account:string;at:number
+}>();
+const verifiedUid='a'.repeat(64);
+if(nativeSource)check(nativeSource.schema==='okx.e1.native-sql-settlement-source/v1'&&
+ nativeSource.cumulative_entry_usd===nativeFixtureEntryUsd&&
+ nativeSource.entry_upper_usd===nativeFixtureEntryUsd&&
+ nativeSource.usd_per_usdt==='1'&&
+ typeof nativeSource.usd_conversion_source_digest==='string'&&
+ /^[a-f0-9]{64}$/.test(nativeSource.usd_conversion_source_digest)&&
+ typeof nativeSource.entry_proof_digest==='string'&&
+ /^[a-f0-9]{64}$/.test(nativeSource.entry_proof_digest)&&
+ nativeSource.settlement_revision===1&&
+ nativeSource.account_key==='okx:real:'+verifiedUid&&
+ typeof nativeSource.source_digest==='string'&&
+ /^[a-f0-9]{64}$/.test(nativeSource.source_digest)&&
+ typeof nativeSource.plan_hash==='string'&&
+ /^[a-f0-9]{64}$/.test(nativeSource.plan_hash),
+ 'native money source must be directly produced by AccountStore SQL');
+const accountKey='okx:demo:'+verifiedUid;
+const success=(data:unknown)=>({schema:'okx.agent.response/v1',request_id:'fixture_native_'+(++id),
+ status:'completed',quality:'FRESH',warnings:[],result:{status:'completed',as_of_ms:1792890000000,
+ data,quality:{state:'fresh'},warnings:[]}});
+const rejected=(reason:string)=>({schema:'okx.agent.response/v1',request_id:'fixture_native_'+(++id),
+ status:'rejected',quality:'NOT_READY',warnings:[],result:null,
+ failure:{code:reason,message:reason,retryable:false}});
+const handler=async(url:string,init?:RequestInit)=>{
+ transportCalls++;
+ const path=new URL(url).pathname;
+ const raw=init?.body?JSON.parse(String(init.body)):null;
+ // Route through the actual Durable Object owner (including publishPolicy),
+ // never call governanceStore mutation methods directly from this fixture.
+ if(['/account-governance','/account-governance/enroll',
+     '/account-governance/pause','/account-governance/limits'].includes(path))
+  return runtimeOwner.fetch(new Request(url,{
+   method:init?.method??'GET',
+   headers:{'content-type':'application/json'},
+   ...(init?.body?{body:String(init.body)}:{})
+  }));
+ check(path==='/dispatch','unexpected transport endpoint');
+ const op=raw?.operation;
+ if(op?.type==='connect_account'){
+  return Response.json({status:'completed',result:{alias:op.alias,credential_ref:op.credential_ref,
+   connect_operation_id:op.operation_id,configuration_digest:op.request_digest,
+   account_key:{venue:'okx',environment:op.credential_ref==='credential_fixture_real'?'real':'demo',verified_uid:verifiedUid}}});
+ }
+ const req=op?.request;
+ if(op?.type!=='trade'||!req)return Response.json(rejected('FAKE_OPERATION_UNSUPPORTED'));
+ const governance=(await governanceRequest(storage,'GET')).body as any;
+ const row=governance.accounts?.find((a:any)=>a.account_key===raw.account||a.id===raw.account);
+ if(!row)return Response.json(rejected('ACCOUNT_NOT_FOUND'));
+ if(req.action==='preflight')return Response.json(success({ready_for_new_risk:false,side_effects:'none'}));
+ if(req.action==='preview')return Response.json(success({admission:'preview_only',
+  plan:{instrument:req.instrument,stop_price:'99',planned_loss_usd:'0.5'},exchange_post:false}));
+ if(req.action==='status'){
+  const found=intents.get(req.reference);
+  return Response.json(found?success({intent:found}):rejected('INTENT_NOT_FOUND'));
+ }
+ if(['execute','cancel','close'].includes(req.action)&&row.explicit_pause&&req.action==='execute'){
+  return Response.json(rejected('ACCOUNT_NEW_RISK_PAUSED'));
+ }
+ if(req.action==='execute'){
+  // Explicit synthetic Real branch: MCP routes to the fixture Agent, which
+  // requests actual central Worker RiskBook RESERVE and BEGIN_POST decisions.
+  // The invented native census/session here is TEST ONLY, never an MCP input.
+  if(row.environment==='real'){
+   const hash=JSON.stringify(req),key=String(req.idempotency_key);
+   if(bodyHash.has(key)&&bodyHash.get(key)!==hash)
+    return Response.json(rejected('IDEMPOTENCY_CONFLICT'));
+   const existing=intentByKey.get(key);
+   if(existing)return Response.json(success({intent:intents.get(existing)}));
+   const at=1792890000000;
+   // A source-backed CI composition must use the SAME durable native
+   // intent identity; a synthetic Agent-generated id would break RiskBook
+   // ownership even if the USD totals coincidentally match.
+   const intentId=nativeSource?String(nativeSource.intent_id):
+     'intent_real_'+(intents.size+1);
+   const planHash=nativeSource?String(nativeSource.plan_hash):
+     Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
+       new TextEncoder().encode(JSON.stringify({account:row.account_key,request:req}))))).
+       map(b=>b.toString(16).padStart(2,'0')).join('');
+   const census={complete:true,source_digest:'c'.repeat(64),
+     content_digest:'b'.repeat(64),generated_at_ms:at-1,source_read_floor_ms:at-1,
+     account_keys:[row.account_key],occupied:[{account_key:row.account_key,
+       occupied_usdt:'0',cumulative_loss_usd:'0'}],
+     native_account_evidence_complete:true,native_order_evidence_complete:true,
+     native_ledger_evidence_complete:true};
+   const nativeSession={connection_generation:generation,runtime_profile:'engine',hello:true};
+   const reserve=await handleNativeRiskCommand(storage,nativeSession,{
+     schema:'okx.risk-command/v1',command_id:'reserve_fixture_'+(++id),
+     installation_id:initial.installation_id,
+     action:{action:'RESERVE',venue:'okx',account_uid:row.uid_fingerprint,
+       run_id:'run_fixture_real_001',intent_id:intentId,
+       strategy_id:String(req.strategy_instance),instrument_id:String(req.instrument),
+       plan_sha256:planHash,requested_loss_usdt:'0.5',requested_loss_usd:'0.5',entry_upper_usd:nativeFixtureEntryUsd,
+       entry_proof_digest:String(nativeSource?.entry_proof_digest??census.source_digest),
+       usd_conversion:{usd_per_usdt:'1',
+         source_digest:String(nativeSource?.usd_conversion_source_digest??census.source_digest),
+         observed_at_ms:at},
+       policy_revision:governance.revision,census}
+   },at);
+   if(reserve.status!=='HELD'||!reserve.reservation_key||
+      reserve.risk_book_sequence===null)
+    return Response.json(rejected(reserve.reason??'CENTRAL_RESERVE_DENIED'));
+   const fresh={...census,source_digest:'d'.repeat(64),
+     generated_at_ms:at+1,source_read_floor_ms:at+1};
+   const fence=await handleNativeRiskCommand(storage,nativeSession,{
+     schema:'okx.risk-command/v1',command_id:'post_fixture_'+(++id),
+     installation_id:initial.installation_id,
+     action:{action:'BEGIN_POST',reservation_key:reserve.reservation_key,
+       plan_sha256:planHash,policy_revision:governance.revision,
+       expected_risk_book_sequence:reserve.risk_book_sequence,
+       source_proof_sha256:'e'.repeat(64),census:fresh,
+       causal_proof:{reserve_anchor:reserve.reservation_key,
+         native_incarnation:'a'.repeat(32),elapsed_to_proof_ms:35,
+         account_reads:[{account_key:row.account_key,private_generation:5,
+           source_read_id:'f'.repeat(64),content_digest:'b'.repeat(64),
+           started_after_held_ms:3,completed_after_held_ms:22}]}}
+   },at+2);
+   if(fence.status!=='POST_AUTHORIZED')
+    return Response.json(rejected(fence.reason??'CENTRAL_POST_FENCE_DENIED'));
+   const intent={intent_id:intentId,state:'FILLED',plan:{instrument:req.instrument,
+     operation:req.operation,protection:req.protection,stop_price:'99',
+     planned_loss_usd:'0.5'},protected:true};
+   // The fixture venue can POST only AFTER central risk says POST_AUTHORIZED.
+   realRiskByIntent.set(intentId,{
+    reservation:reserve.reservation_key,planHash,
+    sequence:fence.risk_book_sequence!,uid:row.uid_fingerprint,
+    runId:'run_fixture_real_001',account:row.account_key,at
+   });
+   venuePostCount++;
+   intents.set(intentId,intent);bodyHash.set(key,hash);intentByKey.set(key,intentId);
+   return Response.json(success({intent}));
+  }
+  const hash=JSON.stringify(req),key=req.idempotency_key;
+  if(bodyHash.has(key)&&bodyHash.get(key)!==hash)return Response.json(rejected('IDEMPOTENCY_CONFLICT'));
+  const prior=intentByKey.get(key);
+  if(prior)return Response.json(success({intent:intents.get(prior)}));
+  const intent_id='intent_fake_'+(intents.size+1);
+  const intent={intent_id,state:'FILLED',plan:{instrument:req.instrument,operation:req.operation,
+   protection:req.protection,stop_price:'99',planned_loss_usd:'0.5'},protected:true};
+  // Fake-venue POST counter measures fixture operations, NEVER real exchange POST.
+  venuePostCount++;
+  intents.set(intent_id,intent);bodyHash.set(key,hash);intentByKey.set(key,intent_id);
+  return Response.json(success({intent}));
+ }
+ const found=intents.get(req.reference);
+ if(!found)return Response.json(rejected('INTENT_NOT_FOUND'));
+ if(req.action==='cancel'){
+  if(found.state==='CANCELLED')return Response.json(success({intent:found}));
+  found.state='CANCELLED';return Response.json(success({intent:found}));
+ }
+ if(req.action==='close'){
+  const real=realRiskByIntent.get(found.intent_id);
+  if(real){
+   // After venue fixture protection/readback and close, only the existing
+   // authenticated native-risk bridge is allowed to settle and release.
+   const session={connection_generation:generation,runtime_profile:'engine',hello:true};
+   const terminalCensus={
+    complete:true,source_digest:'f'.repeat(64),
+    content_digest:'b'.repeat(64),
+    generated_at_ms:real.at+5,source_read_floor_ms:real.at+5,
+    account_keys:[real.account],
+    occupied:[{account_key:real.account,
+      occupied_usdt:'0',cumulative_loss_usd:'0'}],
+    native_account_evidence_complete:true,
+    native_order_evidence_complete:true,
+    native_ledger_evidence_complete:true
+   };
+   const terminalLedger={
+    account_uid:real.uid,run_id:real.runId,intent_id:found.intent_id,
+    state:'FILLED',record_digest:'a'.repeat(64),
+    cumulative_loss_usd:'0',remaining_exposure_usdt:'0',
+    cumulative_entry_usd:nativeFixtureEntryUsd,
+    entry_settlement_revision:Number(nativeSource?.settlement_revision??1),
+    entry_settlement_digest:String(nativeSource?.source_digest??'d'.repeat(64))
+   };
+   const releaseCommand=(commandId:string,sequence:number)=>({
+    schema:'okx.risk-command/v1',command_id:commandId,
+    installation_id:initial.installation_id,
+    action:{action:'RESOLVE',reservation_key:real.reservation,
+      plan_sha256:real.planHash,
+      expected_risk_book_sequence:sequence,
+      next_state:'RELEASED',source_proof_sha256:'e'.repeat(64),
+      terminal_census:terminalCensus,terminal_ledger:terminalLedger}
+   });
+   const premature=await handleNativeRiskCommand(
+    storage,session,
+    releaseCommand('fixture_premature_release_'+(++id),real.sequence),
+    real.at+6
+   );
+   check(premature.status==='DENIED'&&
+     premature.reason==='TERMINAL_ENTRY_SETTLEMENT_UNPROVEN',
+     'Worker must reject terminal release before exact cumulative settlement');
+   const settled=await handleNativeRiskCommand(storage,session,{
+    schema:'okx.risk-command/v1',command_id:'fixture_settle_'+(++id),
+    installation_id:initial.installation_id,
+    action:{action:'SETTLE_ENTRY',
+      reservation_key:real.reservation,plan_sha256:real.planHash,
+      expected_risk_book_sequence:real.sequence,
+      cumulative_entry_usd:nativeFixtureEntryUsd,
+      settlement_revision:terminalLedger.entry_settlement_revision,
+      source_digest:terminalLedger.entry_settlement_digest}
+   },real.at+7);
+   check(settled.status==='UPDATED'&&
+     Number.isSafeInteger(settled.risk_book_sequence),
+     'only source-bound native command may consume actual entry cost');
+   const released=await handleNativeRiskCommand(
+    storage,session,
+    releaseCommand('fixture_terminal_release_'+(++id),settled.risk_book_sequence!),
+    real.at+8
+   );
+   check(released.status==='UPDATED',
+     'Worker release requires the previously settled exact money/revision');
+   realRiskByIntent.delete(found.intent_id);
+  }
+  const closed={...found,intent_id:'close_'+found.intent_id,state:'FILLED',
+   plan:{...found.plan,operation:'close'}};
+  intents.set(closed.intent_id,closed);return Response.json(success({intent:closed}));
+ }
+ return Response.json(rejected('FAKE_OPERATION_UNSUPPORTED'));
+};
+const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:handler})}};
+async function call(tool:string,args:Record<string,unknown>){
+ const {action,...fields}=args;
+ const name=tool==='trade'?'trade.'+action:tool;
+ const publicArgs=tool==='trade'?fields:args;
+ const rpc:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:++id,method:'tools/call',
+   params:{name,arguments:publicArgs}})}),env,ctx)).json();
+ check(!rpc.error,tool+'.'+args.action+' rejected at schema '+JSON.stringify(rpc.error));
+ const response=rpc.result?.structuredContent;
+ check(response&&typeof response.status==='string','missing MCP typed response');
+ return response;
+}
+const config=await call('accounts',{action:'list'});
+check(config.status==='completed'&&config.data.accounts.length===0,'central empty read');
+const connectArgs={action:'connect',alias:'fixture_a',label:'Fixture A',
+ credential_ref:'credential_fixture_a',enabled:true,limits,
+ idempotency_key:'fixture_connect_0001'};
+const first=await call('accounts',connectArgs);
+check(first.status==='completed'&&first.data.account.account_key===accountKey&&
+ first.data.account.identity_verified===true,'connect must reach real central enrollment owner');
+await recordNativePolicy('connect');
+const repeated=await call('accounts',connectArgs);
+check(repeated.status==='completed'&&repeated.data.account.account_key===accountKey,'connect replay');
+const changed=await call('accounts',{...connectArgs,label:'Different'});
+check(changed.status==='failed'&&changed.reason_code==='IDEMPOTENCY_CONFLICT','body-bound connect');
+let read=await call('accounts',{action:'list'});
+check(read.data.revision===1&&read.data.accounts[0].id==='fixture_a','durable account readback');
+const pauseArgs={action:'pause',account:'fixture_a',expected_revision:1,
+ idempotency_key:'fixture_pause_0001'};
+let pause=await call('accounts',pauseArgs);
+check(pause.status==='completed'&&pause.data.revision===2&&pause.data.accounts[0].explicit_pause,
+ 'central pause and revision');
+await recordNativePolicy('pause');
+const pausedReplay=await call('accounts',pauseArgs);
+check(pausedReplay.data.revision===2,'pause replay same revision');
+const staleResume=await call('accounts',{...pauseArgs,action:'resume',idempotency_key:'fixture_resume_stale_001'});
+check(staleResume.status==='failed'&&staleResume.reason_code==='STALE_ACCESS_REVISION',
+ 'stale governance revision rejected');
+await recordNativePolicy('stale_resume_rejected');
+const plan={operation:'open',strategy_instance:'manual',instrument:'BTC-USDT-SWAP',
+ side:'long',sizing:{contracts:'0.01'},order:{type:'limit',limit_price:'100',max_slippage_bps:25},
+ protection:{stop_distance_bps:100}};
+const blocked=await call('trade',{action:'execute',account:'fixture_a',
+ idempotency_key:'fake_blocked_001',expires_in_ms:30000,...plan});
+check(blocked.status==='rejected'&&blocked.reason_code==='ACCOUNT_NEW_RISK_PAUSED',
+ 'paused fake venue blocks new risk without post');
+check(Number(venuePostCount)===0,'no fake post during paused state');
+const resume=await call('accounts',{action:'resume',account:'fixture_a',expected_revision:2,
+ idempotency_key:'fixture_resume_0001'});
+check(resume.status==='completed'&&resume.data.revision===3&&
+ resume.data.accounts[0].explicit_pause===false,'central resume');
+await recordNativePolicy('resume');
+const revisedLimits={...limits,max_order_loss_usdt:'0.5'};
+const limitsArgs={action:'set_limits',account:'fixture_a',expected_revision:3,
+ idempotency_key:'fixture_limits_0001',limits:revisedLimits};
+const revised=await call('accounts',limitsArgs);
+check(revised.status==='completed'&&revised.data.revision===4&&
+ revised.data.accounts[0].limits.max_order_loss_usdt==='0.5','central limits CAS');
+await recordNativePolicy('set_limits');
+const staleLimit=await call('accounts',{...limitsArgs,idempotency_key:'fixture_limits_stale_001'});
+check(staleLimit.status==='failed'&&staleLimit.reason_code==='STALE_ACCESS_REVISION',
+ 'stale limits cannot overwrite');
+await recordNativePolicy('stale_limits_rejected');
+const replayLimit=await call('accounts',limitsArgs);
+check(replayLimit.data.revision===4,'limits identical replay');
+await recordNativePolicy('set_limits_replay');
+read=await call('accounts',{action:'status',account:'fixture_a'});
+check(read.data.account.policy_revision===4&&read.data.account.limits.max_order_loss_usdt==='0.5',
+ 'account status sees durable central owner');
+check((await call('trade',{action:'preflight',account:'fixture_a'})).status==='completed','preflight');
+const preview=await call('trade',{action:'preview',account:'fixture_a',...plan});
+check(preview.status==='completed'&&preview.data.admission==='preview_only'&&
+ preview.data.exchange_post===false,'preview did not post');
+const executeArgs={action:'execute',account:'fixture_a',
+ idempotency_key:'fake_execute_0001',expires_in_ms:30000,...plan};
+const executed=await call('trade',executeArgs);
+const ref=executed.data?.intent?.intent_id;
+check(executed.status==='completed'&&typeof ref==='string'&&executed.data.intent.protected,
+ 'protected fake venue execute');
+check((await call('trade',executeArgs)).data.intent.intent_id===ref&&Number(venuePostCount)===1,
+ 'exact replay never duplicates fixture POST');
+const conflicting=await call('trade',{...executeArgs,operation:'replace'});
+check(conflicting.status==='rejected'&&conflicting.reason_code==='IDEMPOTENCY_CONFLICT',
+ 'changed-body execution rejects duplicate key');
+const status=await call('trade',{action:'status',account:'fixture_a',reference:ref});
+check(status.data.intent.protected&&status.data.intent.state==='FILLED','fake status/protection');
+const replace=await call('trade',{...executeArgs,operation:'replace',idempotency_key:'fake_replace_0001'});
+check(replace.status==='completed'&&replace.data.intent.plan.operation==='replace'&&Number(venuePostCount)===2,
+ 'replace is a separate protected fake venue intent');
+const cancel=await call('trade',{action:'cancel',account:'fixture_a',
+ reference:replace.data.intent.intent_id,idempotency_key:'fake_cancel_0001'});
+check(cancel.status==='completed'&&cancel.data.intent.state==='CANCELLED','fake cancel business transition');
+const closed=await call('trade',{action:'close',account:'fixture_a',reference:ref,
+ idempotency_key:'fake_close_0001',expires_in_ms:30000});
+check(closed.status==='completed'&&closed.data.intent.state==='FILLED'&&
+ closed.data.intent.plan.operation==='close','fake close outcome');
+check((await call('trade',{action:'status',account:'fixture_a',reference:'unknown'}))
+ .reason_code==='INTENT_NOT_FOUND','exact missing intent failure');
+const final=(await governanceRequest(storage,'GET')).body as Governance&{status:string};
+check(final.revision===4&&final.accounts.length===1&&
+ final.accounts[0].limits.max_order_loss_usdt==='0.5'&&
+ final.accounts[0].explicit_pause===false,'persisted central owner was not overwritten');
+check(Number(venuePostCount)===2&&transportCalls>24,'no unexpected fixture posts');
+await recordNativePolicy('final');
+if((globalThis as any).process?.env?.OKX_A2_TRACE==='1'){
+ check(nativePolicyTrace.events.length===8,'the native SQL bridge requires all CAS transitions');
+ check(policyFrames.length===7,'only successful CAS/replay may emit native WSS policies');
+ check(JSON.stringify(nativePolicyTrace.events.map(e=>e.frame_count))===
+       JSON.stringify([1,3,4,5,6,6,7,7]),
+       'stale CAS must not send policy and successful replay is idempotent');
+ console.log('A2_SQL_BRIDGE_TRACE_V1:'+JSON.stringify(nativePolicyTrace));
+}
+console.log('mcp_central_owner_composed_fake_venue PASS central connect/pause/resume/limits CAS + protected trade lifecycle, two fixture posts, zero real exchange POST, no native SQL/WSS claim');
+
+
+// A second account in the SAME composed MCP fixture exercises the true Worker
+// transaction code on the way to a fake venue. This intentionally follows the
+// A2 policy trace: it must not alter its exact committed CAS evidence.
+const realConnect=await call('accounts',{action:'connect',alias:'fixture_real',
+ label:'Fixture Real',credential_ref:'credential_fixture_real',enabled:true,limits,
+ idempotency_key:'fixture_connect_real_0001'});
+check(realConnect.status==='completed'&&realConnect.data.account.account_key===
+ 'okx:real:'+verifiedUid,'real account identity arrived via same MCP connect path');
+// The existing connect schema is intentionally small. A real account's
+// independent entry ceiling is installed through the authorized limits CAS.
+const preEntryPolicy=(await governanceRequest(storage,'GET')).body as Governance;
+const enableEntry=await call('accounts',{
+ action:'set_limits',account:'fixture_real',
+ expected_revision:preEntryPolicy.revision,
+ idempotency_key:'fixture_real_entry_cap_001',
+ limits:acceptanceEntryLimits
+});
+check(enableEntry.status==='completed'&&
+ enableEntry.data.accounts.find((a:any)=>a.id==='fixture_real')?.limits.max_entry_usd==='10',
+ 'real account entry cap installed by existing typed management CAS');
+// Only after registering the real cohort can the synthetic history fixture
+// claim complete coverage. The initial empty-governance state proves no spend
+// for NO real account, not a safe opening for a future account.
+const openingFrom=(await readRiskBook(storage))!.campaign_origin!.started_at_ms;
+const openingAsOf=openingFrom+100000;
+const activePolicy=(await governanceRequest(storage,'GET')).body as Governance;
+const witnessed:CampaignEntryOpeningSource={
+ campaign_id:activePolicy.campaign_id,limit_usd:"10",consumed_usd:"0",
+ source_digest:"c".repeat(64),as_of_ms:openingAsOf,
+ campaign_started_at_ms:openingFrom,
+ accounts:activePolicy.accounts.filter(a=>a.environment==='real')
+  .map(a=>({account_key:a.account_key,history_from_ms:openingFrom,
+   history_through_ms:openingAsOf,consumed_entry_usd:"0",
+   order_history_complete:true as const,fill_history_complete:true as const,
+   bill_history_complete:true as const,finance_provenance_sealed:true as const,
+   source_digest:"a".repeat(64)}))
+  .sort((a,b)=>a.account_key.localeCompare(b.account_key))
+};
+witnessed.source_digest=await openingDigest(witnessed);
+check(await installCampaignEntryProof(storage,witnessed),
+ "synthetic full-cohort finance opening is only admissible after account enrollment");
+// Simulates the authenticated fixture socket's own generation, not an
+// externally asserted MCP parameter or a production WSS attestation.
+await storage.put('generation',generation);
+const beforeReal=venuePostCount;
+const realPreview=await call('trade',{action:'preview',account:'fixture_real',...plan});
+check(realPreview.status==='completed'&&realPreview.data.admission==='preview_only'&&
+ venuePostCount===beforeReal,'real preview never reserves or posts');
+const realArgs={...executeArgs,account:'fixture_real',
+ idempotency_key:'fixture_real_execute_0001'};
+const realOrder=await call('trade',realArgs);
+check(realOrder.status==='completed'&&realOrder.data.intent.protected&&
+ venuePostCount===beforeReal+1,'MCP route→fake native→actual RiskBook→fake venue');
+const reservedRisk=await readRiskBook(storage);
+check(reservedRisk?.entry_budget?.reserved_usd===nativeFixtureEntryUsd,
+ 'Worker RESERVE binds the exact cumulative upper from native SQL');
+check(reservedRisk?.occupied_usd==='0.5'&&reservedRisk?.occupied_usdt==='0.5',
+ 'fake FILLED is NOT a real terminal ledger proof: central risk remains occupied');
+const replayedReal=await call('trade',realArgs);
+check(replayedReal.data.intent.intent_id===realOrder.data.intent.intent_id&&
+ venuePostCount===beforeReal+1,'replayed MCP command never duplicates risk or venue POST');
+const realChanged=await call('trade',{...realArgs,operation:'replace'});
+check(realChanged.status==='rejected'&&realChanged.reason_code==='IDEMPOTENCY_CONFLICT'&&
+ venuePostCount===beforeReal+1,'changed body fails before new risk or venue POST');
+const realStatus=await call('trade',{action:'status',account:'fixture_real',
+ reference:realOrder.data.intent.intent_id});
+check(realStatus.data.intent.state==='FILLED'&&realStatus.data.intent.protected,
+ 'fake venue status is visible through same MCP routing');
+const bridgeReservation=realRiskByIntent.get(realOrder.data.intent.intent_id);
+check(bridgeReservation,'fixture must preserve the original Worker RESERVE identity');
+const realClose=await call('trade',{action:'close',account:'fixture_real',
+ reference:realOrder.data.intent.intent_id,idempotency_key:'fixture_real_close_0001',
+ expires_in_ms:30000});
+check(realClose.status==='completed'&&
+ realClose.data.intent.plan.operation==='close',
+ 'real fake Agent closes the protected fixture position');
+const releasedRisk=await readRiskBook(storage);
+const releasedEntry=await inspectRisk(storage,bridgeReservation.reservation);
+check(releasedEntry?.entry.state==='RELEASED'&&
+ releasedEntry?.entry.entry_settlement_digest===
+ String(nativeSource?.source_digest??'d'.repeat(64))&&
+ releasedEntry?.entry.entry_settlement_revision===Number(nativeSource?.settlement_revision??1),
+ 'committed Worker financial revision is the identical SQL-source digest');
+check(releasedRisk?.occupied_usd==='0'&&releasedRisk?.occupied_usdt==='0'&&
+ releasedRisk?.entry_budget?.consumed_usd===nativeFixtureEntryUsd&&
+ releasedRisk?.entry_budget?.reserved_usd==='0',
+ 'actual Worker settlement+release preserves spent money and frees unused reserve');
+const beforeNextPreview=venuePostCount;
+const secondRealPreview=await call('trade',{action:'preview',account:'fixture_real',...plan});
+check(secondRealPreview.status==='completed'&&
+ secondRealPreview.data.admission==='preview_only'&&
+ venuePostCount===beforeNextPreview&&
+ (await readRiskBook(storage))?.entry_budget?.consumed_usd===nativeFixtureEntryUsd,
+ 'second preview after terminal release is read-only and retains first campaign spend');
+const latest=(await governanceRequest(storage,'GET')).body as Governance;
+const pausedReal=await call('accounts',{action:'pause',account:'fixture_real',
+ expected_revision:latest.revision,idempotency_key:'fixture_real_pause_0001'});
+check(pausedReal.status==='completed'&&pausedReal.data.accounts.find(
+ (a:any)=>a.id==='fixture_real')?.explicit_pause===true,'central pause through MCP');
+const blockedReal=await call('trade',{...realArgs,idempotency_key:'fixture_real_blocked_0001'});
+check(blockedReal.status==='rejected'&&blockedReal.reason_code==='ACCOUNT_NEW_RISK_PAUSED'&&
+ venuePostCount===beforeReal+1,'pause denies additional real risk before fixture POST');
+check((await readRiskBook(storage))?.occupied_usd==='0',
+ 'pause cannot resurrect a terminally released reservation');
+check((await readRiskBook(storage))?.entry_budget?.consumed_usd===nativeFixtureEntryUsd,
+ 'pause never refunds consumed campaign turnover');
+if(nativeSource){
+ check(reservedRisk?.entry_budget?.reserved_usd===nativeSource.entry_upper_usd&&
+   releasedRisk?.entry_budget?.consumed_usd===nativeSource.cumulative_entry_usd,
+   'one immutable SQL admission must conserve risk money across Worker');
+ console.log('E1_SQL_WORKER_BRIDGE_TRACE_V1:'+JSON.stringify({
+   schema:'okx.e1.sql-worker-bridge-result/v1',
+   native_source:nativeSource,
+   worker_entry:{
+     account_uid:releasedEntry!.entry.uid,
+     intent_id:releasedEntry!.entry.intent_id,
+     plan_hash:releasedEntry!.entry.plan_hash,
+     reservation_key:bridgeReservation.reservation,
+     settlement_revision:releasedEntry!.entry.entry_settlement_revision,
+     source_digest:releasedEntry!.entry.entry_settlement_digest,
+     state:releasedEntry!.entry.state
+   },
+   reserved_before_usd:reservedRisk!.entry_budget!.reserved_usd,
+   reserved_after_usd:releasedRisk!.entry_budget!.reserved_usd,
+   consumed_after_usd:releasedRisk!.entry_budget!.consumed_usd,
+   occupied_after_usdt:releasedRisk!.occupied_usdt,
+   fixture_venue_posts:venuePostCount-beforeReal
+ }));
+}
+console.log('mcp_riskbook_fake_venue_composed PASS real MCP route, central RESERVE/BEGIN_POST, fixture venue once, protected fake close, native-risk SETTLE_ENTRY, denied premature RELEASE, authenticated RELEASE, second preview, pause; no physical native SQL/WSS claim');
