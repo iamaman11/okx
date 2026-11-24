@@ -16,3 +16,8 @@ their callers use. Research and Engine first demonstrate independence.
 Versioned integration derives from an explicit cross-application scenario.
 The complete scope and acceptance evidence are tracked in
 [#569](https://github.com/iamaman11/okx/issues/569).
+
+[File boundaries and split decisions](BOUNDARIES.md) define the placement of
+every source file. [The migration inventory](legacy-files.tsv) names each
+legacy path explicitly. Run `python3 -B vnext/check_boundaries.py --list`
+for the complete tracked-file view, including active roots.

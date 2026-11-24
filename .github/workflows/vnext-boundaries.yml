@@ -1,0 +1,19 @@
+name: vNext file boundaries
+
+on:
+  push:
+    branches: [vnext]
+  pull_request:
+    branches: [vnext]
+
+permissions:
+  contents: read
+
+jobs:
+  boundaries:
+    name: File ownership and dependency boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: python3 -B vnext/test_check_boundaries.py
+      - run: python3 -B vnext/check_boundaries.py

@@ -23,7 +23,7 @@ use super::{
 };
 use crate::account_store::EntrySettlementEvidence;
 use crate::risk::book::EntrySettlementSource;
-use okx_domain_core::risk::{
+use okx_engine_risk::risk::{
     money::RiskAmount,
     settlement::{
         EntrySettlementChange, EntrySettlementError, EntrySettlementInput,

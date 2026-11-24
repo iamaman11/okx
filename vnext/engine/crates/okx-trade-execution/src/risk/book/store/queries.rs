@@ -2,7 +2,7 @@
 //! No absent row means "safe to send": no-reserve fencing is a separate
 //! durable operation, not a conclusion that an INSPECT caller can invent.
 use super::{BookMeta, Result, RiskStoreError, amount, reserve_scope_values, valid_digest};
-use okx_domain_core::risk::{model::RiskEntryState, money::RiskAmount};
+use okx_engine_risk::risk::{model::RiskEntryState, money::RiskAmount};
 use rusqlite::{OptionalExtension, Transaction, params_from_iter, types::Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -5,7 +5,7 @@ pub use admission::*;
 pub use native_sizing::{
     NativeReservedLoss, UsdEntryUpper, UsdLoss, UsdtLoss, native_reserved_loss,
 };
-pub use okx_domain_core::risk::model::{PostAccountRead, PostCausalProof};
+pub use okx_engine_risk::risk::model::{PostAccountRead, PostCausalProof};
 pub use stops::*;
 
 // #510 r4.1: the original AccountStore+RiskBook financial rules are

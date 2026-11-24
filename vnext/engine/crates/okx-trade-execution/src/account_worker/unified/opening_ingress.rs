@@ -51,7 +51,7 @@ pub(crate) fn install_reported_opening_sql(
     reported: &ReportedOpeningCensus,
     now_ms: i64,
 ) -> StoreResult<UnifiedFinanceWriteReceipt> {
-    use okx_domain_core::risk::money::RiskAmount;
+    use okx_engine_risk::risk::money::RiskAmount;
     let digest = &reported.source_digest;
     if digest.len() != 64
         || !digest

@@ -12,7 +12,7 @@ use crate::{
     EntryAdmissionEvidence, EntryQuoteEvidence, IngestPage, IntentPlan, IntentState, NewIntent,
     SourceCursor, StoreError, TradeIntentLookup,
 };
-use okx_domain_core::risk::model::{PostAccountRead, PostCausalProof};
+use okx_engine_risk::risk::model::{PostAccountRead, PostCausalProof};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::{

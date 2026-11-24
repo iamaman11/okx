@@ -124,7 +124,7 @@ impl UnifiedFinanceHandle {
                 .ok_or_else(invalid)?;
                 if receipt.account_key != account
                     || receipt.installation_id != installation
-                    || reservation.state != okx_domain_core::risk::model::RiskEntryState::Open
+                    || reservation.state != okx_engine_risk::risk::model::RiskEntryState::Open
                 {
                     return Err(StoreError::Invalid(
                         "STORAGE_RECOVERY_RESERVATION_UNRESOLVED",

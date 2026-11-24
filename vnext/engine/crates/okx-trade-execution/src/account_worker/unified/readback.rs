@@ -283,7 +283,7 @@ impl UnifiedFinanceHandle {
             .inspect_reservation(campaign, reservation_key, plan_sha256)
             .await?;
         Ok(found.map(|original| {
-            use okx_domain_core::risk::model::RiskEntryState;
+            use okx_engine_risk::risk::model::RiskEntryState;
             let state = match original.state {
                 RiskEntryState::Held => "HELD",
                 RiskEntryState::Posted => "POSTED",

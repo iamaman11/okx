@@ -12,8 +12,8 @@ fn account() -> String {
     format!("okx:real:{}", "a".repeat(64))
 }
 const CAMPAIGN: &str = "campaign-20";
-fn amount(v: &str) -> okx_domain_core::risk::money::RiskAmount {
-    okx_domain_core::risk::money::RiskAmount::parse(v).unwrap()
+fn amount(v: &str) -> okx_engine_risk::risk::money::RiskAmount {
+    okx_engine_risk::risk::money::RiskAmount::parse(v).unwrap()
 }
 fn census(at: i64) -> ReportedRiskCensus {
     ReportedRiskCensus {

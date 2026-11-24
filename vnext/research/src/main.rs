@@ -1,5 +1,8 @@
-mod okx_candles;
-mod replay;
+mod adapters;
+mod application;
+
+use adapters::okx_candles;
+use application::replay;
 
 use okx_strategy_core::query_plan::CompositionRequest;
 use serde::Deserialize;

@@ -6,7 +6,7 @@ use super::{
     LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, VerifiedCensus, amount,
     integrity, read_meta_for_scope, valid_digest,
 };
-use okx_domain_core::risk::money::RiskAmount;
+use okx_engine_risk::risk::money::RiskAmount;
 /// Pure typed native source passed by the authenticated agent adapter.
 /// The external protocol DTO is converted at the agent boundary; execution
 /// never depends on protocol, WS, Cloudflare or the exchange transport.

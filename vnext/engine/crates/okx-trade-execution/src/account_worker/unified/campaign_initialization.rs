@@ -1,7 +1,7 @@
 //! Full authorized policy enters the existing writer; no opening/source grant.
 use super::UnifiedFinanceHandle;
 use crate::{AccountStore, StoreError, StoreResult};
-use okx_domain_core::risk::money::RiskAmount;
+use okx_engine_risk::risk::money::RiskAmount;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

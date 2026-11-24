@@ -17,7 +17,7 @@ try {
   );
   // These historical tests require a Cloudflare financial owner that no longer exists.
   // They are not current acceptance passes; invariant replacements are tracked in
-  // FINANCIAL_WITNESS_RETIREMENT.md and the Native finance owner suite.
+  // the legacy retirement ledger and the Native finance owner suite.
   console.log("RETIRED financial witnesses (not PASS): risk_book.test, legacy_finance_cutover.test, acceptance_composed.test; old financial cases of risk_authority.test replaced by retirement denial checks");
   let executed=0;
   for (const file of ["auth.test.js", "shared.test.js", "execution_tools.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js", "runtime_session.test.js", "runtime_backpressure.test.js", "mcp.test.js"]) {

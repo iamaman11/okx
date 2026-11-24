@@ -2,7 +2,7 @@
 //! remain mandatory. No public constructor for VerifiedCensus or send claims.
 use super::*;
 use crate::{AccountStore, CentralReceipt, CommittedVenueSend, StoreError, StoreResult};
-use okx_domain_core::risk::{
+use okx_engine_risk::risk::{
     model::{PostCausalProof, RiskProposal},
     money::RiskAmount,
 };

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-okx-domain-core = { package = "okx-engine-risk", path = "../okx-engine-risk" }
+okx-engine-risk = { path = "../okx-engine-risk" }
 tokio = { version = "1", features = ["sync", "time"] }
 rusqlite = { version = "=0.43.0", features = ["bundled", "backup", "hooks"] }
 rust_decimal = "1"
