@@ -180,7 +180,7 @@ impl HostExecutor {
         self.lifecycle_gate(&operation)?;
         match operation {
             HostControlOperation::Status => self.status(),
-            HostControlOperation::StatusResearch => self.research.status(),
+            HostControlOperation::StatusResearch {} => self.research.status(),
             HostControlOperation::StartResearch {
                 expected_installed_worker_sha256,
             } => self.research.start(&expected_installed_worker_sha256),
@@ -190,7 +190,7 @@ impl HostExecutor {
             } => self
                 .research
                 .stop(&expected_active_worker_sha256, expected_process_generation),
-            HostControlOperation::ProvisionResearchRuntimeToken => {
+            HostControlOperation::ProvisionResearchRuntimeToken {} => {
                 self.provision_research_runtime_token()
             }
             HostControlOperation::AccountCatalog => AccountCatalogStore::canonical().status(),
@@ -268,10 +268,10 @@ impl HostExecutor {
         if matches!(
             operation,
             HostControlOperation::Status
-                | HostControlOperation::StatusResearch
+                | HostControlOperation::StatusResearch {}
                 | HostControlOperation::StartResearch { .. }
                 | HostControlOperation::StopResearch { .. }
-                | HostControlOperation::ProvisionResearchRuntimeToken
+                | HostControlOperation::ProvisionResearchRuntimeToken {}
                 | HostControlOperation::AccountCatalog
                 | HostControlOperation::TransportStatus
                 | HostControlOperation::ControllerUpdateStatus

@@ -75,7 +75,7 @@ pub enum HostControlOperation {
     ProvisionCloudflareRuntimeToken,
     /// Ask CONTROL to generate a distinct Research credential. Neither its
     /// plaintext bearer nor a caller-supplied token is present in this wire.
-    ProvisionResearchRuntimeToken,
+    ProvisionResearchRuntimeToken {},
     StartAgent,
     StopAgent,
     RestartAgent,
@@ -91,7 +91,7 @@ pub enum HostControlOperation {
         expected_process_generation: u64,
     },
     /// Read-only snapshot of CONTROL's independent Research process owner.
-    StatusResearch,
+    StatusResearch {},
     InitializeInstallation {
         installation_id: String,
         expected_release: String,
@@ -476,7 +476,7 @@ mod tests {
             "type": "status_research"
         }))
         .unwrap();
-        assert_eq!(read, HostControlOperation::StatusResearch);
+        assert_eq!(read, HostControlOperation::StatusResearch {});
         assert!(read.validate().is_ok());
 
         for malformed in [
@@ -571,7 +571,7 @@ mod tests {
     fn research_token_provision_command_has_no_bearer_fields() {
         let command = serde_json::json!({"type":"provision_research_runtime_token"});
         let parsed: HostControlOperation = serde_json::from_value(command.clone()).unwrap();
-        assert_eq!(parsed, HostControlOperation::ProvisionResearchRuntimeToken);
+        assert_eq!(parsed, HostControlOperation::ProvisionResearchRuntimeToken {});
         assert!(parsed.validate().is_ok());
         assert_eq!(serde_json::to_value(parsed).unwrap(), command);
         for field in [

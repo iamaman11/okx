@@ -171,7 +171,7 @@ impl Bridge {
                     ));
                 }
                 let result = self
-                    .control_read_request(HostControlOperation::StatusResearch)
+                    .control_read_request(HostControlOperation::StatusResearch {})
                     .await?;
                 let details = if result.status == HostControlStatus::Pass {
                     let observed: ResearchRuntimeStatus = serde_json::from_value(
@@ -293,7 +293,7 @@ impl Bridge {
     ) -> Result<HostControlResult, BridgeError> {
         if !matches!(
             operation,
-            HostControlOperation::TransportStatus | HostControlOperation::StatusResearch
+            HostControlOperation::TransportStatus | HostControlOperation::StatusResearch {}
         ) {
             return Err(BridgeError::InvalidToolArguments(
                 "CONTROL bridge permits read-only commands only".to_owned(),
@@ -570,7 +570,7 @@ mod tests {
     async fn control_bridge_denies_research_mutations_before_network() {
         let bridge = Bridge::from_bearer("read_only_github_fixture".into()).unwrap();
         let operations = [
-            HostControlOperation::ProvisionResearchRuntimeToken,
+            HostControlOperation::ProvisionResearchRuntimeToken {},
             HostControlOperation::StartResearch {
                 expected_installed_worker_sha256: "a".repeat(64),
             },
