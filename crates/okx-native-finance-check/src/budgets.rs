@@ -88,12 +88,12 @@ pub(super) fn validate_workload(v: &Value, run_id: &str) -> Result<()> {
     Ok(())
 }
 pub(super) fn verify(report: &mut Value, observed: &Witnesses) -> Result<bool> {
-    // Five libraries (Agent has two disjoint measured groups), three static
-    // guards and retained transport require real completion/measurements.
+    // One group per package, an extra isolated Engine group, three guards and transport.
+    let required_stages = super::PACKAGES.len() + 1 + 3 + 1;
     let stages = report["stages"]
         .as_array()
         .ok_or("RESOURCE_STAGES_MISSING")?;
-    if stages.len() != 10 || stages.iter().any(|s| s["success"] != true) {
+    if stages.len() != required_stages || stages.iter().any(|s| s["success"] != true) {
         return Err("RESOURCE_STAGES_INCOMPLETE");
     }
     let mut identities = BTreeSet::new();
@@ -278,11 +278,23 @@ mod tests {
         duplicate["stages"][1] = duplicate["stages"][0].clone();
         assert!(verify(&mut duplicate, &Witnesses::new()).is_err());
         let mut unisolated = measured_report();
-        unisolated["stages"][5]["test_threads"] = json!(4);
+        let isolated_index = unisolated["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|stage| stage["group"] == "clock_sensitive")
+            .unwrap();
+        unisolated["stages"][isolated_index]["test_threads"] = json!(4);
         assert!(verify(&mut unisolated, &Witnesses::new()).is_err());
         let mut wrong_group = measured_report();
-        wrong_group["stages"][5]["group"] = json!("parallel");
+        wrong_group["stages"][isolated_index]["group"] = json!("parallel");
         assert!(verify(&mut wrong_group, &Witnesses::new()).is_err());
+        let mut absent = measured_report();
+        absent["stages"]
+            .as_array_mut()
+            .unwrap()
+            .remove(isolated_index);
+        assert!(verify(&mut absent, &Witnesses::new()).is_err());
         let mut foreign = measured_report();
         foreign["stages"][0]["package"] = json!("foreign");
         assert!(verify(&mut foreign, &Witnesses::new()).is_err());

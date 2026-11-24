@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+num-bigint = "0.5"
 okx-domain-core = { path = "../okx-domain-core" }
 tokio = { version = "1", features = ["sync", "time"] }
 rusqlite = { version = "=0.43.0", features = ["bundled", "backup", "hooks"] }

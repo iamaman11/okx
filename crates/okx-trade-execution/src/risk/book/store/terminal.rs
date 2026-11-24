@@ -39,7 +39,7 @@ use super::{
     LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, VerifiedCensus, amount,
     apply_census_loss_for_scope, integrity, read_meta_for_scope, valid_digest,
 };
-use okx_domain_core::risk::money::RiskAmount;
+use crate::risk::money::RiskAmount;
 use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 

@@ -276,22 +276,6 @@ struct WireTrade {
     side: TradeSide,
 }
 
-// Legacy host-source conformance tests share MarketBootstrapper's adapter.
-// Independent read-only public GETs are isolated in `independent_source`;
-// this Research process never receives the Engine's private venue keys.
-#[cfg(test)]
-impl From<okx_market_runtime::market_bootstrap::MarketBootstrapper> for PublicSourceClient {
-    fn from(value: okx_market_runtime::market_bootstrap::MarketBootstrapper) -> Self {
-        struct Source(okx_market_runtime::market_bootstrap::MarketBootstrapper);
-        impl PublicSourceProvider for Source {
-            fn request(&self, request: PublicSourceRequest) -> SourceFuture<'_> {
-                Box::pin(self.0.research_source(request))
-            }
-        }
-        Self::new(Arc::new(Source(value)))
-    }
-}
-
 #[cfg(test)]
 mod source_observation_tests {
     use super::*;

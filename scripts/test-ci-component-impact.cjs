@@ -52,7 +52,9 @@ assert.deepEqual(binaries(analyze(metadata, files('crates/okx-trade-execution/sr
   ['okx-agent.exe']);
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-strategy-core/src/time_series.rs'))),
   ['okx-research-service.exe']);
-assert.deepEqual(binaries(analyze(metadata, files('crates/okx-domain-core/src/risk/money.rs'))),
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-trade-execution/src/risk/money.rs'))),
+  ['okx-agent.exe']);
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-domain-core/src/fee_model.rs'))),
   ['okx-agent.exe', 'okx-host-control.exe', 'okx-research-service.exe']);
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-ipc-contracts/src/lib.rs'))),
   ['okx-agent.exe', 'okx-host-control.exe', 'okx-research-service.exe']);

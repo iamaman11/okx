@@ -13,7 +13,7 @@ type FixtureCampaignRow = (i64, i64, i64, String, String, String, String, String
 
 use crate::{StoreError, StoreResult};
 #[cfg(test)]
-use okx_domain_core::risk::money::RiskAmount;
+use crate::risk::money::RiskAmount;
 use rusqlite::{OptionalExtension, Transaction, params};
 
 #[cfg(test)]
@@ -709,7 +709,7 @@ impl crate::AccountStore {
         installation: &str,
         policy: &crate::account_worker::UnifiedFinancePolicy,
     ) -> StoreResult<()> {
-        use okx_domain_core::risk::money::RiskAmount;
+        use crate::risk::money::RiskAmount;
         let invalid = || StoreError::Invalid("UNIFIED_POLICY_SOURCE_OR_SCOPE_INVALID");
         if installation.is_empty()
             || policy.campaign_id.is_empty()

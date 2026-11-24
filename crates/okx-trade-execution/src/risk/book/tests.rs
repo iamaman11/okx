@@ -1,6 +1,6 @@
 //! Real on-disk SQLite tests. No Cloudflare, simulated exchange or REAL account.
 use super::store::*;
-use okx_domain_core::risk::{model::RiskProposal, money::RiskAmount, rules::RiskRuleError};
+use crate::risk::{model::RiskProposal, money::RiskAmount, rules::RiskRuleError};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -547,7 +547,7 @@ fn risk_book_contract_sql_old_schema_version_is_rejected() {
 
 #[test]
 fn risk_book_contract_sql_account_observation_and_inspect_preserve_revision() {
-    use okx_domain_core::risk::model::RiskEntryState;
+    use crate::risk::model::RiskEntryState;
     let fixture = Fixture::new("readonly");
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let mut store = open(&fixture);
@@ -677,7 +677,7 @@ fn unsent(letter: char, intent: &str) -> UnsentSqlProof {
 
 #[test]
 fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
-    use okx_domain_core::risk::model::RiskEntryState;
+    use crate::risk::model::RiskEntryState;
     let fixture = Fixture::new("negative-fence");
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let mut store = open(&fixture);
@@ -750,7 +750,7 @@ fn risk_book_contract_sql_durable_no_reserve_tombstone_prevents_future_grant() {
 
 #[test]
 fn risk_book_contract_sql_unsent_held_release_is_exact_and_durable() {
-    use okx_domain_core::risk::model::RiskEntryState;
+    use crate::risk::model::RiskEntryState;
     let fixture = Fixture::new("unsent-held");
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let mut store = open(&fixture);
@@ -991,7 +991,7 @@ fn risk_book_contract_real_account_sql_unsent_proof_bridges_campaign_sql() {
     let observed = campaign.inspect(&key, &proof.plan_sha256).unwrap().unwrap();
     assert_eq!(
         observed.state,
-        okx_domain_core::risk::model::RiskEntryState::Released
+        crate::risk::model::RiskEntryState::Released
     );
 }
 
@@ -1028,7 +1028,7 @@ fn risk_book_contract_campaign_db_path_is_installation_scoped() {
 }
 
 fn post_fence(input: &ReserveInput, sequence: u64) -> PostFenceInput {
-    use okx_domain_core::risk::model::{PostAccountRead, PostCausalProof};
+    use crate::risk::model::{PostAccountRead, PostCausalProof};
     let mut fresh = census();
     fresh.generated_at_ms = 10_001;
     fresh.read_floor_ms = 9_996;
@@ -1061,7 +1061,7 @@ fn post_fence(input: &ReserveInput, sequence: u64) -> PostFenceInput {
 
 #[test]
 fn risk_book_contract_sql_post_fence_commits_once() {
-    use okx_domain_core::risk::model::RiskEntryState;
+    use crate::risk::model::RiskEntryState;
     let fixture = Fixture::new("post-fence");
     RiskBookStore::initialize_fixture(&fixture.path, &opening()).unwrap();
     let mut store = open(&fixture);
@@ -1212,7 +1212,7 @@ fn risk_book_contract_sql_post_fence_rejects_stale_causal_and_other_account_expo
             .unwrap()
             .unwrap()
             .state,
-        okx_domain_core::risk::model::RiskEntryState::Held
+        crate::risk::model::RiskEntryState::Held
     );
     let grant = store.begin_post(&post).unwrap();
     assert_eq!(grant.book_sequence, 2);
@@ -1248,7 +1248,7 @@ fn risk_book_contract_sql_post_loss_high_water_is_durable_on_denial() {
             .unwrap()
             .unwrap()
             .state,
-        okx_domain_core::risk::model::RiskEntryState::Held
+        crate::risk::model::RiskEntryState::Held
     );
     store.close();
     let mut reopened = open(&fixture);
@@ -1331,7 +1331,7 @@ fn risk_book_contract_sql_os_kill_after_post_fence_never_regrants() {
         .unwrap();
     assert_eq!(
         observed.state,
-        okx_domain_core::risk::model::RiskEntryState::Posted
+        crate::risk::model::RiskEntryState::Posted
     );
     assert_eq!(observed.current_book_sequence, 2);
     assert_eq!(reopened.readback().unwrap().global_reserved_usdt, "3");
@@ -1387,7 +1387,7 @@ fn risk_book_contract_sql_posted_requires_durable_proof_fields() {
             .unwrap()
             .unwrap()
             .state,
-        okx_domain_core::risk::model::RiskEntryState::Held
+        crate::risk::model::RiskEntryState::Held
     );
     assert_eq!(recovered.readback().unwrap().book_sequence, 1);
 }

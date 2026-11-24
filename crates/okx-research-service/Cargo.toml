@@ -37,10 +37,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
 zeroize = "1"
 
-[dev-dependencies]
-okx-api = { path = "../okx-api" }
-okx-market-runtime = { path = "../okx-market-runtime" }
-
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

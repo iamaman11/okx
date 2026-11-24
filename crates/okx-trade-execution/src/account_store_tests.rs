@@ -11302,8 +11302,8 @@ fn risk_book_contract_unified_offline_import_all_47_original_tables_and_obligati
         )
         .unwrap()
         .unwrap();
-        assert_eq!(x.state, okx_domain_core::risk::model::RiskEntryState::Held);
-        assert_eq!(y.state, okx_domain_core::risk::model::RiskEntryState::Held);
+        assert_eq!(x.state, crate::risk::model::RiskEntryState::Held);
+        assert_eq!(y.state, crate::risk::model::RiskEntryState::Held);
         assert_eq!(x.reservation_sequence, 1);
         assert_eq!(y.reservation_sequence, 1);
         assert_eq!(x.plan_sha256, ai.plan_hash);
@@ -13379,8 +13379,8 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
     // authenticated census producer or Cloudflare epoch exists yet, so this
     // test-only operation ALWAYS ROLLS BACK and must preserve the offline
     // import manifest across cold reopen.
-    let zero = okx_domain_core::risk::money::RiskAmount::zero();
-    let five = okx_domain_core::risk::money::RiskAmount::parse("5").unwrap();
+    let zero = crate::risk::money::RiskAmount::zero();
+    let five = crate::risk::money::RiskAmount::parse("5").unwrap();
     let mut source_occupied = std::collections::BTreeMap::new();
     let mut source_loss = std::collections::BTreeMap::new();
     for key in [&a_key, &b_key] {
@@ -13407,12 +13407,12 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         entry_proof_digest: "b".repeat(64),
         conversion_digest: "c".repeat(64),
         conversion_observed_at_ms: 3,
-        conversion_rate: okx_domain_core::risk::money::RiskAmount::parse("1").unwrap(),
+        conversion_rate: crate::risk::money::RiskAmount::parse("1").unwrap(),
         native_incarnation: "f".repeat(32),
-        proposal: okx_domain_core::risk::model::RiskProposal {
+        proposal: crate::risk::model::RiskProposal {
             loss_usdt: five.clone(),
             loss_usd: five.clone(),
-            entry_upper_usd: okx_domain_core::risk::money::RiskAmount::parse("1").unwrap(),
+            entry_upper_usd: crate::risk::money::RiskAmount::parse("1").unwrap(),
         },
         policy_revision: 1,
         now_ms: 4,
@@ -13560,7 +13560,7 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         .unwrap();
     assert_eq!(
         held.state,
-        okx_domain_core::risk::model::RiskEntryState::Held
+        crate::risk::model::RiskEntryState::Held
     );
     assert_eq!(held.reservation_sequence, 1);
     assert_eq!(held.current_book_sequence, 2);
@@ -13587,7 +13587,7 @@ async fn risk_book_contract_one_installation_finance_owner_reuses_original_impor
         .unwrap();
     assert_eq!(
         unsent.state,
-        okx_domain_core::risk::model::RiskEntryState::Released
+        crate::risk::model::RiskEntryState::Released
     );
     assert_eq!(unsent.reservation_sequence, 2);
     let public_unsent = owner

@@ -1308,8 +1308,6 @@ dependencies = [
 name = "okx-domain-core"
 version = "0.1.0"
 dependencies = [
- "num-bigint",
- "proptest",
  "serde",
  "serde_json",
  "sha2",
@@ -1450,10 +1448,8 @@ dependencies = [
  "getrandom 0.4.3",
  "jiff",
  "okx-analysis",
- "okx-api",
  "okx-domain-core",
  "okx-ipc-contracts",
- "okx-market-runtime",
  "okx-research",
  "okx-strategy-core",
  "reqwest",
@@ -1484,6 +1480,7 @@ dependencies = [
 name = "okx-trade-execution"
 version = "0.1.0"
 dependencies = [
+ "num-bigint",
  "okx-domain-core",
  "proptest",
  "rusqlite",

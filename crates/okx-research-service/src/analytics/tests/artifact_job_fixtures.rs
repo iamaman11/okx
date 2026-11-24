@@ -26,15 +26,15 @@ async fn drain_waits_for_runner_after_durable_cancellation() {
     assert_eq!(service.begin_drain().await.unwrap().active_jobs, 0);
 }
 pub(super) fn service() -> (PathBuf, AnalyticsService) {
+    let transport = crate::independent_source::test_support::RecordedGet::new(Vec::new());
+    service_with_source(transport.client())
+}
+
+pub(super) fn service_with_source(
+    source: crate::source_api::PublicSourceClient,
+) -> (PathBuf, AnalyticsService) {
     let root = unique_fixture_root();
-    let client =
-        okx_api::OkxPublicClient::new(okx_api::OkxEnvironment::new(okx_api::Region::Global, false))
-            .unwrap();
-    let service = AnalyticsService::new(
-        root.clone(),
-        okx_market_runtime::market_bootstrap::MarketBootstrapper::new(client),
-    )
-    .unwrap();
+    let service = AnalyticsService::new(root.clone(), source).unwrap();
     (root, service)
 }
 // market() promises a bounded synchronous response, NOT completion within

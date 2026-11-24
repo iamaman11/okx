@@ -1,7 +1,5 @@
 use super::cache::{SourceCache, SourceKey};
 use crate::source_api::{PublicSourceClient, ResearchTradePage};
-#[cfg(test)]
-use okx_market_runtime::market_bootstrap::MarketBootstrapper;
 use okx_research::strategy_registry::Bar;
 use std::sync::Arc;
 #[derive(Clone)]
@@ -213,14 +211,19 @@ impl Sources {
 
 #[cfg(test)]
 mod extension_tests {
+    use super::super::artifact_job_fixtures::service_with_source;
     use super::*;
-    use okx_api::{HttpSend, HttpTransport, RawHttpResponse};
+    use crate::independent_source::test_support::RecordedGet;
     use okx_ipc_contracts::analytics::{
         EmaParameters, FundingMode, MarketAction, MarketRequest, ResearchCosts, ResearchDataMode,
         ResearchRequest, ResearchResultView,
     };
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const CANDLE_INTERVAL_MS: u64 = 60_000;
+    const CANDLE_START_MS: u64 = CANDLE_INTERVAL_MS;
+    const CANDLE_END_MS: u64 = CANDLE_START_MS + 20 * CANDLE_INTERVAL_MS;
+    const CANDLE_GAP_MS: u64 = CANDLE_START_MS + 10 * CANDLE_INTERVAL_MS;
 
     #[test]
     fn t06_historical_funding_never_falls_back_to_predicted_rate() {
@@ -243,55 +246,35 @@ mod extension_tests {
         assert!((realized_funding_rate(Some("0.00012")).unwrap() - 0.00012).abs() < 1e-15);
     }
 
-    struct RecordedFunding {
-        calls: AtomicUsize,
-        body: Vec<u8>,
+    fn funding_page(time: &str, realized: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({"code":"0","msg":"","data":[{
+            "instId":"BTC-USDT-SWAP","fundingTime":time,
+            "fundingRate":"0.09","realizedRate":realized
+        }]}))
+        .unwrap()
     }
 
-    impl HttpTransport for RecordedFunding {
-        fn send(&self, request: okx_api::HttpRequest, _: std::time::Instant) -> HttpSend<'_> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            assert_eq!(request.method(), reqwest::Method::GET);
-            assert_eq!(request.url().path(), "/api/v5/public/funding-rate-history");
+    fn assert_funding_requests(transport: &RecordedGet, cursors: &[&str]) {
+        let routes = transport.routes.lock().unwrap();
+        assert_eq!(routes.len(), cursors.len());
+        for ((path, parameters), cursor) in routes.iter().zip(cursors.iter().copied()) {
+            assert_eq!(*path, "/api/v5/public/funding-rate-history");
             assert_eq!(
-                request.url().query_pairs().collect::<Vec<_>>(),
+                *parameters,
                 vec![
-                    ("instId".into(), "BTC-USDT-SWAP".into()),
-                    ("after".into(), "30000".into()),
-                    ("limit".into(), "100".into()),
+                    ("instId", "BTC-USDT-SWAP".to_owned()),
+                    ("after", cursor.to_owned()),
+                    ("limit", "100".to_owned()),
                 ]
             );
-            Box::pin(async {
-                Ok(RawHttpResponse {
-                    status: okx_api::HttpStatusCode::OK,
-                    headers: Default::default(),
-                    body: self.body.clone(),
-                })
-            })
         }
     }
 
     #[tokio::test]
     async fn t06_realized_funding_guard_is_enforced_through_public_source() {
         for (realized, expected) in [("0.02", Some(0.02)), ("", None)] {
-            let transport = Arc::new(RecordedFunding {
-                calls: AtomicUsize::new(0),
-                body: serde_json::to_vec(&json!({"code":"0","msg":"","data":[{
-                    "instId":"BTC-USDT-SWAP","fundingTime":"20000",
-                    "fundingRate":"0.09","realizedRate":realized
-                }]}))
-                .unwrap(),
-            });
-            let (root, mut service) = super::super::artifact_job_fixtures::service();
-            service.sources.bootstrap = MarketBootstrapper::new(
-                okx_api::OkxPublicClient::with_http_transport(
-                    okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
-                    okx_api::RateBudget::new(),
-                    transport.clone(),
-                )
-                .unwrap(),
-            )
-            .into();
+            let transport = RecordedGet::new(vec![funding_page("20000", realized)]);
+            let (root, service) = service_with_source(transport.client());
             let actual = service
                 .sources
                 .funding("BTC-USDT-SWAP", 20_000, 30_000)
@@ -300,7 +283,7 @@ mod extension_tests {
                 Some(rate) => assert_eq!(actual.unwrap(), vec![(20_000, rate)]),
                 None => assert_eq!(actual.unwrap_err(), "FUNDING_REALIZED_RATE_UNAVAILABLE"),
             }
-            assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+            assert_funding_requests(&transport, &["30000"]);
             drop(service);
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -308,56 +291,15 @@ mod extension_tests {
 
     #[tokio::test]
     async fn t06_duplicate_funding_event_requires_consistent_realized_rate() {
-        struct PagedFunding {
-            calls: AtomicUsize,
-            second_rate: &'static str,
-        }
-        impl HttpTransport for PagedFunding {
-            fn send(&self, request: okx_api::HttpRequest, _: std::time::Instant) -> HttpSend<'_> {
-                let page = self.calls.fetch_add(1, Ordering::Relaxed);
-                assert_eq!(request.method(), reqwest::Method::GET);
-                assert_eq!(request.url().path(), "/api/v5/public/funding-rate-history");
-                let cursor = request
-                    .url()
-                    .query_pairs()
-                    .find(|(name, _)| name == "after")
-                    .expect("funding pagination cursor")
-                    .1
-                    .into_owned();
-                assert_eq!(cursor, if page == 0 { "30000" } else { "25000" });
-                let rate = if page == 0 { "0.02" } else { self.second_rate };
-                let body = serde_json::to_vec(&json!({"code":"0","msg":"","data":[
-                    {"instId":"BTC-USDT-SWAP","fundingTime":"25000",
-                     "fundingRate":"0.09","realizedRate":rate}
-                ]}))
-                .unwrap();
-                Box::pin(async move {
-                    Ok(RawHttpResponse {
-                        status: okx_api::HttpStatusCode::OK,
-                        headers: Default::default(),
-                        body,
-                    })
-                })
-            }
-        }
         for (other_rate, expected) in [
             ("0.02", None),
             ("0.03", Some("FUNDING_CONFLICTING_EVENT_TIMESTAMP")),
         ] {
-            let transport = Arc::new(PagedFunding {
-                calls: AtomicUsize::new(0),
-                second_rate: other_rate,
-            });
-            let (root, mut service) = super::super::artifact_job_fixtures::service();
-            service.sources.bootstrap = MarketBootstrapper::new(
-                okx_api::OkxPublicClient::with_http_transport(
-                    okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
-                    okx_api::RateBudget::new(),
-                    transport.clone(),
-                )
-                .unwrap(),
-            )
-            .into();
+            let transport = RecordedGet::new(vec![
+                funding_page("25000", "0.02"),
+                funding_page("25000", other_rate),
+            ]);
+            let (root, service) = service_with_source(transport.client());
             let result = service
                 .sources
                 .funding("BTC-USDT-SWAP", 20_000, 30_000)
@@ -366,51 +308,37 @@ mod extension_tests {
                 None => assert_eq!(result.unwrap(), vec![(25_000, 0.02)]),
                 Some(error) => assert_eq!(result.unwrap_err(), error),
             }
-            assert_eq!(transport.calls.load(Ordering::Relaxed), 2);
+            assert_funding_requests(&transport, &["30000", "25000"]);
             drop(service);
             std::fs::remove_dir_all(root).unwrap();
         }
     }
 
-    struct RecordedCandles {
-        calls: AtomicUsize,
-        writes: AtomicUsize,
-        body: Vec<u8>,
+    fn recorded_candles(rows: Vec<serde_json::Value>) -> Arc<RecordedGet> {
+        RecordedGet::new(vec![
+            serde_json::to_vec(&json!({"code":"0","msg":"","data":rows})).unwrap(),
+        ])
     }
-    impl HttpTransport for RecordedCandles {
-        fn send(&self, request: okx_api::HttpRequest, _: std::time::Instant) -> HttpSend<'_> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            if request.method() != reqwest::Method::GET {
-                self.writes.fetch_add(1, Ordering::Relaxed);
-            }
-            assert_eq!(request.method(), reqwest::Method::GET);
-            assert_eq!(request.url().path(), "/api/v5/market/history-candles");
-            // Sources::candles sends end_ms as `after`, no `before`; the
-            // API builder appends bar and limit without adding other fields.
-            assert_eq!(
-                request.url().query_pairs().collect::<Vec<_>>(),
+
+    fn assert_candle_request(transport: &RecordedGet) {
+        assert_eq!(
+            *transport.routes.lock().unwrap(),
+            vec![(
+                "/api/v5/market/history-candles",
                 vec![
-                    ("instId".into(), "BTC-USDT".into()),
-                    ("after".into(), "1200000".into()),
-                    ("bar".into(), "1m".into()),
-                    ("limit".into(), "100".into()),
-                ]
-            );
-            assert!(!request.headers().contains_key("x-simulated-trading"));
-            Box::pin(async {
-                Ok(RawHttpResponse {
-                    status: okx_api::HttpStatusCode::OK,
-                    headers: Default::default(),
-                    body: self.body.clone(),
-                })
-            })
-        }
+                    ("instId", "BTC-USDT".to_owned()),
+                    ("bar", "1m".to_owned()),
+                    ("after", CANDLE_END_MS.to_string()),
+                    ("limit", "100".to_owned()),
+                ],
+            )]
+        );
     }
 
     fn raw_candle(index: u64, confirm: &str) -> serde_json::Value {
         let close = (index + 1) as f64;
         json!([
-            (index * 60000).to_string(),
+            (CANDLE_START_MS + index * CANDLE_INTERVAL_MS).to_string(),
             close.to_string(),
             (close + 0.5).to_string(),
             (close - 0.5).to_string(),
@@ -429,37 +357,30 @@ mod extension_tests {
             .map(|index| raw_candle(index, "1"))
             .collect::<Vec<_>>();
         rows.push(raw_candle(2, "1"));
-        let transport = Arc::new(RecordedCandles {
-            calls: AtomicUsize::new(0),
-            writes: AtomicUsize::new(0),
-            body: serde_json::to_vec(&json!({"code":"0","msg":"","data":rows})).unwrap(),
-        });
-        let (root, mut service) = super::super::artifact_job_fixtures::service();
-        service.sources.bootstrap = MarketBootstrapper::new(
-            okx_api::OkxPublicClient::with_http_transport(
-                okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
-                okx_api::RateBudget::new(),
-                transport.clone(),
-            )
-            .unwrap(),
-        )
-        .into();
+        let transport = recorded_candles(rows);
+        let (root, service) = service_with_source(transport.client());
         assert_eq!(
             service
                 .sources
-                .candles("BTC-USDT", 60000, 0, 1200000, false)
+                .candles(
+                    "BTC-USDT",
+                    CANDLE_INTERVAL_MS,
+                    CANDLE_START_MS,
+                    CANDLE_END_MS,
+                    false
+                )
                 .await
                 .unwrap_err(),
-            "market history normalization error: history contains duplicate candle timestamp '120000'"
+            "RESEARCH_PUBLIC_CANDLES_INVALID"
         );
         assert!(service.sources.excluded.lock().unwrap().is_empty());
         assert!(service.jobs.snapshot().is_empty());
         let key = super::super::cache::SourceKey {
             source: "candles".into(),
             instrument: "BTC-USDT".into(),
-            timeframe_ms: 60000,
-            start_ms: 0,
-            end_ms: 1200000,
+            timeframe_ms: CANDLE_INTERVAL_MS,
+            start_ms: CANDLE_START_MS,
+            end_ms: CANDLE_END_MS,
             closed_only: true,
             schema: 1,
         };
@@ -473,8 +394,7 @@ mod extension_tests {
                 .unwrap_err(),
             "INVALID_PAGE_NOT_CACHED"
         );
-        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
-        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        assert_candle_request(&transport);
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -496,23 +416,10 @@ mod extension_tests {
                 }
             })
             .collect::<Vec<_>>();
-        let transport = Arc::new(RecordedCandles {
-            calls: AtomicUsize::new(0),
-            writes: AtomicUsize::new(0),
-            body: serde_json::to_vec(&json!({"code":"0","msg":"","data":rows})).unwrap(),
-        });
-        let (root, mut service) = super::super::artifact_job_fixtures::service();
-        service.sources.bootstrap = MarketBootstrapper::new(
-            okx_api::OkxPublicClient::with_http_transport(
-                okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
-                okx_api::RateBudget::new(),
-                transport.clone(),
-            )
-            .unwrap(),
-        )
-        .into();
-        let mut wire = json!({"action":"validate","instruments":["BTC-USDT"],"timeframe_ms":60000,
-            "start_ms":0,"end_ms":1200000,"range_mode":"strict","strategy_id":"ema_momentum_confirm_v1",
+        let transport = recorded_candles(rows);
+        let (root, service) = service_with_source(transport.client());
+        let mut wire = json!({"action":"validate","instruments":["BTC-USDT"],"timeframe_ms":CANDLE_INTERVAL_MS,
+            "start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,"range_mode":"strict","strategy_id":"ema_momentum_confirm_v1",
             "parameters":{"fast":1,"slow":2},"costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,"funding_mode":"zero_assumption"},
             "data_mode":"counterfactual"});
         let validation = service
@@ -529,20 +436,26 @@ mod extension_tests {
         // Partial observations remain cached honestly, never a complete result.
         let confirmed = service
             .sources
-            .candles("BTC-USDT", 60000, 0, 1200000, false)
+            .candles(
+                "BTC-USDT",
+                CANDLE_INTERVAL_MS,
+                CANDLE_START_MS,
+                CANDLE_END_MS,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(confirmed.len(), 19);
         assert!(
             confirmed
                 .iter()
-                .all(|bar| bar.time != 600000 && bar.close != 999.)
+                .all(|bar| bar.time != CANDLE_GAP_MS && bar.close != 999.)
         );
         // T04: the same recorded HTTP gap must remain visible in the public
         // market composition, never silently turning a missing bar into zero.
         let screen: MarketRequest = serde_json::from_value(json!({
             "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
-            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "timeframe_ms":CANDLE_INTERVAL_MS,"start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,"limit":20,
             "composition":{"version":"okx.market.composition/v1","steps":[
                 {"id":"r1","op":"returns_series","input":"close"},
                 {"id":"w1","op":"rolling_mean","input":"r1","period":2}
@@ -555,7 +468,7 @@ mod extension_tests {
         assert_eq!(first["candle_coverage"]["expected_bars"], 20);
         assert_eq!(first["candle_coverage"]["observed_unique_bars"], 19);
         assert_eq!(first["candle_coverage"]["missing_bars"], 1);
-        assert_eq!(first["candle_coverage"]["first_missing_ms"], 600000);
+        assert_eq!(first["candle_coverage"]["first_missing_ms"], CANDLE_GAP_MS);
         assert_eq!(first["unclosed_candles_excluded"], 1);
         assert_eq!(first["metrics"]["returns"], serde_json::Value::Null);
         assert_eq!(first["metrics"]["w1"], serde_json::Value::Null);
@@ -566,8 +479,7 @@ mod extension_tests {
                 .unwrap()
                 .contains(&json!("CANDLE_INTERIOR_GAP"))
         );
-        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
-        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        assert_candle_request(&transport);
         // A market query legitimately records one completed read-only job and
         // immutable evidence. A rejected backtest must add neither.
         let jobs_before_rejected_replay = service.jobs.snapshot().len();
@@ -594,8 +506,7 @@ mod extension_tests {
                 .count(),
             evidence_before_rejected_replay
         );
-        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
-        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        assert_candle_request(&transport);
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -614,31 +525,27 @@ mod extension_tests {
         unclosed[3] = json!("998");
         unclosed[4] = json!("999");
         rows.push(unclosed);
-        let transport = Arc::new(RecordedCandles {
-            calls: AtomicUsize::new(0),
-            writes: AtomicUsize::new(0),
-            body: serde_json::to_vec(&json!({"code":"0","msg":"","data":rows})).unwrap(),
-        });
-        let (root, mut service) = super::super::artifact_job_fixtures::service();
-        service.sources.bootstrap = MarketBootstrapper::new(
-            okx_api::OkxPublicClient::with_http_transport(
-                okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
-                okx_api::RateBudget::new(),
-                transport.clone(),
-            )
-            .unwrap(),
-        )
-        .into();
+        let transport = recorded_candles(rows);
+        let (root, service) = service_with_source(transport.client());
         // This exercises the existing real delivery decoder and Sources boundary,
         // rather than inserting normalized bars directly into the source cache.
         let bars = service
             .sources
-            .candles("BTC-USDT", 60000, 0, 1200000, false)
+            .candles(
+                "BTC-USDT",
+                CANDLE_INTERVAL_MS,
+                CANDLE_START_MS,
+                CANDLE_END_MS,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(bars.len(), 20);
         for (index, bar) in bars.iter().enumerate() {
-            assert_eq!(bar.time, index as u64 * 60000);
+            assert_eq!(
+                bar.time,
+                CANDLE_START_MS + index as u64 * CANDLE_INTERVAL_MS
+            );
             assert_eq!(bar.close, (index + 1) as f64);
             assert_eq!(bar.volume, 42.);
             assert_eq!(bar.funding_rate, None);
@@ -660,9 +567,9 @@ mod extension_tests {
                     action: MarketAction::Screen,
                     instruments: vec!["BTC-USDT".into()],
                     universe: None,
-                    timeframe_ms: 60000,
-                    start_ms: 0,
-                    end_ms: 1200000,
+                    timeframe_ms: CANDLE_INTERVAL_MS,
+                    start_ms: CANDLE_START_MS,
+                    end_ms: CANDLE_END_MS,
                     fields: vec!["rolling_mean".into()],
                     parameters: Default::default(),
                     filters: vec![],
@@ -732,7 +639,7 @@ mod extension_tests {
         // binary. The already captured candles are reused, with no venue POST.
         let boolean_query: MarketRequest = serde_json::from_value(json!({
             "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
-            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "timeframe_ms":CANDLE_INTERVAL_MS,"start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,"limit":20,
             "composition":{"version":"okx.market.composition/v1","steps":[
                 {"id":"return","op":"returns_series","input":"close"},
                 {"id":"positive","op":"greater_than","input":"return","threshold":0},
@@ -750,13 +657,12 @@ mod extension_tests {
         assert_eq!(boolean_row["metrics"]["event"], false);
         assert_eq!(boolean_row["units"]["both"], "boolean");
         assert_eq!(boolean_row["quality"], "complete");
-        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
-        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        assert_candle_request(&transport);
         // T05/T15: ratio arithmetic is available through the same binary,
         // venue source decoder and immutable result route without new I/O.
         let arithmetic_query: MarketRequest = serde_json::from_value(json!({
             "action":"screen","instruments":["BTC-USDT"],"fields":["returns"],
-            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "timeframe_ms":CANDLE_INTERVAL_MS,"start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,"limit":20,
             "composition":{"version":"okx.market.composition/v1","steps":[
                 {"id":"gain","op":"returns_series","input":"close"},
                 {"id":"previous","op":"lag","input":"gain","period":1},
@@ -775,13 +681,12 @@ mod extension_tests {
         );
         assert_eq!(arithmetic_row["units"]["difference"], "ratio");
         assert_eq!(arithmetic_row["quality"], "complete");
-        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
-        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        assert_candle_request(&transport);
         // T13: composition must disclose its candle dependency even when
         // the only legacy projection depends solely on request parameters.
         let composition_only_source: MarketRequest = serde_json::from_value(json!({
             "action":"screen","instruments":["BTC-USDT"],"fields":["position_size"],
-            "timeframe_ms":60000,"start_ms":0,"end_ms":1200000,"limit":20,
+            "timeframe_ms":CANDLE_INTERVAL_MS,"start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,"limit":20,
             "parameters":{"budget":100,"price":10,"stop_distance":0.1},
             "composition":{"version":"okx.market.composition/v1","steps":[
                 {"id":"r1","op":"returns_series","input":"close"},
@@ -803,9 +708,9 @@ mod extension_tests {
         let mut request = ResearchRequest::Backtest {
             idempotency_key: "c20-registered-composition".into(),
             instruments: vec!["BTC-USDT".into()],
-            timeframe_ms: 60000,
-            start_ms: 0,
-            end_ms: 1200000,
+            timeframe_ms: CANDLE_INTERVAL_MS,
+            start_ms: CANDLE_START_MS,
+            end_ms: CANDLE_END_MS,
             strategy_id: "ema_momentum_confirm_v1".into(),
             parameters: EmaParameters { fast: 1, slow: 2 }.into(),
             costs: ResearchCosts {
@@ -858,8 +763,7 @@ mod extension_tests {
             "INVALID_RESEARCH_REQUEST"
         );
         assert_eq!(service.jobs.snapshot().len(), before);
-        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
-        assert_eq!(transport.writes.load(Ordering::Relaxed), 0);
+        assert_candle_request(&transport);
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -87,19 +87,19 @@ const BACKUP: Witness = Witness {
     test: "storage_commands::native_backup::tests::native_whole_backup_wrapper_requires_original_metadata_catalog_and_stopped_engine",
 };
 const DECIMAL: Witness = Witness {
-    package: "okx-domain-core",
+    package: "okx-trade-execution",
     test: "risk::money::tests::risk_book_contract_legacy_decimal_syntax_and_range",
 };
 const ARITHMETIC: Witness = Witness {
-    package: "okx-domain-core",
+    package: "okx-trade-execution",
     test: "risk::money::tests::risk_book_contract_exact_ceiling_conversion_and_checked_arithmetic",
 };
 const SETTLEMENT_GOLDEN: Witness = Witness {
-    package: "okx-domain-core",
+    package: "okx-trade-execution",
     test: "risk::settlement::tests::risk_book_contract_settlement_independent_golden_transitions",
 };
 const SETTLEMENT_INVALID: Witness = Witness {
-    package: "okx-domain-core",
+    package: "okx-trade-execution",
     test: "risk::settlement::tests::risk_book_contract_settlement_rejects_corrupt_reserve_and_regression",
 };
 const SECOND_SPEC_COMPONENT: Witness = Witness {
@@ -131,11 +131,11 @@ const SOURCE_REOPEN: Witness = Witness {
     test: "account_worker::unified::owner_entry_diagnostic_tests::risk_book_contract_entry_diagnostic_reopens_original_sources_without_financial_effect",
 };
 const MONEY_SCALE_PROPERTY: Witness = Witness {
-    package: "okx-domain-core",
+    package: "okx-trade-execution",
     test: "risk::money::money_property_tests::risk_amount_canonical_round_trip_and_scale_equivalence",
 };
 const MONEY_RANGE_PROPERTY: Witness = Witness {
-    package: "okx-domain-core",
+    package: "okx-trade-execution",
     test: "risk::money::money_property_tests::risk_amount_rejects_out_of_range_and_leading_zero",
 };
 const SIZING_PROPERTY: Witness = Witness {

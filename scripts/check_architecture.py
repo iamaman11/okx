@@ -40,9 +40,6 @@ ALLOWED = {
 }
 
 
-# Additional test-only edges; these never authorize normal/build dependencies.
-ALLOWED_DEV = {"okx-research-service": {"okx-api", "okx-market-runtime"}}
-
 # Scoped supplemental source guard: the Cargo DAG cannot see std::fs/network/
 # wall-clock use. This does not replace Rust visibility/compile-fail checks.
 RISK_PURE_FORBIDDEN = re.compile(
@@ -62,13 +59,14 @@ def pure_risk_source_violations(sources: dict[str, str]) -> list[str]:
 
 
 def load_risk_sources() -> dict[str, str]:
-    folder = Path(__file__).resolve().parents[1] / "crates/okx-domain-core/src/risk"
-    if not folder.is_dir():
-        return {"missing": "use std::fs;"}
+    folder = Path(__file__).resolve().parents[1] / "crates/okx-trade-execution/src/risk"
+    source_files = ("model.rs", "money.rs", "rules.rs", "settlement.rs", "money_property_tests.rs")
     return {
-        str(path.relative_to(folder)): path.read_text(encoding="utf-8")
-        for path in folder.glob("*.rs")
+        name: (folder / name).read_text(encoding="utf-8") if (folder / name).is_file()
+        else "use std::fs; // required pure risk source missing"
+        for name in source_files
     }
+
 
 def validate(graph: dict[str, set[str]], dev_graph: dict[str, set[str]] | None = None) -> list[str]:
     errors: list[str] = []
@@ -85,7 +83,7 @@ def validate(graph: dict[str, set[str]], dev_graph: dict[str, set[str]] | None =
             errors.append(f"forbidden local dependency: {crate} -> {dep}")
     if dev_graph is not None:
         for crate in sorted(expected & set(dev_graph)):
-            for dep in sorted(dev_graph[crate] - ALLOWED[crate] - ALLOWED_DEV.get(crate, set())):
+            for dep in sorted(dev_graph[crate] - ALLOWED[crate]):
                 errors.append(f"forbidden test dependency: {crate} -> {dep}")
     return errors
 
@@ -175,49 +173,54 @@ BOUNDARY_FORBIDDEN = {
     "okx-host-protocol": {"okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-observation", "okx-research", "okx-research-service"},
 }
 
-# The source-only CI fast path assumes Engine compilation AND Engine tests do
-# not consume Research/Host implementations. Validate every Cargo resolved
-# kind (normal/build/dev), not only the shipped production graph: a dev-only
-# dependency is sufficient to make an owner-only edit affect financial tests.
-CI_INDEPENDENT_OWNER_CRATES = frozenset({
-    "okx-analysis", "okx-strategy-core", "okx-research", "okx-research-service",
-    "okx-host-controller", "okx-host-launcher", "okx-host-protocol",
-})
+# Independent build/test routes require both component closures to stay separate.
+# Build and dev edges can cause a dependency to compile even without a runtime import.
+COMPONENT_FORBIDDEN = {
+    "okx-trading-engine": BOUNDARY_FORBIDDEN["okx-trading-engine"] | {
+        "okx-host-controller", "okx-host-launcher", "okx-host-protocol", "okx-bridge-mcp",
+    },
+    "okx-research-service": BOUNDARY_FORBIDDEN["okx-research-service"] | {
+        "okx-observation", "okx-ws", "okx-host-launcher", "okx-host-protocol",
+    },
+}
 
 
 def component_scope_dependency_violations(metadata: dict) -> list[str]:
-    """Reject any Engine->scoped-owner path, including dev/build edges."""
+    """Reject cross-component paths in every resolved Cargo dependency kind."""
     from collections import deque
 
     names = {package["id"]: package["name"] for package in metadata["packages"]}
     nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
     members = set(metadata["workspace_members"])
-    roots = [pkg for pkg in members if names.get(pkg) == "okx-trading-engine"]
-    if len(roots) != 1:
-        return ["CI scope cannot establish unique Engine Cargo root"]
-    visited = set(roots)
-    queue = deque((root, [root]) for root in roots)
     errors = []
-    while queue:
-        owner, path = queue.popleft()
-        node = nodes.get(owner)
-        if node is None:
-            errors.append(f"CI scope missing resolved Cargo node: {names.get(owner, owner)}")
+    for component, forbidden in COMPONENT_FORBIDDEN.items():
+        roots = [pkg for pkg in members if names.get(pkg) == component]
+        if len(roots) != 1:
+            errors.append(f"CI scope cannot establish unique Cargo root: {component}")
             continue
-        for dep in node["deps"]:
-            next_node = dep["pkg"]
-            next_path = path + [next_node]
-            if next_node not in names or not dep.get("dep_kinds"):
-                errors.append(f"CI scope unresolved Cargo dependency: {names.get(owner, owner)}")
+        visited = set(roots)
+        queue = deque((root, [root]) for root in roots)
+        while queue:
+            owner, path = queue.popleft()
+            node = nodes.get(owner)
+            if node is None:
+                errors.append(f"CI scope missing resolved Cargo node: {names.get(owner, owner)}")
                 continue
-            if next_node in members and names[next_node] in CI_INDEPENDENT_OWNER_CRATES:
-                readable = " -> ".join(names.get(item, item) for item in next_path)
-                errors.append(f"CI scoped owner enters Engine compile/test closure: {readable}")
-                continue
-            if next_node not in visited:
-                visited.add(next_node)
-                queue.append((next_node, next_path))
+            for dep in node["deps"]:
+                next_node = dep["pkg"]
+                next_path = path + [next_node]
+                if next_node not in names or not dep.get("dep_kinds"):
+                    errors.append(f"CI scope unresolved Cargo dependency: {names.get(owner, owner)}")
+                    continue
+                if next_node in members and names[next_node] in forbidden:
+                    readable = " -> ".join(names[item] for item in next_path)
+                    errors.append(f"CI forbidden component compile/test dependency: {readable}")
+                    continue
+                if next_node not in visited:
+                    visited.add(next_node)
+                    queue.append((next_node, next_path))
     return errors
+
 
 def production_boundary_violations(graph: dict[str, set[str]], names: dict[str, str]) -> list[str]:
     """Check transitive normal edges by package ID, never test dependencies."""
@@ -301,6 +304,12 @@ def self_test() -> int:
         {"id": "api-id", "deps": []},
     ])
 
+    metadata["workspace_members"].append("worker-id")
+    metadata["packages"].append({"id": "worker-id", "name": "okx-research-service"})
+    metadata["resolve"]["nodes"].append({
+        "id": "worker-id", "deps": [{"pkg": "ipc-id", "dep_kinds": [{"kind": None}]}],
+    })
+
     if component_scope_dependency_violations(metadata):
         print("self-test failed: clean Engine scoped-owner closure rejected", file=sys.stderr)
         return 1
@@ -309,8 +318,16 @@ def self_test() -> int:
         dirty_scope["resolve"]["nodes"][1]["deps"].append({
             "pkg": "research-id", "dep_kinds": [{"kind": kind}],
         })
-        if not any("Engine compile/test closure" in error for error in component_scope_dependency_violations(dirty_scope)):
+        if not any("okx-trading-engine -> okx-research" in error for error in component_scope_dependency_violations(dirty_scope)):
             print(f"self-test failed: Engine {kind} Research dependency accepted", file=sys.stderr)
+            return 1
+        reverse_scope = json.loads(json.dumps(metadata))
+        next(node for node in reverse_scope["resolve"]["nodes"] if node["id"] == "ipc-id")["deps"].append({
+            "pkg": "api-id", "dep_kinds": [{"kind": kind}],
+        })
+        if not any("okx-research-service -> okx-ipc-contracts -> okx-api" in error
+                   for error in component_scope_dependency_violations(reverse_scope)):
+            print(f"self-test failed: transitive Research {kind} Engine API dependency accepted", file=sys.stderr)
             return 1
     host_scope = json.loads(json.dumps(metadata))
     for package in host_scope["packages"]:
@@ -367,13 +384,13 @@ def self_test() -> int:
 
     dev = {name: set() for name in ALLOWED}
     dev["okx-research-service"].update({"okx-api", "okx-market-runtime"})
-    if validate(accepted, dev):
-        print("self-test failed: worker fixture dependencies rejected", file=sys.stderr)
+    if not validate(accepted, dev):
+        print("self-test failed: worker fixture dependencies accepted", file=sys.stderr)
         return 1
     for dep in ("okx-api", "okx-market-runtime", "okx-trading-engine", "okx-trade-execution", "okx-host-controller"):
         dirty = {name: set(deps) for name, deps in accepted.items()}
         dirty["okx-research-service"].add(dep)
-        if not validate(dirty, dev):
+        if not validate(dirty):
             print(f"self-test failed: worker normal edge {dep} accepted", file=sys.stderr)
             return 1
     for dep in ("okx-research", "okx-research-service", "okx-strategy-core", "okx-analysis"):

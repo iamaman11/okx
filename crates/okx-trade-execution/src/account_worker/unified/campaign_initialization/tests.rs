@@ -223,7 +223,7 @@ async fn risk_book_contract_native_campaign_policy_two_accounts_replay_and_no_op
 
 async fn assert_execution_blocked(owner: &UnifiedFinanceHandle, p: &NativeCampaignPolicy) {
     use crate::account_worker::unified::UnifiedFinanceWrite;
-    use okx_domain_core::risk::model::{PostCausalProof, RiskProposal};
+    use crate::risk::model::{PostCausalProof, RiskProposal};
     let census = crate::risk::VerifiedCensus {
         complete: true,
         generation: 1,

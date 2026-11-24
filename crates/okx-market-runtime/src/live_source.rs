@@ -114,6 +114,7 @@ mod tests {
         fn send(&self, request: HttpRequest, _: std::time::Instant) -> HttpSend<'_> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             assert_eq!(request.method().as_str(), "GET");
+            assert!(!request.headers().contains_key("x-simulated-trading"));
             assert_eq!(request.url().path(), "/api/v5/market/history-candles");
             assert_eq!(
                 request

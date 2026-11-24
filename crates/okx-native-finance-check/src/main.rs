@@ -23,8 +23,7 @@ use verify::{
     verify_output,
 };
 
-const PACKAGES: [&str; 5] = [
-    "okx-domain-core",
+const PACKAGES: [&str; 4] = [
     "okx-trade-execution",
     "okx-trading-engine",
     "okx-ipc-contracts",

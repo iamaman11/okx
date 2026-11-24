@@ -3,7 +3,7 @@
 //! leases exist only in component tests; live proofs come from AccountStore.
 #[cfg(test)]
 use crate::finance_owner_gate::{self, AuthorityModeError, AuthorityModeLease};
-use okx_domain_core::risk::{
+use crate::risk::{
     model::{CampaignCapacity, RiskProposal, ScopeCapacity},
     money::{MoneyError, RiskAmount},
     rules::{

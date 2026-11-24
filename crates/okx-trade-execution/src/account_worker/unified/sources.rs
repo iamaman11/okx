@@ -133,7 +133,7 @@ pub(crate) fn original_bound_entry_source_sql(
     request: &UnifiedFinanceBoundSettlement,
 ) -> StoreResult<crate::risk::EntrySettlementSource> {
     use crate::risk::EntrySettlementSource;
-    use okx_domain_core::risk::money::RiskAmount;
+    use crate::risk::money::RiskAmount;
     if installation.is_empty()
         || account.is_empty()
         || intent.is_empty()
