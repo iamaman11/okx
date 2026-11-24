@@ -7,6 +7,7 @@ members = [
     "crates/okx-github",
     "crates/okx-trading-engine",
     "crates/okx-host-controller",
+    "crates/okx-host-protocol",
     "crates/okx-host-launcher",
     "crates/okx-bridge-mcp",
     "crates/okx-observation",

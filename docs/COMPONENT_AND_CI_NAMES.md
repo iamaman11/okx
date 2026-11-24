@@ -19,7 +19,9 @@ not evidence that all intended runtime boundaries have already been achieved.
 | **Edge** | `cloudflare/okx-mcp`, `okx-bridge-mcp`; transport/session/identity state | Authenticated MCP/API delivery to the matching owner | Financial or research source-of-truth state, venue mutation |
 
 `okx-domain-core` and `okx-ipc-contracts` are shared pure facts and typed
-contracts. `okx-api`, `okx-market-runtime`, `okx-observation`, `okx-ws` and
+Engine/Research contracts. Host-control messages live in `okx-host-protocol`;
+only the child shutdown request/reply remain in the shared Engine/Host IPC.
+`okx-api`, `okx-market-runtime`, `okx-observation`, `okx-ws` and
 `okx-github` contain current adapters/support code; their current broad
 dependency fan-out is **not** a reason to grant another owner financial
 authority. `okx-cli` is a tool, not a fifth continuously running application.
@@ -58,13 +60,14 @@ checks and usable artifact, and is not yet proved for Engine changes.
 | --- | --- | --- |
 | `okx-trading-engine` | `okx-agent` | Trading process: accounts, positions, financial decisions, exchange sends and recovery |
 | `okx-trade-execution` | `okx-execution` | Engine-owned RiskBook, finance/SQLite and order execution; **not** another process |
-| `okx-domain-core` | `okx-kernel` | Shared deterministic domain facts, mathematical rules and plans; no I/O |
-| `okx-ipc-contracts` | `okx-protocol` | Versioned typed messages, command contracts and authenticated IPC |
+| `okx-domain-core` | `okx-kernel` | Shared financial/domain facts and deterministic rules; no I/O or Research time-series implementation |
+| `okx-ipc-contracts` | `okx-protocol` | Shared versioned Engine/Research IPC and typed command contracts |
+| `okx-host-protocol` | new | Host installation/control command and result protocol for CONTROL and MCP bridge; no trading ownership |
 | `okx-market-runtime` | `okx-runtime` | Runtime market sources, venue API, WebSocket and observation integration |
 | `okx-research-service` | `okx-research-worker` | Separate research process and IPC implementation; no trading authority |
 | `okx-host-controller` | `okx-host-control` | Windows installation, version activation, rollback, lifecycle and diagnostics |
 | `okx-host-launcher` | unchanged | Verified native Windows process startup |
-| `okx-strategy-core` | unchanged | Research-owned pure strategy calculations |
+| `okx-strategy-core` | unchanged | Research-owned pure strategy calculations, causal plans and exact time-series grids |
 | `okx-research`, `okx-analysis` | unchanged | Research and analytical functions |
 
 Inside those packages, `lifecycle_executor.rs` is the Host Controller's

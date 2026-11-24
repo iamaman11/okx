@@ -5,3 +5,4 @@
 pub mod operators;
 pub mod query_plan;
 pub mod stream;
+pub mod time_series;

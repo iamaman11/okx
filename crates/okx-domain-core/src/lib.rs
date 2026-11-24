@@ -6,4 +6,3 @@ pub mod fee_model;
 pub mod observation_model;
 pub mod risk;
 pub mod strategy_contract;
-pub mod time_series;

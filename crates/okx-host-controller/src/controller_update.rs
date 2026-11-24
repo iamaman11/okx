@@ -99,7 +99,7 @@ pub fn launcher_error_code(error: &LauncherError) -> &'static str {
 mod tests {
     use super::*;
     use okx_github::OWNER_USER_ID;
-    use okx_ipc_contracts::{
+    use okx_host_protocol::{
         HostControlOperation, HostControlResult as ProtocolControlResult, HostControlStatus,
     };
 
@@ -107,7 +107,7 @@ mod tests {
     fn durable_ack_requires_owner_pass_and_exact_handoff_operation() {
         let request_id = "ctl_controller_update_0123456789";
         let pass = ProtocolControlResult {
-            schema: okx_ipc_contracts::HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
+            schema: okx_host_protocol::HOST_CONTROL_RESULT_SCHEMA_V1.to_owned(),
             request_id: request_id.to_owned(),
             operation: HostControlOperation::HandoffControllerUpdate,
             status: HostControlStatus::Pass,

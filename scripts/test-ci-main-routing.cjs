@@ -91,6 +91,10 @@ function validate(yaml, fileNames) {
   assert.match(researchRelease, /git worktree add --detach \$baselineDir \$mergeSha/);
   assert.match(researchRelease, /cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc/);
   assert.match(researchRelease, /node scripts\/research-release-scope.cjs @scopeArgs/);
+  const host = job('host_controller_launcher_checks');
+  assert.match(host, /cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
+  assert.match(host, /cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
+  assert.doesNotMatch(host, /cargo build --locked --release -p okx-trading-engine/);
   for (const [id, display] of [['required_linux', 'linux-core'],
     ['required_windows', 'windows-native']]) {
     assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'));

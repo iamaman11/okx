@@ -15,7 +15,7 @@ assert.throws(()=>check(meta,['crates/okx-research-service/Cargo.toml'],
 const pureCoreFile = 'crates/okx-strategy-core/src/operators.rs';
 const analysisFile = 'crates/okx-analysis/src/lib.rs';
 // Both Ready classifiers must agree on the same changed-file evidence.
-for (const filename of [pureCoreFile, analysisFile]) {
+for (const filename of [pureCoreFile, 'crates/okx-strategy-core/src/time_series.rs', analysisFile]) {
   assert.equal(check(meta,[filename]).changed_files,1);
   const pythonScope = execFileSync('python3',['-B','scripts/check_ci_native_scope.py'],{
     cwd:root,encoding:'utf8',input:JSON.stringify([[{filename,status:'modified'}]]),

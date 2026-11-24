@@ -5,7 +5,7 @@ use okx_github::{
     GitHubBackoff, GitHubClient, GitHubError, IssueCheckpoint, IssueComment, IssueCursorStore,
     MAX_COMMENT_BODY_BYTES, OWNER_USER_ID,
 };
-use okx_ipc_contracts::{
+use okx_host_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
     HostControlResult, HostControlStatus,
 };

@@ -22,6 +22,7 @@ _RESEARCH_DIRS = ("crates/okx-research/", "crates/okx-research-service/", "crate
 _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
 _HOST_CONTROL_SRC = "crates/okx-host-controller/src/"
 _HOST_LAUNCHER_SRC = "crates/okx-host-launcher/src/"
+_HOST_PROTOCOL_SRC = "crates/okx-host-protocol/src/"
 _RESEARCH_MANIFESTS = {
     "crates/okx-research/Cargo.toml",
     "crates/okx-analysis/Cargo.toml",
@@ -46,7 +47,7 @@ def category(path):
         return "cloudflare"
     # Only Rust implementation files may use the host-only gate. Changes to
     # manifests, assets, scripts, protocols or packaging still require full CI.
-    if path.startswith(_HOST_CONTROL_SRC) and path.endswith(".rs"):
+    if path.startswith((_HOST_CONTROL_SRC, _HOST_PROTOCOL_SRC)) and path.endswith(".rs"):
         return "host-controller"
     if path.startswith(_HOST_LAUNCHER_SRC) and path.endswith(".rs"):
         return "host-launcher"
@@ -190,14 +191,15 @@ def _self_test() -> None:
     cases = {
         "docs": [files("docs/acceptance/518/t01-t15-evidence-matrix.md"), files("README.md", "docs/arch.md")],
         "cloudflare": [files("cloudflare/okx-mcp/src/runtime_session.ts"), files("cloudflare/okx-mcp/src/mcp.test.ts", "docs/okx.md")],
-        "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md")],
-        "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md")],
+        "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/time_series.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md")],
+        "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-protocol/src/lib.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md")],
         "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
     }
     for wanted, selections in cases.items():
         assert all(classify(pages) == wanted for pages in selections)
     host_and_edge = files("crates/okx-host-controller/src/main.rs", "cloudflare/okx-mcp/src/mcp.ts")
     assert classify(host_and_edge) == "host-controller"
+    assert classify(files("crates/okx-host-protocol/src/lib.rs", "cloudflare/okx-mcp/src/mcp.ts")) == "host-controller"
     assert edge_changed(host_and_edge)
     assert not edge_changed(files("crates/okx-host-controller/src/main.rs", "README.md"))
     unsafe = [
@@ -207,6 +209,7 @@ def _self_test() -> None:
         files("crates/okx-trading-engine/src/trade_service/execute.rs"),
         files("crates/okx-trade-execution/src/lib.rs"),
         files("crates/okx-host-controller/Cargo.toml"),
+        files("crates/okx-host-protocol/Cargo.toml"),
         files("crates/okx-host-launcher/Cargo.toml"),
         files("crates/okx-host-controller/build.rs"),
         files("crates/okx-host-controller/assets/config.json"),

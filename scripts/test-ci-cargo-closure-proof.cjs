@@ -8,7 +8,7 @@ const {verify} = require('./ci-cargo-closure-proof.cjs');
 const root = '/tmp/ci-head';
 const base = '/tmp/ci-base';
 const owners = ['okx-trading-engine', 'okx-trade-execution', 'okx-host-controller',
-  'okx-host-launcher', 'okx-research-service', 'okx-research', 'okx-strategy-core',
+  'okx-host-launcher', 'okx-host-protocol', 'okx-research-service', 'okx-research', 'okx-strategy-core',
   'okx-ipc-contracts'];
 const external = name => `registry+https://github.com/rust-lang/crates.io-index#${name}@1.0.0`;
 const edge = (pkg, kind = null, target = null) => ({name: pkg.split('#')[0], pkg,
@@ -16,7 +16,8 @@ const edge = (pkg, kind = null, target = null) => ({name: pkg.split('#')[0], pkg
 const dependencies = {
   'okx-trading-engine': [edge('okx-trade-execution'), edge('okx-ipc-contracts'), edge(external('sqlite'))],
   'okx-trade-execution': [edge(external('serde'), 'dev')],
-  'okx-host-controller': [edge('okx-host-launcher'), edge('okx-ipc-contracts')],
+  'okx-host-controller': [edge('okx-host-launcher'), edge('okx-host-protocol'), edge('okx-ipc-contracts')],
+  'okx-host-protocol': [edge('okx-ipc-contracts')],
   'okx-research-service': [edge('okx-research'), edge('okx-strategy-core'), edge('okx-ipc-contracts')],
   'okx-research': [edge('okx-strategy-core')],
 };
@@ -85,6 +86,8 @@ reject(m => m.resolve.nodes.find(n => n.id === 'okx-research-service')
   .deps.push(edge(external('sqlite'))), 'host-controller', host);
 reject(m => m.resolve.nodes.find(n => n.id === 'okx-research-service')
   .features.push('research_change'), 'host-controller', host);
+reject(m => m.resolve.nodes.find(n => n.id === 'okx-host-protocol')
+  .features.push('new_host_wire'), 'research', research);
 
 for (const diff of [
   files('Cargo.lock'),

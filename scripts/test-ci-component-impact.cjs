@@ -9,6 +9,7 @@ const names = [
   'okx-trading-engine', 'okx-trade-execution', 'okx-domain-core',
   'okx-ipc-contracts', 'okx-research-service', 'okx-strategy-core',
   'okx-research', 'okx-analysis', 'okx-host-controller', 'okx-host-launcher', 'okx-api',
+  'okx-host-protocol', 'okx-bridge-mcp',
 ];
 const e = (pkg, kind = null) => ({pkg, dep_kinds: [{kind, target: null}]});
 const edges = {
@@ -19,7 +20,9 @@ const edges = {
   'okx-research': [e('okx-analysis')],
   'okx-analysis': [e('okx-strategy-core')],
   'okx-strategy-core': [e('okx-domain-core')],
-  'okx-host-controller': [e('okx-host-launcher'), e('okx-ipc-contracts')],
+  'okx-host-controller': [e('okx-host-launcher'), e('okx-host-protocol'), e('okx-ipc-contracts')],
+  'okx-host-protocol': [e('okx-ipc-contracts')],
+  'okx-bridge-mcp': [e('okx-host-protocol'), e('okx-ipc-contracts')],
 };
 const metadata = {
   workspace_root: cwd,
@@ -43,9 +46,13 @@ assert.deepEqual(binaries(analyze(metadata, files('crates/okx-host-launcher/src/
   ['okx-host-control.exe', 'okx-host-launcher.exe']);
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-host-controller/src/autostart.rs'))),
   ['okx-host-control.exe']);
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-host-protocol/src/lib.rs'))),
+  ['okx-host-control.exe']);
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-trade-execution/src/lib.rs'))),
   ['okx-agent.exe']);
-assert.deepEqual(binaries(analyze(metadata, files('crates/okx-domain-core/src/time_series.rs'))),
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-strategy-core/src/time_series.rs'))),
+  ['okx-research-service.exe']);
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-domain-core/src/risk/money.rs'))),
   ['okx-agent.exe', 'okx-host-control.exe', 'okx-research-service.exe']);
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-ipc-contracts/src/lib.rs'))),
   ['okx-agent.exe', 'okx-host-control.exe', 'okx-research-service.exe']);

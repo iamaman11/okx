@@ -73,7 +73,9 @@ class FeedbackTests(unittest.TestCase):
             "full_scale_execution": "not_attempted", "side_effects": "none"}}
 
     def test_kernel_and_boundaries(self):
-        self.assertEqual(select("M", "crates/okx-domain-core/src/time_series.rs"), {"kernel"})
+        self.assertEqual(select("M", "crates/okx-domain-core/src/time_series.rs"), {"expanded"})
+        self.assertEqual(select("M", "crates/okx-strategy-core/src/time_series.rs"),
+                         {"strategy", "research", "worker", "analysis"})
         self.assertEqual(select("M", "crates/okx-strategy-core/src/operators.rs"), {"strategy", "research", "worker", "analysis"})
         self.assertEqual(select("M", "crates/okx-domain-core/src/strategy_contract.rs"), {"expanded"})
         self.assertEqual(select("M", "crates/okx-research-service/src/analytics/jobs.rs"), {"worker"})
@@ -114,6 +116,7 @@ class FeedbackTests(unittest.TestCase):
         for path in (
             "crates/okx-host-controller/src/main.rs",
             "crates/okx-host-controller/src/lifecycle/activation.rs",
+            "crates/okx-host-protocol/src/lib.rs",
             "crates/okx-host-launcher/src/main.rs",
             "crates/okx-host-launcher/src/stdio_capture.rs",
         ):
@@ -129,6 +132,14 @@ class FeedbackTests(unittest.TestCase):
         ):
             self.assertNotEqual(select("M", path), {"host"})
 
+    def test_host_protocol_feedback_runs_bridge_without_engine_or_finance(self):
+        with patch("check_p0.tests", return_value="") as run_tests:
+            execute(select("M", "crates/okx-host-protocol/src/lib.rs"))
+        packages = [call.args[0] for call in run_tests.call_args_list]
+        self.assertEqual(packages, [
+            "okx-host-protocol", "okx-host-launcher", "okx-host-controller", "okx-bridge-mcp",
+        ])
+
     def test_expand_uncertain_impact(self):
         for path in ("Cargo.lock", "crates/okx-domain-core/Cargo.toml", "rust-toolchain.toml",
                      "crates/okx-research-service/build.rs", ".github/workflows/ci.yml", "unknown"):
@@ -139,7 +150,7 @@ class FeedbackTests(unittest.TestCase):
         def ready_scope(path):
             return ready_classify([[{"filename": path, "status": "modified"}]])
 
-        for primitive in ("operators.rs", "query_plan.rs", "stream.rs"):
+        for primitive in ("operators.rs", "query_plan.rs", "stream.rs", "time_series.rs"):
             path = f"crates/okx-strategy-core/src/{primitive}"
             self.assertEqual(ready_scope(path), "research")
             draft_scope = select("M", path)

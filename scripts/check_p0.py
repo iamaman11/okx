@@ -33,6 +33,7 @@ LOCAL_COMPONENTS = {
     "execution": "okx-trade-execution",
     "controller": "okx-host-controller",
     "launcher": "okx-host-launcher",
+    "host-protocol": "okx-host-protocol",
 }
 ENGINE_FEEDBACK = (
     "trade_service::strategies::pending_strategy_turn_does_not_delay_a_second_recovery_turn",
@@ -64,7 +65,7 @@ def select(status, path):
     # Cargo manifests, installer changes and mixed diffs still expand tests.
     if category(path) in {"host-controller", "host-launcher"}:
         return {"host"}
-    if path in {"crates/okx-domain-core/src/" + f for f in ("operators.rs", "query_plan.rs", "time_series.rs")}:
+    if path in {"crates/okx-domain-core/src/" + f for f in ("operators.rs", "query_plan.rs")}:
         return {"kernel"}
     if path.startswith("crates/okx-analysis/src/") and path.endswith(".rs"):
         return {"analysis", "kernel"}
@@ -370,14 +371,16 @@ def execute(scopes):
         subprocess.run([sys.executable, "scripts/check_architecture.py"], cwd=ROOT, check=True)
         scopes = SCOPES
     if "host" in scopes:
-        # Run all default targets (library plus shipping binary) for both
-        # crates. CONTROL consumes Launcher, even for a Launcher-only edit.
+        # Host-only changes run both executables and their typed protocol;
+        # the MCP bridge consumes these results without a trading Engine.
+        tests("okx-host-protocol", ())
         tests("okx-host-launcher", ())
         tests("okx-host-controller", ())
+        tests("okx-bridge-mcp", ())
     if "kernel" in scopes:
-        tests("okx-domain-core", required=(GAP_TEST,))
+        tests("okx-domain-core")
     if "strategy" in scopes or "analysis" in scopes or "research" in scopes or "kernel" in scopes:
-        tests("okx-strategy-core", required=(PLAN_TEST,))
+        tests("okx-strategy-core", required=(PLAN_TEST, GAP_TEST))
     if "analysis" in scopes:
         tests("okx-analysis")
     if "research" in scopes:

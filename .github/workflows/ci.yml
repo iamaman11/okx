@@ -649,12 +649,12 @@ jobs:
       - name: Windows installation root and lifecycle contracts
         shell: pwsh
         run: ./scripts/test-windows-unify-root.ps1
-      - name: Clippy and test Launcher owner plus CONTROL consumer
+      - name: Clippy and test Host protocol, CONTROL, Launcher and MCP bridge consumer
         shell: pwsh
         run: |
-          cargo clippy --locked -p okx-host-launcher -p okx-host-controller --all-targets -- -D warnings
+          cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p okx-host-launcher -p okx-host-controller -- --test-threads 2
+          cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp -- --test-threads 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build both Windows host executables without Engine
         shell: pwsh

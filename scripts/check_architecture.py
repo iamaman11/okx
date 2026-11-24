@@ -22,8 +22,9 @@ ALLOWED = {
     "okx-github": set(),
     "okx-cli": {"okx-api"},
     "okx-host-launcher": set(),
-    "okx-host-controller": {"okx-github", "okx-host-launcher", "okx-ipc-contracts"},
-    "okx-bridge-mcp": {"okx-github", "okx-ipc-contracts"},
+    "okx-host-protocol": {"okx-ipc-contracts"},
+    "okx-host-controller": {"okx-github", "okx-host-launcher", "okx-host-protocol", "okx-ipc-contracts"},
+    "okx-bridge-mcp": {"okx-github", "okx-host-protocol", "okx-ipc-contracts"},
     "okx-research-service": {"okx-analysis", "okx-domain-core", "okx-ipc-contracts", "okx-research", "okx-strategy-core"},
     "okx-trading-engine": {
         "okx-api",
@@ -168,6 +169,7 @@ BOUNDARY_FORBIDDEN = {
     # the Launcher and versioned protocol; neither may import Engine/SQL.
     "okx-host-controller": {"okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-observation", "okx-research", "okx-research-service"},
     "okx-host-launcher": {"okx-host-controller", "okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-observation", "okx-research", "okx-research-service"},
+    "okx-host-protocol": {"okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-observation", "okx-research", "okx-research-service"},
 }
 
 def production_boundary_violations(graph: dict[str, set[str]], names: dict[str, str]) -> list[str]:
@@ -287,8 +289,8 @@ def self_test() -> int:
         if not validate(dirty):
             print(f"self-test failed: agent edge {dep} accepted", file=sys.stderr)
             return 1
-    transitive = {"worker": {"helper"}, "helper": {"api"}, "api": set(), "agent": set(), "control": set(), "launcher": set()}
-    transitive_names = {"worker": "okx-research-service", "helper": "helper", "api": "okx-api", "agent": "okx-trading-engine", "control": "okx-host-controller", "launcher": "okx-host-launcher"}
+    transitive = {"worker": {"helper"}, "helper": {"api"}, "api": set(), "agent": set(), "control": set(), "launcher": set(), "host_protocol": set()}
+    transitive_names = {"worker": "okx-research-service", "helper": "helper", "api": "okx-api", "agent": "okx-trading-engine", "control": "okx-host-controller", "launcher": "okx-host-launcher", "host_protocol": "okx-host-protocol"}
     if not production_boundary_violations(transitive, transitive_names):
         print("self-test failed: transitive worker API leak passed", file=sys.stderr)
         return 1
@@ -315,6 +317,11 @@ def self_test() -> int:
     transitive["launcher"] = {"control"}
     if not production_boundary_violations(transitive, transitive_names):
         print("self-test failed: Launcher -> CONTROL reverse dependency passed", file=sys.stderr)
+        return 1
+    transitive["launcher"] = set()
+    transitive["host_protocol"] = {"helper"}
+    if not production_boundary_violations(transitive, transitive_names):
+        print("self-test failed: Host protocol acquired financial dependency", file=sys.stderr)
         return 1
 
     pure_source = {"money.rs": "use std::fmt;\nfn one() {}"}
