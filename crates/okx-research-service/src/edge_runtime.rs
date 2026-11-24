@@ -2,9 +2,7 @@
 //! no account store, exchange credentials, execution trait or Engine client.
 //! Every source reachable through `AnalyticsService` is a bounded public GET.
 use crate::{
-    analytics::AnalyticsService,
-    ipc::portfolio_scenario_wire,
-    producer::Producer,
+    analytics::AnalyticsService, ipc::portfolio_scenario_wire, producer::Producer,
     source_api::PublicSourceClient,
 };
 use futures_util::{SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
@@ -12,8 +10,7 @@ use okx_ipc_contracts::{
     AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentOperation, AgentRequest, AgentResponse,
     AgentResponseStatus, DIRECT_TRANSPORT_FRAME_SCHEMA_V2 as SCHEMA,
     DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES as FRAME_LIMIT, DataQuality, DirectRuntimeProfile,
-    DirectTransportFrame as Frame, research_ipc::ResearchScope,
-    trading::DiagnosticsView,
+    DirectTransportFrame as Frame, research_ipc::ResearchScope, trading::DiagnosticsView,
 };
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -50,7 +47,7 @@ impl EdgeRuntimeConfig {
             required("OKX_RESEARCH_EDGE_WSS_URL")?,
             required("OKX_RESEARCH_RUNTIME_ID")?,
             required("OKX_RESEARCH_HOST_SCOPE")?,
-            required("OKX_CONTROL_AGENT_INCAR")?,
+            required("OKX_RESEARCH_INCAR")?,
             token,
         )
     }
@@ -93,10 +90,7 @@ impl EdgeRuntimeConfig {
         {
             return Err("INVALID_RESEARCH_INCARNATION".into());
         }
-        if token.is_empty()
-            || token.len() > 1024
-            || token.bytes().any(|b| !b.is_ascii_graphic())
-        {
+        if token.is_empty() || token.len() > 1024 || token.bytes().any(|b| !b.is_ascii_graphic()) {
             return Err("INVALID_RESEARCH_BEARER".into());
         }
         Ok(Self {
@@ -134,7 +128,8 @@ pub async fn run(root: PathBuf, scope: ResearchScope) -> Result<(), String> {
         crate::independent_source::IndependentOkxPublicSource::new()?,
     ));
     let producer = Producer::current()?;
-    let service = AnalyticsService::new_scoped_with_producer(root, source, &scope, producer.clone())?;
+    let service =
+        AnalyticsService::new_scoped_with_producer(root, source, &scope, producer.clone())?;
     let mut retries = 0usize;
     loop {
         if let Err(code) = session(&config, &producer, &service).await {
@@ -153,9 +148,11 @@ fn parse_frame(message: Message) -> Result<Option<Frame>, String> {
             if json.len() > FRAME_LIMIT {
                 return Err("RESEARCH_EDGE_FRAME_OVERSIZED".into());
             }
-            let frame: Frame = serde_json::from_str(&json)
-                .map_err(|_| "INVALID_RESEARCH_EDGE_FRAME")?;
-            frame.validate_incoming_envelope().map_err(|_| "INVALID_RESEARCH_EDGE_ENVELOPE")?;
+            let frame: Frame =
+                serde_json::from_str(&json).map_err(|_| "INVALID_RESEARCH_EDGE_FRAME")?;
+            frame
+                .validate_incoming_envelope()
+                .map_err(|_| "INVALID_RESEARCH_EDGE_ENVELOPE")?;
             Ok(Some(frame))
         }
         Message::Ping(_) | Message::Pong(_) => Ok(None),
@@ -165,10 +162,21 @@ fn parse_frame(message: Message) -> Result<Option<Frame>, String> {
 
 fn research_session_binding(frame: &Frame, session: &str, generation: u64) -> Result<(), String> {
     let (received_session, received_generation) = match frame {
-        Frame::Ping { session_id, connection_generation, .. }
-        | Frame::Pong { session_id, connection_generation, .. }
-        | Frame::Request { session_id, connection_generation, .. } =>
-            (session_id, *connection_generation),
+        Frame::Ping {
+            session_id,
+            connection_generation,
+            ..
+        }
+        | Frame::Pong {
+            session_id,
+            connection_generation,
+            ..
+        }
+        | Frame::Request {
+            session_id,
+            connection_generation,
+            ..
+        } => (session_id, *connection_generation),
         _ => return Err("RESEARCH_EDGE_FRAME_FORBIDDEN".into()),
     };
     if received_session == session && received_generation == generation {
@@ -186,7 +194,10 @@ where
     if json.len() > FRAME_LIMIT {
         return Err("RESEARCH_EDGE_RESPONSE_OVERSIZED".into());
     }
-    socket.send(Message::Text(json.into())).await.map_err(|_| "RESEARCH_EDGE_WRITE_FAILED".into())
+    socket
+        .send(Message::Text(json.into()))
+        .await
+        .map_err(|_| "RESEARCH_EDGE_WRITE_FAILED".into())
 }
 
 async fn session(
@@ -194,7 +205,10 @@ async fn session(
     producer: &Producer,
     service: &AnalyticsService,
 ) -> Result<(), String> {
-    let mut request = config.url.clone().into_client_request()
+    let mut request = config
+        .url
+        .clone()
+        .into_client_request()
         .map_err(|_| "INVALID_RESEARCH_EDGE_WSS_URL")?;
     let header = Zeroizing::new(format!("Bearer {}", config.token.as_str()));
     request.headers_mut().insert(
@@ -202,18 +216,26 @@ async fn session(
         HeaderValue::from_str(&header).map_err(|_| "INVALID_RESEARCH_BEARER")?,
     );
     let (socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(request))
-        .await.map_err(|_| "RESEARCH_EDGE_CONNECT_TIMEOUT")?
+        .await
+        .map_err(|_| "RESEARCH_EDGE_CONNECT_TIMEOUT")?
         .map_err(|_| "RESEARCH_EDGE_CONNECT_FAILED")?;
     let (mut sink, mut source) = socket.split();
     let hello = config.hello(producer);
     hello.validate().map_err(|_| "RESEARCH_HELLO_INVALID")?;
     send(&mut sink, hello).await?;
     let ack = tokio::time::timeout(Duration::from_secs(5), source.next())
-        .await.map_err(|_| "RESEARCH_HELLO_TIMEOUT")?
+        .await
+        .map_err(|_| "RESEARCH_HELLO_TIMEOUT")?
         .ok_or("RESEARCH_HELLO_CLOSED")?
         .map_err(|_| "RESEARCH_EDGE_READ_FAILED")?;
-    let Some(Frame::HelloAck { session_id, connection_generation, .. }) = parse_frame(ack)?
-    else { return Err("RESEARCH_HELLO_ACK_REQUIRED".into()); };
+    let Some(Frame::HelloAck {
+        session_id,
+        connection_generation,
+        ..
+    }) = parse_frame(ack)?
+    else {
+        return Err("RESEARCH_HELLO_ACK_REQUIRED".into());
+    };
 
     let mut requests: FuturesUnordered<BoxFuture<'static, (String, AgentResponse)>> =
         FuturesUnordered::new();
@@ -310,50 +332,79 @@ async fn session(
 /// This is the only remote operation gateway. Adding a new `AgentOperation`
 /// variant cannot implicitly give it access to Research or finance.
 pub fn research_only_permits(request: &AgentRequest) -> bool {
-    request.account.is_none() && match &request.operation {
-        AgentOperation::Market { .. }
-        | AgentOperation::MarketCapabilities
-        | AgentOperation::Research { .. }
-        | AgentOperation::PortfolioScenario { .. }
-        | AgentOperation::FindInstruments { .. }
-        | AgentOperation::MarketOverview { .. }
-        | AgentOperation::MarketMicrostructure { .. } => true,
-        AgentOperation::Diagnostics { request } =>
-            request.account.is_none() && request.view == Some(DiagnosticsView::Research),
-        _ => false,
-    }
+    request.account.is_none()
+        && match &request.operation {
+            AgentOperation::Market { .. }
+            | AgentOperation::MarketCapabilities
+            | AgentOperation::Research { .. }
+            | AgentOperation::PortfolioScenario { .. }
+            | AgentOperation::FindInstruments { .. }
+            | AgentOperation::MarketOverview { .. }
+            | AgentOperation::MarketMicrostructure { .. } => true,
+            AgentOperation::Diagnostics { request } => {
+                request.account.is_none() && request.view == Some(DiagnosticsView::Research)
+            }
+            _ => false,
+        }
 }
 
-async fn dispatch(service: &AnalyticsService, operation: AgentOperation) -> Result<serde_json::Value, String> {
+async fn dispatch(
+    service: &AnalyticsService,
+    operation: AgentOperation,
+) -> Result<serde_json::Value, String> {
     match operation {
         AgentOperation::Market { request } => {
             if request.universe.is_some() {
                 return Err("RESEARCH_MARKET_EXPLICIT_INSTRUMENTS_REQUIRED".into());
             }
             service.market(request, None, None).await
-        },
+        }
         AgentOperation::MarketCapabilities => Ok(service.market_capabilities()),
         AgentOperation::Research { request } => service.research(request).await,
         AgentOperation::PortfolioScenario { request } => portfolio_scenario_wire(&request),
-        AgentOperation::Diagnostics { request } if request.view == Some(DiagnosticsView::Research)
-            && request.account.is_none() => Ok(service.diagnostic_job(
-                request.reference.as_deref().ok_or("RESEARCH_DIAGNOSTICS_REFERENCE_REQUIRED")?
-            )),
+        AgentOperation::Diagnostics { request }
+            if request.view == Some(DiagnosticsView::Research) && request.account.is_none() =>
+        {
+            let id = request
+                .reference
+                .as_deref()
+                .ok_or("RESEARCH_DIAGNOSTICS_REFERENCE_REQUIRED")?;
+            // The old deployment projection described a child observed by
+            // Engine. It cannot be reused for an unsupervised Research process.
+            if id == "deployment" {
+                return Err("RESEARCH_DEPLOYMENT_NOT_SUPERVISED".into());
+            }
+            if id.len() != 64
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err("INVALID_JOB_REFERENCE".into());
+            }
+            Ok(service.diagnostic_job(id))
+        }
         // These originally used Engine's *WebSocket cache* and global
         // reference registry. Do not quietly claim equivalent independent
         // public evidence until their Research-owned source is implemented.
         AgentOperation::MarketMicrostructure { .. }
         | AgentOperation::FindInstruments { .. }
-        | AgentOperation::MarketOverview { .. } =>
-            Err("RESEARCH_PUBLIC_LIVE_VIEW_UNAVAILABLE".into()),
+        | AgentOperation::MarketOverview { .. } => {
+            Err("RESEARCH_PUBLIC_LIVE_VIEW_UNAVAILABLE".into())
+        }
         _ => Err("RESEARCH_OPERATION_FORBIDDEN".into()),
     }
 }
 
 fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentResponse {
     let quality = match &result {
-        Ok(value) if value.get("quality").and_then(serde_json::Value::as_str)
-            .is_some_and(|v| matches!(v,"partial"|"missing"|"stale"|"degraded")) => DataQuality::Degraded,
+        Ok(value)
+            if value
+                .get("quality")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|v| matches!(v, "partial" | "missing" | "stale" | "degraded")) =>
+        {
+            DataQuality::Degraded
+        }
         Ok(_) => DataQuality::Fresh,
         Err(_) => DataQuality::NotReady,
     };
@@ -361,24 +412,41 @@ fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentRes
         Ok(value) => (AgentResponseStatus::Completed, Some(value), None),
         Err(code) => {
             let source_deferred = okx_ipc_contracts::research_ipc::is_retryable_source_defer(&code);
-            let retryable = source_deferred || code == "RESEARCH_QUEUE_FULL"
+            let retryable = source_deferred
+                || code == "RESEARCH_QUEUE_FULL"
                 || code == "RESEARCH_REQUEST_TIMEOUT";
             let safe_code = if source_deferred {
                 "MARKET_SOURCE_RETRYABLE".into()
             } else if code.len() <= 96
-                && code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-                { code } else { "RESEARCH_REQUEST_FAILED".into() };
-            (AgentResponseStatus::Failed, None, Some(AgentFailure {
-                retryable,
-                message: "Research request unavailable".into(), code: safe_code,
-            }))
-        },
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            {
+                code
+            } else {
+                "RESEARCH_REQUEST_FAILED".into()
+            };
+            (
+                AgentResponseStatus::Failed,
+                None,
+                Some(AgentFailure {
+                    retryable,
+                    message: "Research request unavailable".into(),
+                    code: safe_code,
+                }),
+            )
+        }
     };
     AgentResponse {
-        schema: AGENT_RESPONSE_SCHEMA_V1.into(), request_id: id.into(), status,
-        generated_at: jiff::Timestamp::now().to_string(), quality,
+        schema: AGENT_RESPONSE_SCHEMA_V1.into(),
+        request_id: id.into(),
+        status,
+        generated_at: jiff::Timestamp::now().to_string(),
+        quality,
         result_schema: Some(okx_ipc_contracts::accounts::PRODUCT_CONTRACT.into()),
-        result, failure, warnings: vec![],
+        result,
+        failure,
+        warnings: vec![],
     }
 }
 
@@ -397,15 +465,20 @@ mod tests {
         serde_json::from_value(json!({
             "schema":"okx.agent.request/v1", "request_id":"research_request_0123456789",
             "operation":operation,
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     #[test]
     fn profile_has_distinct_research_hello_and_no_finance_identity() {
         let cfg = EdgeRuntimeConfig::new(
-            "wss://edge.example/runtime".into(), "windows-primary".into(), "a".repeat(64),
-            format!("ctl_{}", "b".repeat(32)), Zeroizing::new("research-secret".into()),
-        ).unwrap();
+            "wss://edge.example/runtime".into(),
+            "windows-primary".into(),
+            "a".repeat(64),
+            format!("ctl_{}", "b".repeat(32)),
+            Zeroizing::new("research-secret".into()),
+        )
+        .unwrap();
         let producer = Producer::new("c".repeat(64), None, None).unwrap();
         let hello = cfg.hello(&producer);
         assert!(hello.validate().is_ok());
@@ -416,8 +489,16 @@ mod tests {
         assert!(value.get("installation_id").is_none());
         assert!(value.get("token").is_none());
         assert!(value.get("account").is_none());
-        assert!(EdgeRuntimeConfig::new("ws://edge.example/runtime".into(), "windows-primary".into(),
-            "a".repeat(64), format!("ctl_{}", "b".repeat(32)), Zeroizing::new("secret".into())).is_err());
+        assert!(
+            EdgeRuntimeConfig::new(
+                "ws://edge.example/runtime".into(),
+                "windows-primary".into(),
+                "a".repeat(64),
+                format!("ctl_{}", "b".repeat(32)),
+                Zeroizing::new("secret".into())
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -430,8 +511,12 @@ mod tests {
         ] {
             assert!(!research_only_permits(&request(operation)));
         }
-        assert!(research_only_permits(&request(json!({"type":"market_capabilities"}))));
-        assert!(research_only_permits(&request(json!({"type":"research","request":{"action":"capabilities"}}))));
+        assert!(research_only_permits(&request(
+            json!({"type":"market_capabilities"})
+        )));
+        assert!(research_only_permits(&request(
+            json!({"type":"research","request":{"action":"capabilities"}})
+        )));
         let mut with_account = request(json!({"type":"market_capabilities"}));
         with_account.account = Some("okx:real:account".into());
         assert!(!research_only_permits(&with_account));
@@ -450,18 +535,29 @@ mod tests {
     fn inbound_financial_frames_are_never_accepted() {
         let session = "session_abcdefghijklmnop";
         let rejected = Frame::Response {
-            schema: SCHEMA.into(), session_id: session.into(), connection_generation:1,
-            response: rejected("research_request_0123456789", "RESEARCH_OPERATION_FORBIDDEN"),
+            schema: SCHEMA.into(),
+            session_id: session.into(),
+            connection_generation: 1,
+            response: rejected(
+                "research_request_0123456789",
+                "RESEARCH_OPERATION_FORBIDDEN",
+            ),
         };
-        assert_eq!(research_session_binding(&rejected,session,1).unwrap_err(),
-            "RESEARCH_EDGE_FRAME_FORBIDDEN");
-        let ping=Frame::Ping {
-            schema:SCHEMA.into(), session_id:session.into(), connection_generation:1,
-            nonce:"ping_abcdefghijklmnop".into(),
+        assert_eq!(
+            research_session_binding(&rejected, session, 1).unwrap_err(),
+            "RESEARCH_EDGE_FRAME_FORBIDDEN"
+        );
+        let ping = Frame::Ping {
+            schema: SCHEMA.into(),
+            session_id: session.into(),
+            connection_generation: 1,
+            nonce: "ping_abcdefghijklmnop".into(),
         };
-        assert!(research_session_binding(&ping,session,1).is_ok());
-        assert_eq!(research_session_binding(&ping,session,2).unwrap_err(),
-            "RESEARCH_EDGE_GENERATION_MISMATCH");
+        assert!(research_session_binding(&ping, session, 1).is_ok());
+        assert_eq!(
+            research_session_binding(&ping, session, 2).unwrap_err(),
+            "RESEARCH_EDGE_GENERATION_MISMATCH"
+        );
         let frame = json!({
             "type":"risk_control", "schema":SCHEMA,
             "session_id":"session_abcdefghijklmnop", "connection_generation":1,
@@ -471,8 +567,14 @@ mod tests {
         // An incomplete financial frame is invalid at protocol ingress.
         assert!(serde_json::from_value::<Frame>(frame).is_err());
         assert_eq!(
-            response_for("research_request_0123456789",Err("RESEARCH_OPERATION_FORBIDDEN".into())).
-                failure.as_ref().unwrap().code,
+            response_for(
+                "research_request_0123456789",
+                Err("RESEARCH_OPERATION_FORBIDDEN".into())
+            )
+            .failure
+            .as_ref()
+            .unwrap()
+            .code,
             "RESEARCH_OPERATION_FORBIDDEN",
         );
     }

@@ -376,8 +376,14 @@ mod runtime_profile_contract_tests {
 
     #[test]
     fn distinct_profiles_have_strict_hello_shapes() {
-        assert_eq!(serde_json::to_value(DirectRuntimeProfile::Engine).unwrap(), json!("engine"));
-        assert_eq!(serde_json::to_value(DirectRuntimeProfile::Research).unwrap(), json!("research"));
+        assert_eq!(
+            serde_json::to_value(DirectRuntimeProfile::Engine).unwrap(),
+            json!("engine")
+        );
+        assert_eq!(
+            serde_json::to_value(DirectRuntimeProfile::Research).unwrap(),
+            json!("research")
+        );
         let fields = json!({
             "type":"hello_research", "schema":DIRECT_TRANSPORT_FRAME_SCHEMA_V2,
             "runtime_id":"windows-primary", "connection_id":"research_012345678901234567890123456789ab",
@@ -385,15 +391,15 @@ mod runtime_profile_contract_tests {
             "contract":accounts::PRODUCT_CONTRACT, "agent_pid":12,
             "agent_binary_sha256":"b".repeat(64),"agent_incarnation":format!("ctl_{}","c".repeat(32))
         });
-        let frame: DirectTransportFrame=serde_json::from_value(fields.clone()).unwrap();
+        let frame: DirectTransportFrame = serde_json::from_value(fields.clone()).unwrap();
         frame.validate().unwrap();
-        assert_eq!(serde_json::to_value(frame).unwrap(),fields);
-        let mut financial=fields.clone();
-        financial["type"]=json!("hello");
-        financial["installation_id"]=json!("any-installation");
+        assert_eq!(serde_json::to_value(frame).unwrap(), fields);
+        let mut financial = fields.clone();
+        financial["type"] = json!("hello");
+        financial["installation_id"] = json!("any-installation");
         assert!(serde_json::from_value::<DirectTransportFrame>(financial).is_err());
-        let mut mixed=fields;
-        mixed["installation_id"]=json!("x");
+        let mut mixed = fields;
+        mixed["installation_id"] = json!("x");
         assert!(serde_json::from_value::<DirectTransportFrame>(mixed).is_err());
     }
 }

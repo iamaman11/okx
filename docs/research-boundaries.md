@@ -39,7 +39,10 @@ Research job diagnostics. FindInstruments, MarketOverview and
 MarketMicrostructure depend on public cache/reference behavior still owned by
 Engine; the independent endpoint currently returns a typed unavailable error
 for these, **not** fabricated data or a financial Engine fallback. A Research
-socket refuses trading, account selection, strategy mutation, risk commands
+deployment diagnostic also returns `RESEARCH_DEPLOYMENT_NOT_SUPERVISED` until
+CONTROL can attest the standalone process instead of reusing the old Engine
+child's deployment snapshot. A Research socket refuses trading, account
+selection, strategy mutation, risk commands
 and policy snapshot frames. Edge's internal `target_owner` routing marker is
 removed before constructing the strict native Rust request.
 
