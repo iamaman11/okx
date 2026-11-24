@@ -77,13 +77,24 @@ when it finishes):
 ```sh
 python3 -B vnext/s0/engine_topology_ab.py \
   --engine vnext/engine \
-  --output /tmp/engine-topology-local.json
+  --probe command \
+  --output /tmp/engine-command-topology.json
+
+python3 -B vnext/s0/engine_topology_ab.py \
+  --engine vnext/engine \
+  --probe finance \
+  --output /tmp/engine-finance-topology.json
 ```
 
 Both variants run the real SQLite/WAL handoff and the existing finance fake-venue
 lost-ACK/single-send witnesses, then rebuild after the same temporary
-production-source change. This is **not** the new Engine HTTP execution E2E
-or a finance-only diff. Its first non-authoritative Linux sample is preserved
+production-source change. The **command** probe changes validated identifiers;
+the separately exported **finance** probe first proves its PREPARE-idempotency
+test fails against the unchanged source, then hardens the original financial
+writer implementation and measures the green test and release rebuild. Each
+probe runs the fake-venue witnesses again after its source change. Neither is a
+new Engine HTTP execution E2E or a financial SQL-schema migration. The first
+non-authoritative Linux **command** sample is preserved
 in [engine_ab_local_sample.json](engine_ab_local_sample.json).
 
 The Research export is deliberately separate from the fast oracle and the
@@ -102,7 +113,11 @@ python3 -B vnext/s0/research_diff.py \
 
 Use a fresh export for the alternative `--probe adapter-only`. Both probe
 classes intentionally modify **only the disposable copies**, not the canonical
-Research source. Run the same `measure.py run --command ...` list *before and
+Research source. The Research oracle executes three typed QueryPlan hypotheses
+**A/B/C on the same six immutable closed bars**, records the common source
+SHA-256 and checks three distinct complete numerical series, deterministic
+replays and fail-closed negative paths for both topologies. It does not prove
+the external MCP/API route (U01). Run the same `measure.py run --command ...` list *before and
 after* each probe and compare records only when host, toolchain, cache policy,
 commands and semantic oracle match. The first local measurements of both
 classes are recorded in [research_ab_local_sample.json](research_ab_local_sample.json).

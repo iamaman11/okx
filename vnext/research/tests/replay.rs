@@ -4,14 +4,10 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-fn run_replay(timeframe_ms: i64, bars: Value) -> Output {
+fn run_replay_graph(timeframe_ms: i64, bars: Value, graph: Value) -> Output {
     let request = json!({
         "timeframe_ms": timeframe_ms,
-        "graph": {
-            "version": "okx.market.composition/v1",
-            "steps": [{"id": "mean", "op": "rolling_mean", "input": "close", "period": 2}],
-            "result_steps": ["mean"]
-        },
+        "graph": graph,
         "bars": bars
     });
 
@@ -28,6 +24,51 @@ fn run_replay(timeframe_ms: i64, bars: Value) -> Output {
         .write_all(request.to_string().as_bytes())
         .unwrap();
     child.wait_with_output().unwrap()
+}
+
+fn run_replay(timeframe_ms: i64, bars: Value) -> Output {
+    run_replay_graph(timeframe_ms, bars, json!({
+        "version": "okx.market.composition/v1",
+        "steps": [{"id": "mean", "op": "rolling_mean", "input": "close", "period": 2}],
+        "result_steps": ["mean"]
+    }))
+}
+
+#[test]
+fn three_data_only_hypotheses_replay_identical_closed_source_with_distinct_oracles() {
+    // Same immutable recorded source, same installed binary, only typed QueryPlan
+    // data changes. This is a standalone CLI witness, not yet MCP/API U01.
+    let bars = json!((1..=6)
+        .map(|index| json!({
+            "timestamp_ms": index * 60_000,
+            "available_at_ms": (index + 1) * 60_000,
+            "close": 3.0 * index as f64,
+        }))
+        .collect::<Vec<_>>());
+    let source_bytes = serde_json::to_vec(&bars).unwrap();
+    let mut observed = Vec::new();
+    for (period, expected) in [(2, 16.5), (3, 15.0), (6, 10.5)] {
+        let graph = json!({
+            "version": "okx.market.composition/v1",
+            "steps": [{"id": "mean", "op": "rolling_mean", "input": "close", "period": period}],
+            "result_steps": ["mean"]
+        });
+        assert_eq!(serde_json::to_vec(&bars).unwrap(), source_bytes);
+        let first = run_replay_graph(60_000, bars.clone(), graph.clone());
+        let repeated = run_replay_graph(60_000, bars.clone(), graph);
+        assert!(first.status.success(), "period={period}: {:?}", first);
+        assert!(repeated.status.success(), "period={period}: {:?}", repeated);
+        assert_eq!(first.stdout, repeated.stdout, "nondeterministic replay");
+        let series: Value = serde_json::from_slice(&first.stdout).unwrap();
+        assert_eq!(series.as_array().unwrap().len(), 6);
+        assert_eq!(series[5]["timestamp_ms"], 360_000);
+        assert_eq!(series[5]["available_at_ms"], 420_000);
+        assert_eq!(series[5]["values"]["mean"][0], json!(expected));
+        observed.push(series[5]["values"]["mean"][0].clone());
+    }
+    assert_ne!(observed[0], observed[1]);
+    assert_ne!(observed[1], observed[2]);
+    assert_ne!(observed[0], observed[2]);
 }
 
 fn replay(timestamps: [i64; 3]) -> Output {

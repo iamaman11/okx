@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -25,14 +26,37 @@ VALID = {
         "result_steps": ["average"],
     },
     "bars": [
-        {"timestamp_ms": 60_000, "available_at_ms": 120_000, "close": 2.0},
-        {"timestamp_ms": 120_000, "available_at_ms": 180_000, "close": 4.0},
+        {"timestamp_ms": index * 60_000, "available_at_ms": (index + 1) * 60_000,
+         "close": float(index * 3)}
+        for index in range(1, 7)
     ],
 }
-EXPECTED = [
-    {"timestamp_ms": 60_000, "available_at_ms": 120_000, "values": {"average": [None, "price"]}},
-    {"timestamp_ms": 120_000, "available_at_ms": 180_000, "values": {"average": [3.0, "price"]}},
-]
+EXPERIMENTS = {
+    "A": (2, [None, 4.5, 7.5, 10.5, 13.5, 16.5]),
+    "B": (3, [None, None, 6.0, 9.0, 12.0, 15.0]),
+    "C": (6, [None, None, None, None, None, 10.5]),
+}
+
+
+def experiment(name: str) -> dict:
+    period, _ = EXPERIMENTS[name]
+    request = copy.deepcopy(VALID)
+    request["graph"]["steps"][0]["period"] = period
+    return request
+
+
+def source_digest(payload: dict) -> str:
+    # The *recorded* source alone has a stable digest, independent of the plan.
+    canonical = json.dumps(payload["bars"], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def expected_series(values: list) -> list[dict]:
+    return [
+        {"timestamp_ms": bar["timestamp_ms"], "available_at_ms": bar["available_at_ms"],
+         "values": {"average": [value, "price"]}}
+        for bar, value in zip(VALID["bars"], values, strict=True)
+    ]
 
 
 def command(workspace: Path, payload: dict) -> subprocess.CompletedProcess[str]:
@@ -61,12 +85,24 @@ def run(workspace_root: Path) -> dict[str, object]:
         if observed != members:
             raise AssertionError(f"{topology}: expected {members} Cargo members, got {observed}")
 
-        passed = command(workspace, VALID)
-        if passed.returncode:
-            raise AssertionError(f"{topology}: valid replay failed: {passed.stderr[-1500:]}")
-        output = json.loads(passed.stdout)
-        if output != EXPECTED:
-            raise AssertionError(f"{topology}: numerical oracle mismatch: {output!r}")
+        numerical: dict[str, float] = {}
+        digest = source_digest(VALID)
+        for name, (_, values) in EXPERIMENTS.items():
+            payload = experiment(name)
+            if source_digest(payload) != digest:
+                raise AssertionError(f"{topology}: experiment {name} changed source bytes")
+            passed = command(workspace, payload)
+            repeated = command(workspace, payload)
+            if passed.returncode or repeated.returncode:
+                raise AssertionError(f"{topology}/{name}: valid replay failed: {passed.stderr[-1500:]}")
+            if passed.stdout != repeated.stdout:
+                raise AssertionError(f"{topology}/{name}: replay is not deterministic")
+            output = json.loads(passed.stdout)
+            if output != expected_series(values):
+                raise AssertionError(f"{topology}/{name}: numerical oracle mismatch: {output!r}")
+            numerical[name] = values[-1]
+        if len(set(numerical.values())) != 3:
+            raise AssertionError(f"{topology}: hypotheses are not distinguishable")
 
         invalid_cases: dict[str, dict] = {}
         early = copy.deepcopy(VALID)
@@ -86,10 +122,15 @@ def run(workspace_root: Path) -> dict[str, object]:
             rejected = command(workspace, payload)
             if rejected.returncode == 0:
                 raise AssertionError(f"{topology}: incorrectly accepted {name}")
+            if rejected.stdout.strip():
+                raise AssertionError(f"{topology}: {name} leaked partial replay results")
 
         results[topology] = {
             "cargo_members": members,
-            "positive": 1,
+            "positive": len(EXPERIMENTS),
+            "numerical_oracles": numerical,
+            "immutable_recorded_source_sha256": digest,
+            "same_executable_for_all_plans": True,
             "negative": list(invalid_cases),
             "source": "recorded, closed 60s bars",
         }

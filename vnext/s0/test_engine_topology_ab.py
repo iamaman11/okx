@@ -4,7 +4,14 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from engine_topology_ab import apply_identical_source_diff, copy_owner, make_compact
+from engine_topology_ab import (
+    apply_financial_source_diff,
+    apply_identical_source_diff,
+    copy_owner,
+    finance_test_path,
+    make_compact,
+    stage_finance_negative_oracle,
+)
 
 
 ENGINE = Path(__file__).resolve().parents[1] / "engine"
@@ -41,6 +48,28 @@ class EngineTopologyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="okx-s0-engine-unit-") as root:
             with self.assertRaises(ValueError):
                 copy_owner(Path(root), Path(root) / "new")
+
+    def test_finance_only_probe_is_identical_and_never_mutates_canonical_engine(self):
+        finance = ENGINE / "crates/okx-trade-execution/src/ledger/sql/intents.rs"
+        original = finance.read_bytes()
+        for topology in ("split", "compact"):
+            with self.subTest(topology=topology), tempfile.TemporaryDirectory(prefix="okx-s0-finance-") as root:
+                owner = Path(root) / "engine"
+                copy_owner(ENGINE, owner)
+                if topology == "compact":
+                    make_compact(owner)
+                stage_finance_negative_oracle(owner, topology)
+                test = finance_test_path(owner, topology).read_text(encoding="utf-8")
+                self.assertIn("S0_FINANCE_RED_EXPECTED", test)
+                self.assertIn("invalid.idempotency_key.push('.')", test)
+                self.assertEqual((owner / "crates/okx-trade-execution/src/ledger/sql/intents.rs").read_bytes(), original)
+                apply_financial_source_diff(owner)
+                edited = (owner / "crates/okx-trade-execution/src/ledger/sql/intents.rs").read_text(encoding="utf-8")
+                self.assertIn('Err(StoreError::Invalid("INVALID_IDEMPOTENCY_KEY"))', edited)
+                self.assertNotEqual(edited.encode(), original)
+                with self.assertRaisesRegex(ValueError, "anchor has changed"):
+                    apply_financial_source_diff(owner)
+        self.assertEqual(finance.read_bytes(), original)
 
 
 if __name__ == "__main__":

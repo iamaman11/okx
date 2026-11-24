@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from research_diff import apply_probe, checksum
+from research_oracle import EXPERIMENTS, experiment, expected_series, source_digest
 from research_topology import export
 
 
@@ -12,6 +13,19 @@ SOURCE = Path(__file__).resolve().parents[1] / "research"
 
 
 class ResearchTopologyTests(unittest.TestCase):
+    def test_three_research_plans_share_one_immutable_source_and_distinct_oracles(self):
+        digests = {source_digest(experiment(name)) for name in EXPERIMENTS}
+        self.assertEqual(len(digests), 1)
+        self.assertEqual([experiment(name)["graph"]["steps"][0]["period"]
+                          for name in EXPERIMENTS], [2, 3, 6])
+        last_values = []
+        for name, (_, expected) in EXPERIMENTS.items():
+            output = expected_series(expected)
+            self.assertEqual(len(output), 6)
+            self.assertEqual(output[-1]["available_at_ms"], 420_000)
+            last_values.append(output[-1]["values"]["average"][0])
+        self.assertEqual(len(set(last_values)), 3)
+
     def test_compact_preserves_exact_numeric_source_and_removes_second_package(self):
         with tempfile.TemporaryDirectory(prefix="research-topology-") as temp:
             output = Path(temp) / "compact"
