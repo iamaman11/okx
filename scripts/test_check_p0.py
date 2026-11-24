@@ -32,16 +32,27 @@ class FeedbackTests(unittest.TestCase):
     def test_ready_windows_runs_math_owner_tests_not_just_worker(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
         owner_commands = {
-            "research_service_tests_windows": "cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service",
-            "trading_engine_regressions_windows": "cargo test --locked -p okx-strategy-core -p okx-research",
+            "research_service_tests_windows": [
+                "cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis",
+                "cargo test --locked -p okx-research-service --lib --bins -- --test-threads 2",
+                "cargo test --locked -p okx-research-service --test causal_release_smoke",
+                "cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1",
+                "cargo test --locked -p okx-research-service --doc",
+            ],
+            "trading_engine_regressions_windows": [
+                "cargo test --locked -p okx-strategy-core -p okx-research",
+            ],
         }
-        for job, command in owner_commands.items():
+        for job, commands in owner_commands.items():
             match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [a-z_-]+:|\Z)", workflow)
             self.assertIsNotNone(match, f"missing mandatory Windows job {job}")
-            self.assertIn(
-                command,
-                match.group(1), f"{job} must execute owner unit tests, not just compile them",
-            )
+            for command in commands:
+                self.assertIn(command, match.group(1),
+                              f"{job} must execute owner tests, not just compile them")
+        scoped = re.search(r"(?ms)^  research_service_tests_windows:\n(.*?)(?=^  [a-z_-]+:|\Z)",
+                           workflow).group(1)
+        self.assertNotIn("cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service",
+                         scoped, "do not run IPC tests with unbounded default parallelism")
         acceptance = re.search(
             r"(?ms)^  trading_engine_acceptance_windows:\n(.*?)(?=^  [a-z_-]+:|\Z)", workflow
         )
