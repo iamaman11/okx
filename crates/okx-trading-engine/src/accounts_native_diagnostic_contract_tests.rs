@@ -32,11 +32,17 @@ async fn risk_book_contract_native_unknown_intent_diagnostic_reads_sql_without_n
     if let TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
     }
-    let first = fixture
-        .trade
-        .trade(&fixture.config.alias, &request, Some(&fixture.authority))
-        .await
-        .unwrap();
+    // The finite, recorded external clock sample may age while this fixture
+    // waits behind parallel SQL work on a Windows CI runner. Refresh only the
+    // still-undelivered sample; production's five-second safety bound remains.
+    let first = super::filled_fixture::with_fresh_recorded_clock(
+        &fixture.feed,
+        fixture
+            .trade
+            .trade(&fixture.config.alias, &request, Some(&fixture.authority)),
+    )
+    .await
+    .unwrap();
     assert_eq!(first["status"], "unknown", "{first}");
     let account = fixture._account.clone();
     let capture = account.recorded_capture_gate.write().await;
