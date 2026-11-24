@@ -212,16 +212,21 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
         .unwrap()
         .write_all(b"tampered")
         .unwrap();
+    pointer(&runtime, &v1);
+    let working_pid = client.deployment_status().active_pid;
     client.capabilities().await.unwrap();
+    let refused = client.deployment_status();
+    assert_eq!(refused.active.as_deref(), Some(v2.as_str()));
+    assert_eq!(refused.active_pid, working_pid);
     assert_eq!(
-        client.deployment_status().active.as_deref(),
-        Some(v2.as_str())
+        refused.installed_check_error.as_deref(),
+        Some("RESEARCH_INSTALL_HASH_MISMATCH")
     );
+    assert!(!refused.draining);
     client.shutdown().await;
     let stopped = client.deployment_status();
     assert!(stopped.active_pid.is_none());
     assert!(stopped.handshake_verified_at_ms.is_none());
-    pointer(&runtime, &v1);
     assert_eq!(
         client.capabilities().await.unwrap_err(),
         "RESEARCH_INSTALL_HASH_MISMATCH"

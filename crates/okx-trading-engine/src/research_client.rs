@@ -184,6 +184,17 @@ impl ResearchClient {
             deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
         }
     }
+    async fn resolve_installed(&self, root: PathBuf) -> Result<PathBuf, String> {
+        let resolved = tokio::task::spawn_blocking(move || installed::resolve(&root))
+            .await
+            .map_err(|_| "RESEARCH_INSTALL_CHECK_FAILED")?;
+        if let Ok(mut state) = self.deployment.lock() {
+            state.installed = resolved.as_ref().ok().and_then(|path| version_name(path));
+            state.installed_check_error = resolved.as_ref().err().cloned();
+        }
+        resolved
+    }
+
     async fn connect(&self) -> Result<Arc<Connection>, String> {
         let mut slot = self.connection.lock().await;
         let installed = match &self.installation_runtime {
@@ -223,49 +234,56 @@ impl ResearchClient {
             .filter(|c| c.live.load(Ordering::Acquire))
             .cloned()
         {
-            if installed.as_ref().is_some_and(|path| *path != c.executable)
-                || c.draining.load(Ordering::Acquire)
-            {
-                c.draining.store(true, Ordering::Release);
-                if let Ok(mut state) = self.deployment.lock() {
-                    state.draining = true;
-                }
-                let drain = Self::send(&c, ResearchCommand::Drain, None).await?;
-                let active = drain.drain()?.active_jobs;
-                if active != 0 || installed.is_none() {
-                    return Ok(c);
-                }
-                // No old command may remain in flight when the old worker exits.
-                // Drain already prevents any racing enqueue from committing.
-                let _all = c
-                    .permits
-                    .acquire_many(MAX_IN_FLIGHT as u32)
-                    .await
-                    .map_err(|_| "WORKER_CLOSED")?;
-                let _control = c
-                    .control_permits
-                    .acquire_many(CRITICAL_IN_FLIGHT as u32)
-                    .await
-                    .map_err(|_| "WORKER_CLOSED")?;
-                let _observations = c
-                    .observation_permits
-                    .acquire_many(OBSERVATION_IN_FLIGHT as u32)
-                    .await
-                    .map_err(|_| "WORKER_CLOSED")?;
-                let _sources = c
-                    .source_permits
-                    .acquire_many(MAX_IN_FLIGHT as u32)
-                    .await
-                    .map_err(|_| "WORKER_CLOSED")?;
-                let mut done = c.closed.subscribe();
-                Self::send(&c, ResearchCommand::Shutdown, None)
-                    .await?
-                    .shutdown()?;
-                while !*done.borrow_and_update() {
-                    done.changed().await.map_err(|_| "WORKER_DISCONNECTED")?;
-                }
-            } else {
+            let (Some(candidate), Some(root)) = (&installed, &self.installation_runtime) else {
                 return Ok(c);
+            };
+            // Hash a new candidate before asking the current worker to drain.
+            if !c.draining.load(Ordering::Acquire)
+                && (*candidate == c.executable
+                    || self.resolve_installed(root.clone()).await.as_ref() != Ok(candidate))
+            {
+                return Ok(c);
+            }
+            c.draining.store(true, Ordering::Release);
+            if let Ok(mut state) = self.deployment.lock() {
+                state.draining = true;
+            }
+            let drain = Self::send(&c, ResearchCommand::Drain, None).await?;
+            let active = drain.drain()?.active_jobs;
+            if active != 0 {
+                return Ok(c);
+            }
+            // No old command may remain in flight when the old worker exits.
+            // Drain already prevents any racing enqueue from committing.
+            let _all = c
+                .permits
+                .acquire_many(MAX_IN_FLIGHT as u32)
+                .await
+                .map_err(|_| "WORKER_CLOSED")?;
+            let _control = c
+                .control_permits
+                .acquire_many(CRITICAL_IN_FLIGHT as u32)
+                .await
+                .map_err(|_| "WORKER_CLOSED")?;
+            let _observations = c
+                .observation_permits
+                .acquire_many(OBSERVATION_IN_FLIGHT as u32)
+                .await
+                .map_err(|_| "WORKER_CLOSED")?;
+            let _sources = c
+                .source_permits
+                .acquire_many(MAX_IN_FLIGHT as u32)
+                .await
+                .map_err(|_| "WORKER_CLOSED")?;
+            if self.resolve_installed(root.clone()).await.as_ref() != Ok(candidate) {
+                return Ok(c.clone());
+            }
+            let mut done = c.closed.subscribe();
+            Self::send(&c, ResearchCommand::Shutdown, None)
+                .await?
+                .shutdown()?;
+            while !*done.borrow_and_update() {
+                done.changed().await.map_err(|_| "WORKER_DISCONNECTED")?;
             }
         }
         if let Some(c) = slot.as_ref() {
@@ -277,17 +295,7 @@ impl ResearchClient {
         let session = WorkerSession::new(unique()).map_err(str::to_owned)?;
         // Re-read after shutdown: installation may have changed during drain.
         let executable = match &self.installation_runtime {
-            Some(root) => {
-                let root = root.clone();
-                let resolved = tokio::task::spawn_blocking(move || installed::resolve(&root))
-                    .await
-                    .map_err(|_| "RESEARCH_INSTALL_CHECK_FAILED")?;
-                if let Ok(mut state) = self.deployment.lock() {
-                    state.installed = resolved.as_ref().ok().and_then(|path| version_name(path));
-                    state.installed_check_error = resolved.as_ref().err().cloned();
-                }
-                resolved?
-            }
+            Some(root) => self.resolve_installed(root.clone()).await?,
             None => self.config.executable.clone(),
         };
         let mut command = Command::new(&executable);
