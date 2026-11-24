@@ -966,11 +966,31 @@ fn start_diagnostic_restore(
     })
 }
 
-pub fn build_release() -> &'static str {
-    match option_env!("OKX_BUILD_SOURCE_TREE") {
-        Some(v) => v,
-        None => "UNVERIFIED_LOCAL_BUILD",
+static BUILD_RELEASE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Bind the source tree embedded in the executable at startup. Keep the tree
+/// out of the library's Cargo inputs so a new release label only relinks the
+/// executable when the Engine library and its dependencies are unchanged.
+pub fn set_build_release(tree: &'static str) -> AgentResult<()> {
+    if tree.len() != 40
+        || !tree
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(AgentError::FinancialCaptureTask(
+            "BUILD_RELEASE_INVALID".into(),
+        ));
     }
+    BUILD_RELEASE
+        .set(tree)
+        .map_err(|_| AgentError::FinancialCaptureTask("BUILD_RELEASE_ALREADY_SET".into()))
+}
+
+pub fn build_release() -> &'static str {
+    BUILD_RELEASE
+        .get()
+        .copied()
+        .unwrap_or("UNVERIFIED_LOCAL_BUILD")
 }
 
 #[cfg(test)]

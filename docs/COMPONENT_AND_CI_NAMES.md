@@ -161,6 +161,11 @@ queues one response, timestamped at delivery by the recorded venue. Tests for
 stale inputs still use their fixed recorded values. Production freshness,
 SQLite deadlines and the collector's financial resource budgets apply as before.
 
+The exact source tree is embedded in the Engine executable. Changing the
+release label relinks the executable while Cargo can reuse the Engine library
+when its inputs match. The running executable still rejects storage commands
+that name a different release tree.
+
 ## Release acceptance for a future executable rename
 
 1. Keep binary names and v2 archive/manifest schema stable in this code-name
