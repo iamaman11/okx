@@ -27,24 +27,30 @@ fn run_replay_graph(timeframe_ms: i64, bars: Value, graph: Value) -> Output {
 }
 
 fn run_replay(timeframe_ms: i64, bars: Value) -> Output {
-    run_replay_graph(timeframe_ms, bars, json!({
-        "version": "okx.market.composition/v1",
-        "steps": [{"id": "mean", "op": "rolling_mean", "input": "close", "period": 2}],
-        "result_steps": ["mean"]
-    }))
+    run_replay_graph(
+        timeframe_ms,
+        bars,
+        json!({
+            "version": "okx.market.composition/v1",
+            "steps": [{"id": "mean", "op": "rolling_mean", "input": "close", "period": 2}],
+            "result_steps": ["mean"]
+        }),
+    )
 }
 
 #[test]
 fn three_data_only_hypotheses_replay_identical_closed_source_with_distinct_oracles() {
     // Same immutable recorded source, same installed binary, only typed QueryPlan
     // data changes. This is a standalone CLI witness, not yet MCP/API U01.
-    let bars = json!((1..=6)
-        .map(|index| json!({
-            "timestamp_ms": index * 60_000,
-            "available_at_ms": (index + 1) * 60_000,
-            "close": 3.0 * index as f64,
-        }))
-        .collect::<Vec<_>>());
+    let bars = json!(
+        (1..=6)
+            .map(|index| json!({
+                "timestamp_ms": index * 60_000,
+                "available_at_ms": (index + 1) * 60_000,
+                "close": 3.0 * index as f64,
+            }))
+            .collect::<Vec<_>>()
+    );
     let source_bytes = serde_json::to_vec(&bars).unwrap();
     let mut observed = Vec::new();
     for (period, expected) in [(2, 16.5), (3, 15.0), (6, 10.5)] {
