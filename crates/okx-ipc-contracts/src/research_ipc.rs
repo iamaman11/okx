@@ -435,7 +435,9 @@ mod reply_contract_tests {
         future.available_at_ms = 62_000;
         assert!(!future.valid_at(65_000));
         let mut stale = p.clone();
-        stale.last_closed_ms = 1;
+        // Two closed-bar intervals are allowed. With a 1s interval, this
+        // otherwise causal bar is already outside that window at 65s.
+        stale.timeframe_ms = 1_000;
         assert!(!stale.valid_at(65_000));
         let mut slow = p.clone();
         slow.expires_at_ms = 121_001;
