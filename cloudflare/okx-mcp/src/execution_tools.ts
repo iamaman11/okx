@@ -229,7 +229,11 @@ function validResearchStrategy(args:Record<string,unknown>):boolean {
 }
 export function validTool(name:string,args:unknown):boolean {if(name==='market'&&isObject(args)&&!validMarketOperatorRefs(args))return false;if(name==='research'&&isObject(args)&&!validResearchStrategy(args))return false;if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&!args.composition.steps.every(validCompositionStep))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
 export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&action!=='preview'&&action!=='status')||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','cancel','record_decision'].includes(String(action)));}
-export function executionProfilePermitsOperation(profile:unknown,_type:unknown):boolean{return profile==='engine';}
+export function executionProfilePermitsOperation(profile:unknown,type:unknown):boolean{
+  return profile==='engine'||(profile==='research'&&[
+    'market','market_capabilities','market_microstructure','research','find_instruments','market_overview','diagnostics'
+  ].includes(String(type)));
+}
 
 // Semantic DTO matches the Native TradeRequest::Execute wire representation,
 // not raw MCP field order. Dynamic policy/strategy revisions are NOT request

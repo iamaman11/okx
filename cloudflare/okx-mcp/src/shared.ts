@@ -30,6 +30,8 @@ export interface Env {
   RUNTIME: any;
   MCP_OWNER_SECRET: string;
   RUNTIME_TOKEN_SHA256: string;
+  /** Optional independent Research bearer fingerprint; never a finance credential. */
+  RESEARCH_RUNTIME_TOKEN_SHA256?: string;
   /** Immutable source tree of this exact Worker deployment, set only by deploy CI. */
   RELEASE_SOURCE_TREE?: string;
   OAUTH_PROVIDER: OAuthHelpers;
@@ -42,8 +44,10 @@ export function workerReleaseSourceTree(env: Env): string | null {
   return typeof tree === "string" && /^[0-9a-f]{40}$/.test(tree) ? tree : null;
 }
 
-export type RuntimeProfile = "engine";
-export function decodeRuntimeProfile(value:unknown):RuntimeProfile|null{return value==="engine"?"engine":null;}
+export type RuntimeProfile = "engine" | "research";
+export function decodeRuntimeProfile(value:unknown):RuntimeProfile|null{
+  return value==="engine"||value==="research"?value:null;
+}
 
 export interface SocketAttachment {
   runtimeId: string;
@@ -53,6 +57,8 @@ export interface SocketAttachment {
   hello: boolean;
   installationId?: string;
   sessionMode?: "finance" | "research_only";
+  /** Derived from the authenticated bearer, never accepted from a hello frame. */
+  credentialOwner?: "engine" | "research";
   /** Namespace asserted by the bearer-authenticated host, not key attestation. */
   hostScope?: string;
   agentPid?: number;

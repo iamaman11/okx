@@ -38,6 +38,7 @@ mod protection_resize;
 mod reconcile;
 mod recovery;
 mod strategies;
+pub mod strategy_signal;
 mod submission;
 mod terminal_release;
 mod terminal_release_trace;

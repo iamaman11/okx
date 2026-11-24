@@ -23,6 +23,7 @@ okx-strategy-core = { path = "../okx-strategy-core" }
 okx-ipc-contracts = { path = "../okx-ipc-contracts" }
 okx-research = { path = "../okx-research" }
 rusqlite = { version = "=0.43.0", features = ["bundled"] }
+reqwest = { version = "0.13", default-features = false, features = ["query", "rustls"] }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 # Source/immutable-artifact f64 values must survive JSON roundtrips bit-for-bit.
@@ -37,7 +38,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 [dev-dependencies]
 okx-api = { path = "../okx-api" }
 okx-market-runtime = { path = "../okx-market-runtime" }
-reqwest = { version = "0.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

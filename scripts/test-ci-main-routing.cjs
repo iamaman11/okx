@@ -79,6 +79,14 @@ function validate(yaml, fileNames) {
   assert.match(classify, /if \[\[ -n '\$\{\{ steps.cargo_closure.outputs.scope \}\}' \]\]; then/);
   assert.match(classify, /scope="\$\{\{ steps.proven_scope.outputs.scope \}\}"/);
   assert.match(classify, /steps.proven_scope.outputs.scope == 'research'/);
+  // A missing accepted binary base is a packaging failure, not permission to
+  // recompile trading/finance for a Research-only change. The scope decision
+  // must precede the attempt to resolve that base.
+  assert.match(classify, /"research_only=true" >> \$env:GITHUB_OUTPUT\s+try \{ & \.\/scripts\/prepare-research-release\.ps1 -VerifyOnly \}/);
+  assert.match(classify, /"base_verified=false" >> \$env:GITHUB_OUTPUT/);
+  assert.match(classify, /"base_verified=true" >> \$env:GITHUB_OUTPUT/);
+  assert.match(classify, /native_proof=RESEARCH_BASE_UNAVAILABLE/);
+  assert.doesNotMatch(classify, /Falling back to full Native CI/);
   assert.doesNotMatch(classify, /native_required=false[^\n]*CARGO/);
   assert.match(researchRelease, /git worktree add --detach \$baselineDir \$mergeSha/);
   assert.match(researchRelease, /cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc/);
@@ -103,6 +111,14 @@ function validate(yaml, fileNames) {
     assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'),
       `AMBIGUOUS_CI_JOB_NAME:${id}`);
   }
+  // Edge transport has one required owner. Running the same npm/Miniflare
+  // checks again inside portable Rust CI doubles setup without new evidence.
+  const linux = job('rust_tests_linux');
+  const edge = job('cloudflare_mcp_contracts');
+  assert.doesNotMatch(linux, /npm ci|npm run check|test-native-finance-retirement-do\.mjs|actions\/setup-node@/);
+  assert.match(edge, /npm ci --ignore-scripts --no-audit --no-fund/);
+  assert.match(edge, /npm run check/);
+  assert.match(edge, /node scripts\/test-native-finance-retirement-do\.mjs/);
   const engine = job('trading_engine_acceptance_windows');
   assert.match(engine, /\$collector = Join-Path \$targetDir 'debug\\examples\\native_finance_acceptance\.exe'/);
   assert.match(engine, /\$manifestJson = & \$collector --list/);
@@ -111,6 +127,7 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(engine, /cargo build --locked --release|name: okx-windows-bundle-/);
   // The real budgeted financial collector remains on the isolated runner.
   assert.match(engine, /Mandatory current Rust financial property acceptance/);
+  assert.match(engine, /node scripts\/ci-finance-witness-manifest\.cjs --verify-report/);
   assert.match(engine, /Isolated Native pending-fill crash recovery/);
   assert.match(engine, /MCP DO WSS Native finance under isolated Research load/);
   assert.doesNotMatch(engine, /K9 worker two-heavy cancellation latency evidence/);
@@ -121,6 +138,12 @@ function validate(yaml, fileNames) {
   assert.match(regression, /Clippy native Windows crates/);
   assert.match(regression, /Strategy Core and Research owner regressions on full Windows/);
   assert.match(regression, /Native trading, SQL, CONTROL and Launcher remaining regression/);
+  // The six 3s SQLite-writer/catalog fixtures are still mandatory, just not
+  // contending with the remaining 300 Engine libtests for the test-harness clock.
+  assert.match(regression, /\$testArgs \+= @\('--skip','accounts::native_connect_contracts::'\)/);
+  assert.match(regression, /name: Serial native account catalog and writer-termination regressions/);
+  assert.match(regression, /cargo test --locked -p okx-trading-engine --lib accounts::native_connect_contracts:: -- --test-threads 1/);
+  assert.match(regression, /NATIVE_ACCOUNT_CATALOG_ALL_SIX_TESTS_REQUIRED/);
   // Never make timed terminal-source frontiers vanish into --skip. Their
   // two original Engine tests are instead required to pass serially here.
   for (const witness of [
@@ -133,7 +156,9 @@ function validate(yaml, fileNames) {
   assert.match(regression, /cargo test --locked -p okx-trading-engine --lib trade_service::terminal_release::tests::stale_ -- --test-threads 1/);
   assert.match(regression, /2 passed; 0 failed;/);
   assert.match(regression, /BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED/);
-  assert.match(regression, /cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list/);
+  assert.match(regression, /\$manifestJson = & node scripts\/ci-finance-witness-manifest\.cjs/);
+  assert.doesNotMatch(regression, /cargo run[^\n]*native_finance_acceptance -- --list/);
+  assert.match(regression, /\$manifest\.repository_witnesses/);
   assert.match(regression, /K9 worker two-heavy cancellation latency evidence/);
   assert.doesNotMatch(regression, /Mandatory current Rust financial property acceptance|Isolated Native pending-fill crash recovery|name: okx-windows-bundle-/);
   const build = job('trading_engine_build_windows');
@@ -172,6 +197,7 @@ function validate(yaml, fileNames) {
   assert.match(b1, /CURRENT_NATIVE_B1_PUBLIC_WITNESSES_MISSING/);
   const windows = job('required_windows');
   assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
+  assert.match(windows, /test "\$\{\{ needs\.component_impact\.outputs\.native_proof \}\}" = "RESEARCH_ACCEPTED_BASE"/);
   assert.match(windows, /test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "success"/);
   assert.equal((windows.match(/test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "skipped"/g) || []).length, 4,
     'REGRESSION_JOB_MUST_BE_SKIPPED_ON_EVERY_NON_FINANCE_PATH');
@@ -214,9 +240,15 @@ assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.
 assert.throws(() => validate(source.replace('git fetch --no-tags --depth=1 origin "$BASE_SHA"',
   'git fetch --no-tags --depth=1 origin main'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
+assert.throws(() => validate(source.replace('      - name: Test portable crates',
+  '      - run: npm ci --ignore-scripts --no-audit --no-fund\n      - name: Test portable crates'), workflows));
 assert.throws(() => validate(source.replace('        default: true', '        default: false'), workflows));
 assert.throws(() => validate(source.replace('BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED',
   'WE_DID_NOT_VERIFY_THE_TWO_TESTS'), workflows));
+assert.throws(() => validate(source.replace('NATIVE_ACCOUNT_CATALOG_ALL_SIX_TESTS_REQUIRED',
+  'WE_DID_NOT_VERIFY_THE_SIX_TESTS'), workflows));
+assert.throws(() => validate(source.replace("$testArgs += @('--skip','accounts::native_connect_contracts::')",
+  "# no catalog exclusion"), workflows));
 assert.throws(() => validate(source.replace('stale_bill_coverage_blocks_settlement_after_inspect',
   'stale_bill_not_covered'), workflows));
 assert.throws(() => validate(source.replace(/(name: trading-safety-acceptance-windows[\s\S]*?shared-key: )trading-engine-tests-windows/,
@@ -228,6 +260,11 @@ assert.throws(() => validate(source.replace("github.event_name == 'workflow_disp
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_build_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"', 'true'), workflows));
+assert.throws(() => validate(source.replace('"research_only=true" >> $env:GITHUB_OUTPUT\n          try', 'try'), workflows));
+assert.throws(() => validate(source.replaceAll('native_proof=RESEARCH_BASE_UNAVAILABLE', 'native_proof=RESEARCH_ACCEPTED_BASE'), workflows));
+assert.throws(() => validate(source.replace('test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_ACCEPTED_BASE"', 'true'), workflows));
+assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-manifest.cjs --verify-report', 'echo skipped'), workflows));
+assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list'), workflows));
 assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
 assert.throws(() => validate(source.replace('"trading-engine-acceptance-windows","trading-engine-regressions-windows",', '"trading-engine-acceptance-windows",'), workflows));
 assert.throws(() => validate(source.replace('shared-key: trading-engine-release-windows', 'shared-key: trading-engine-tests-windows'), workflows));

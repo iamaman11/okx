@@ -276,8 +276,9 @@ struct WireTrade {
     side: TradeSide,
 }
 
-// Conformance tests use the same source adapter as the host. No network client
-// or credential capability is compiled into the worker's production graph.
+// Legacy host-source conformance tests share MarketBootstrapper's adapter.
+// Independent read-only public GETs are isolated in `independent_source`;
+// this Research process never receives the Engine's private venue keys.
 #[cfg(test)]
 impl From<okx_market_runtime::market_bootstrap::MarketBootstrapper> for PublicSourceClient {
     fn from(value: okx_market_runtime::market_bootstrap::MarketBootstrapper) -> Self {

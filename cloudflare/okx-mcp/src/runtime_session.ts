@@ -31,6 +31,24 @@ function researchOnlyPermits(request: any): boolean {
   return op.type === "diagnostics" && op.request?.view === "research" && op.request?.account == null;
 }
 
+type RuntimeOwner = "engine" | "research" | "legacy_research";
+
+function socketOwner(attachment: SocketAttachment | null): RuntimeOwner | null {
+  if (!attachment?.hello) return null;
+  if (attachment.sessionMode === "research_only") {
+    if (attachment.runtimeProfile === "research" && attachment.credentialOwner === "research")
+      return "research";
+    if (attachment.runtimeProfile === "engine" &&
+        (attachment.credentialOwner === "engine" || attachment.credentialOwner === undefined))
+      return "legacy_research";
+    return null;
+  }
+  if (attachment.runtimeProfile === "engine" &&
+      (attachment.credentialOwner === "engine" || attachment.credentialOwner === undefined))
+    return "engine";
+  return null;
+}
+
 export class RuntimeSession {
   private state: any;
   private env: Env;
@@ -101,7 +119,8 @@ export class RuntimeSession {
       return this.acceptRuntime(request);
     }
     if (url.pathname === "/status") {
-      const observed=await this.status(url.searchParams.get("probe") === "1");
+      const observed=await this.status(url.searchParams.get("probe") === "1",
+        url.searchParams.get("owner")==="research"?"research":"engine");
       return Response.json(observed);
     }
     if(url.pathname==="/account-governance/stop"&&request.method==="POST"){
@@ -175,19 +194,24 @@ export class RuntimeSession {
     if (!/^[0-9a-f]{64}$/.test(configuredHash)) {
       return new Response("runtime credential fingerprint invalid", { status: 503 });
     }
+    const researchHash = this.env.RESEARCH_RUNTIME_TOKEN_SHA256;
+    if (researchHash !== undefined && (!/^[0-9a-f]{64}$/.test(researchHash) ||
+        sameHex(researchHash, configuredHash))) {
+      return new Response("research credential fingerprint invalid", { status: 503 });
+    }
     const authorization = request.headers.get("authorization") ?? "";
     if (!authorization.startsWith("Bearer ")) {
       return new Response("unauthorized", { status: 401 });
     }
     const presentedHash = await sha256Hex(authorization.slice("Bearer ".length));
-    if (!sameHex(configuredHash, presentedHash)) {
+    const credentialOwner = sameHex(configuredHash, presentedHash) ? "engine" :
+      researchHash !== undefined && sameHex(researchHash, presentedHash) ? "research" : null;
+    if (!credentialOwner) {
       return new Response("unauthorized", { status: 401 });
     }
 
-    for (const existing of this.state.getWebSockets("runtime") as WebSocket[]) {
-      try { existing.close(1012, "new generation"); } catch {}
-    }
-
+    // An upgrade is not yet identified as Engine or Research. Do not evict
+    // either owner until a fully authenticated and validated hello succeeds.
     const generation = Number(await this.state.storage.get("generation") ?? 0) + 1;
     await this.state.storage.put("generation", generation);
     // A WSS generation is not a second owner of Windows installation proof.
@@ -200,6 +224,7 @@ export class RuntimeSession {
       sessionId: `session_${crypto.randomUUID()}`,
       generation,
       hello: false,
+      credentialOwner,
       connectedAtMs: Date.now(),
       lastPongAtMs: null,
     };
@@ -243,7 +268,7 @@ export class RuntimeSession {
       }
       if (frame.type === "hello_research") {
         const fields = ["agent_binary_sha256","agent_incarnation","agent_pid","connection_id","contract","host_scope","runtime_id","runtime_profile","schema","type"];
-        if (Object.keys(frame).sort().join(",") !== fields.sort().join(",") || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id) || typeof frame.host_scope !== "string" || !/^[0-9a-f]{64}$/.test(frame.host_scope) || frame.contract !== "okx.product/v1" || runtimeProfile !== "engine") {
+        if (Object.keys(frame).sort().join(",") !== fields.sort().join(",") || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id) || typeof frame.host_scope !== "string" || !/^[0-9a-f]{64}$/.test(frame.host_scope) || frame.contract !== "okx.product/v1" || !["engine","research"].includes(runtimeProfile) || (attachment.credentialOwner??"engine") !== runtimeProfile) {
           ws.close(1008, "invalid research hello"); return;
         }
         attachment.sessionMode = "research_only";
@@ -252,7 +277,7 @@ export class RuntimeSession {
       } else {
         if ("host_scope" in frame) { ws.close(1008, "mixed hello fields"); return; }
         const configuration=await this.state.storage.get(GOVERNANCE_STORAGE_KEY);
-        if(!validGovernance(configuration)||frame.installation_id!==configuration.installation_id||frame.contract!=="okx.product/v1"||runtimeProfile!=="engine"){
+        if(!validGovernance(configuration)||frame.installation_id!==configuration.installation_id||frame.contract!=="okx.product/v1"||runtimeProfile!=="engine"||(attachment.credentialOwner??"engine")!=="engine"){
           ws.close(1008,"installation or contract mismatch");return;
         }
         attachment.sessionMode = "finance";
@@ -264,6 +289,18 @@ export class RuntimeSession {
       attachment.agentBinarySha256 = frame.agent_binary_sha256;
       attachment.agentIncarnation = frame.agent_incarnation;
       attachment.hello = true;
+      const acceptedOwner = socketOwner(attachment);
+      if (!acceptedOwner) { ws.close(1008,"invalid owner credentials"); return; }
+      // Exactly one live generation per owner, never a global socket owner.
+      // Research reconnects must not interrupt financial protection, and
+      // Engine reconnects must not invalidate Research's independent lane.
+      // An Engine-credential legacy Research socket is never the new Research owner.
+      for (const existing of this.state.getWebSockets("runtime") as any[]) {
+        if (existing === ws) continue;
+        const prior = existing.deserializeAttachment() as SocketAttachment | null;
+        if (socketOwner(prior) !== acceptedOwner) continue;
+        try { existing.close(1012, "owner new generation"); } catch {}
+      }
       ws.serializeAttachment(attachment);
       ws.send(JSON.stringify({
         type: "hello_ack",
@@ -341,12 +378,12 @@ export class RuntimeSession {
     }
   }
 
-  private activeSocket(): { ws: any; attachment: SocketAttachment } | null {
+  private activeSocket(owner: RuntimeOwner = "engine"): { ws: any; attachment: SocketAttachment } | null {
     const sockets = this.state.getWebSockets("runtime") as any[];
     let selected: { ws: any; attachment: SocketAttachment } | null = null;
     for (const ws of sockets) {
       const attachment = ws.deserializeAttachment() as SocketAttachment;
-      if (!attachment?.hello) continue;
+      if (socketOwner(attachment) !== owner) continue;
       if (!selected || attachment.generation > selected.attachment.generation) {
         selected = { ws, attachment };
       }
@@ -410,8 +447,19 @@ export class RuntimeSession {
     if (!request || request.schema !== "okx.agent.request/v1" || typeof request.request_id !== "string") {
       return transportFailure("INVALID_REQUEST", false);
     }
-    const active = this.activeSocket();
-    if (!active) return transportFailure("RUNTIME_OFFLINE");
+    // Owner-scoped dispatch is opt-in until the independent native Research
+    // connection is installed. An explicit research request never falls back
+    // to Engine, even if the Engine is healthy. Unmarked legacy requests keep
+    // their current finance route during the safe migration.
+    const owner: RuntimeOwner = request.target_owner === "research" ? "research" :
+      request.target_owner === undefined && !this.activeSocket("engine") &&
+      researchOnlyPermits(request) && this.activeSocket("legacy_research") ? "legacy_research" : "engine";
+    if (request.target_owner !== undefined && request.target_owner !== "research" &&
+        request.target_owner !== "engine") return transportFailure("INVALID_OWNER", false);
+    if (owner !== "engine" && !researchOnlyPermits(request))
+      return transportFailure("RESEARCH_OPERATION_FORBIDDEN", false);
+    const active = this.activeSocket(owner);
+    if (!active) return transportFailure(owner === "research" ? "RESEARCH_RUNTIME_OFFLINE" : "RUNTIME_OFFLINE");
     // OAuth/profile only authorizes delivery of a narrowly typed action.
     // The native Engine alone evaluates current account admission and
     // owns the actual exchange POST admission under the same ledger.
@@ -452,7 +500,7 @@ export class RuntimeSession {
         this.normalInflight++;this.inflight++;admitted=true;
       }
       // A waiting reader must never cross a native session generation.
-      const current=this.activeSocket();
+      const current=this.activeSocket(owner);
       if(!current||current.attachment.generation!==active.attachment.generation||
          current.attachment.sessionId!==active.attachment.sessionId)
         return transportFailure("RUNTIME_OFFLINE");
@@ -532,13 +580,14 @@ export class RuntimeSession {
     }
   }
 
-  private async status(probe: boolean): Promise<Record<string,Json>> {
-    const active = this.activeSocket();
+  private async status(probe: boolean, owner: "engine" | "research" = "engine"): Promise<Record<string,Json>> {
+    const active = this.activeSocket(owner);
     if (!active) {
       return {
         schema: "okx.direct-transport.status/v1",
         status: "OFFLINE",
         runtime_id: RUNTIME_NAME,
+        owner,
         connected: false,
         session_fresh: false,
         inflight: this.inflight,
@@ -566,6 +615,7 @@ export class RuntimeSession {
       schema: "okx.direct-transport.status/v1",
       status: fresh ? "PASS" : "STALE",
       runtime_id: active.attachment.runtimeId,
+      owner,
       runtime_profile: active.attachment.runtimeProfile ?? "unverified",
       connected: true,
       session_fresh: fresh,

@@ -26,10 +26,28 @@ Worker has no production dependency on Agent, execution, API credentials, or
 financial storage. Its test-only HTTP fixtures do not authorize those edges.
 `scripts/check_architecture.py` checks both direct and transitive dependencies.
 
-Research requests receive public observations through the existing host source
-owner. They cannot issue arbitrary HTTP, access an account, reserve money, or
-place orders. Live strategies use their own live source and pure signal kernel;
-they do not invoke the research worker.
+Research requests currently receive public observations through the Engine's
+host source owner (`ResearchClient::installed` delegates to
+`MarketBootstrapper::research_source`). They cannot issue arbitrary HTTP,
+access an account, reserve money, or place orders. **This is an existing
+runtime dependency, not the desired independent Research boundary.**
+
+The current live strategy turn in
+`okx-trading-engine/src/trade_service/strategies.rs` loads closed prices from
+the Engine's live source and awaits `ResearchClient::evaluate_signal` before
+claiming a decision in financial SQLite. Thus the Engine does invoke Research
+for **new strategy decisions**. This must not be mistaken for an independent
+trading strategy runtime, even though Research is a separate executable and
+is not a production Cargo dependency of the Engine. The existing financial
+writer, RiskBook, reconciliation and protection remain Engine-owned.
+
+The target split is: Research owns public data, numerical strategy evaluation
+and a durable proposed-signal outbox; Engine owns the authenticated, versioned
+signal inbox, policy/admission, financial SQLite and every venue mutation.
+`EvaluateSignal` must leave the synchronous trading turn only after a tested
+replacement exists. A proposed signal never constitutes risk authorization or
+a one-time venue-send right. Research failure must block unjustified new
+strategy risk without blocking manual trade commands or ongoing protection.
 
 ## Identity and recovery
 
@@ -116,11 +134,13 @@ guarantee merely because the enclosing CI job succeeded.
 In the full CI, Linux runs the Worker library, real IPC children and doctests
 in the dedicated Research step; the portable workspace step excludes that
 package. Windows runs the Worker library once, except for the K9 workload which
-runs once in its dedicated evidence step. The Native regression excludes only
-exact property witnesses already verified by a FULL_PASS from this same clean
-SHA/tree and the current Rust manifest. Missing or mismatched proof blocks the
-exclusion. Without a property run, no property witnesses are excluded. Financial
-property acceptance and all remaining regressions are mandatory. Compare local
+runs once in its dedicated evidence step. The Native regression skips only
+exact property witnesses extracted from the current Rust source manifest.
+The parallel financial collector must execute FULL_PASS on the same clean
+SHA/tree and prove that its observed roster matches that manifest. Missing,
+failed or mismatched collector evidence makes the protected Windows gate RED;
+the source roster alone never grants financial acceptance. All remaining
+regressions are mandatory. Compare local
 and CI timings for the same command and include its build time; a financial
 execution time is not the duration of a complete Windows job.
 
@@ -129,9 +149,12 @@ To add an experiment with existing rules, submit another validated
 operator/replay registry and its direct tests, then connect it through the worker
 planner. Financial state and CONTROL do not belong to that calculation change.
 
-Research-only CI needs a previously successful, accepted and **merged** complete
-base, an unexpired exact GitHub bundle and its explicit
-`.github/research-release-base.json` selection. The first full-build PR has no
+Research-only Cargo tests run without rebuilding the financial Engine even if
+the accepted binary base is unavailable. Deployable **Research-only packaging**
+still needs a previously successful, accepted and **merged** complete base,
+an unexpired exact GitHub bundle and its explicit
+`.github/research-release-base.json` selection; otherwise Ready fails closed.
+The first full-build PR has no
 such prior merged base, so its skipped `research-service-tests-windows` step does not
 prove the next independent update. The separate Worker Cargo build, scope
 negative controls, real child handoff and CONTROL staging checks provide CODE
