@@ -1,0 +1,41 @@
+name: vNext Control
+
+on:
+  push:
+    branches: [vnext]
+    paths: [vnext/control/**, .github/workflows/vnext-control.yml]
+  pull_request:
+    branches: [vnext]
+    paths: [vnext/control/**, .github/workflows/vnext-control.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  launcher:
+    name: Control Launcher standalone
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Export only the Control workspace
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $archive = Join-Path $env:RUNNER_TEMP 'control.tar'
+          $control = Join-Path $env:RUNNER_TEMP 'control'
+          New-Item -ItemType Directory -Path $control | Out-Null
+          git archive --output=$archive HEAD:vnext/control
+          tar -xf $archive -C $control
+      - name: Check, test and build Launcher
+        working-directory: ${{ runner.temp }}/control
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup show active-toolchain
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+          cargo build --locked --release --bin okx-host-launcher
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: okx-host-launcher-windows
+          path: ${{ runner.temp }}/control/target/release/okx-host-launcher.exe
+          if-no-files-found: error
