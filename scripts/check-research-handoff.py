@@ -31,7 +31,7 @@ def observation(control, result):
     incarnation = details["agent_incarnation"]
     require(details["agent_owned_running"] is True and details["release_parity"]["state"] == "MATCHED"
             and installed["state"] == "VERIFIED" and sha256(engine_sha)
-            and isinstance(incarnation, str) and incarnation.startswith("ctl_")
+            and isinstance(incarnation, str) and re.fullmatch(r"ctl_[0-9a-f]{32}", incarnation)
             and type(engine_pid) is int and engine_pid > 0, "CONTROL does not verify the running Engine")
 
     # Accept the data field from the documented MCP diagnostic. A failed tool
@@ -66,7 +66,8 @@ def verify(before_control, before_research, change, after_control, after_researc
             "Engine continuity was not proven")
     require(receipt["provenance"]["worker_sha256"] == after_worker["active"]
             and before_worker["active"] != after_worker["active"]
-            and after_worker["handshake_verified_at_ms"] > before_worker["handshake_verified_at_ms"],
+            and after_worker["handshake_verified_at_ms"] > before_worker["handshake_verified_at_ms"]
+            and after_worker["handshake_verified_at_ms"] >= int(timeline[0].timestamp() * 1_000),
             "the selected Research image did not complete a new handshake")
     if kind == "rollback_research":
         require(receipt["rolled_back"] is True

@@ -4,9 +4,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 
 CHECK = Path(__file__).with_name("check-research-handoff.py")
+WINDOW_START_MS = int(datetime(2026, 11, 24, 10, tzinfo=timezone.utc).timestamp() * 1_000)
 
 
 def control(operation, second, details):
@@ -20,7 +22,7 @@ def control(operation, second, details):
     }
 
 
-def status(second, incarnation="ctl_original"):
+def status(second, incarnation="ctl_" + "1" * 32):
     return control({"type": "status"}, second, {
         "agent_pid": 42,
         "agent_owned_running": True,
@@ -36,7 +38,7 @@ def research(sha, pid, handshake):
         "engine_pid": 42,
         "read_only": True,
         "research": {"active": sha, "installed": sha, "active_pid": pid,
-                     "handshake_verified_at_ms": handshake, "draining": False,
+                     "handshake_verified_at_ms": WINDOW_START_MS + handshake, "draining": False,
                      "installed_check_error": None},
     }}
 
@@ -64,7 +66,7 @@ class ResearchHandoff(unittest.TestCase):
                             "expected_rollback_worker_sha256": old}, 4, {
             "rolled_back": True, "agent_lifecycle_changed": False,
             "provenance": {"worker_sha256": old}})
-        result = self.check(status(3), updated, rollback, status(5), research(old, 102, 3_000))
+        result = self.check(status(3), updated, rollback, status(5), research(old, 102, 4_000))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["research_after_sha256"], old)
 
@@ -77,10 +79,14 @@ class ResearchHandoff(unittest.TestCase):
         stale = self.check(status(1), first, deploy, status(3), first)
         self.assertNotEqual(stale.returncode, 0)
         self.assertIn("new handshake", stale.stderr)
-        restarted = self.check(status(1), first, deploy, status(3, "ctl_reused_pid"),
+        restarted = self.check(status(1), first, deploy, status(3, "ctl_" + "2" * 32),
                                research(new, 101, 2_000))
         self.assertNotEqual(restarted.returncode, 0)
         self.assertIn("Engine continuity", restarted.stderr)
+        older = self.check(status(1), research(old, 100, 100), deploy, status(3),
+                           research(new, 101, 200))
+        self.assertNotEqual(older.returncode, 0)
+        self.assertIn("new handshake", older.stderr)
 
 
 if __name__ == "__main__":
