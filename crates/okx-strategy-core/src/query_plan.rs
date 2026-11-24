@@ -3061,8 +3061,8 @@ mod tests {
         );
 
         let mut chained = parallel_steps(9);
-        for i in 1..9 {
-            chained.steps[i].input = format!("w{}", i - 1);
+        for (i, step) in chained.steps.iter_mut().enumerate().take(9).skip(1) {
+            step.input = format!("w{}", i - 1);
         }
         assert_eq!(
             CheckedComposition::compile(chained.clone(), 1).unwrap_err(),

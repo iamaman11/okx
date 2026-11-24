@@ -128,7 +128,7 @@ impl HttpTransport for ExecuteMarketBoundary {
                 });
             let skip = if actor_matches && request.url().path() == "/api/v5/account/trade-fee" {
                 self.planning_fee_skip
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
                     .is_ok()
             } else {
                 false

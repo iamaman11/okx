@@ -10,7 +10,7 @@ name = "okx-bridge-mcp"
 path = "src/main.rs"
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 getrandom = "0.3"
 http-body-util = "0.1"

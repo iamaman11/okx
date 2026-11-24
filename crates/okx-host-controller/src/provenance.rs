@@ -282,7 +282,7 @@ mod tests {
             84,
             "a".repeat(40),
             "b".repeat(40),
-            "rustc 1.95.0".to_owned(),
+            "rustc 1.100.0".to_owned(),
             hash,
         )
     }
