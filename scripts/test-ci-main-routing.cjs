@@ -10,6 +10,14 @@ const root = path.join(__dirname, '..', '.github', 'workflows');
 const workflows = fs.readdirSync(root).filter(x => /\.ya?ml$/.test(x));
 const source = fs.readFileSync(path.join(root, 'ci.yml'), 'utf8');
 const researchRelease = fs.readFileSync(path.join(root, '..', '..', 'scripts', 'prepare-research-release.ps1'), 'utf8');
+const mainCacheWriter = "${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}";
+const nativeCacheJobs = [
+  ['trading_engine_acceptance_windows', 'trading-engine-tests-windows', 'false'],
+  ['trading_engine_regressions_windows', 'trading-engine-tests-windows', 'false'],
+  ['trading_safety_acceptance_windows', 'trading-engine-tests-windows', 'false'],
+  ['trading_engine_build_windows', 'trading-engine-release-windows', mainCacheWriter],
+  ['trusted_main_test_cache_prime', 'trading-engine-tests-windows', mainCacheWriter],
+];
 
 function validate(yaml, fileNames) {
   assert.ok(!fileNames.includes('publish-native-base.yml'), 'SECOND_PUBLICATION_WORKFLOW');
@@ -42,6 +50,20 @@ function validate(yaml, fileNames) {
   function job(id) {
     assert.ok(map.has(id), `MISSING_JOB:${id}`);
     return map.get(id);
+  }
+  // One trusted-main workspace-cache generation, with test and release
+  // physically isolated. Every Ready consumer must use the same inputs as
+  // its main seed; the old dependency-only keys are immutable on GitHub.
+  for (const [id, shared, save] of nativeCacheJobs) {
+    const block = job(id);
+    const starts = [...block.matchAll(/^      - uses: Swatinem\/rust-cache@[0-9a-f]{40}(?: #[^\n]+)?$/gm)];
+    assert.equal(starts.length, 1, `EXACTLY_ONE_NATIVE_RUST_CACHE:${id}`);
+    const end = block.indexOf('\n      - ', starts[0].index + starts[0][0].length);
+    const step = block.slice(starts[0].index, end < 0 ? undefined : end);
+    assert.match(step, /^          prefix-key: v1-rust$/m, `NATIVE_CACHE_GENERATION:${id}`);
+    assert.match(step, /^          cache-workspace-crates: true$/m, `NATIVE_WORKSPACE_CACHE:${id}`);
+    assert.match(step, new RegExp(`^          shared-key: ${shared}$`, 'm'), `NATIVE_CACHE_PROFILE:${id}`);
+    assert.ok(step.split('\n').includes(`          save-if: ${save}`), `TRUSTED_MAIN_ONLY_CACHE_WRITER:${id}`);
   }
 
   // Keep the existing branch-protection display name without an alias runner.
@@ -212,4 +234,25 @@ assert.throws(() => validate(source.replace('shared-key: trading-engine-release-
 assert.throws(() => validate(source.replace('shared-key: trading-engine-tests-windows', 'shared-key: trading-engine-release-windows'), workflows));
 assert.throws(() => validate(source.replace('$manifestJson = & $collector --list',
   '$manifestJson = & cargo run --locked -p okx-trading-engine --example native_finance_acceptance -- --list'), workflows));
+// Scope mutations to named native jobs: unrelated future Rust caches must not
+// create false positives, and YAML input order is irrelevant.
+function changeJobInput(yaml, id, before, after) {
+  const entries = [...yaml.matchAll(/^  ([a-zA-Z0-9_-]+):[ \t]*$/gm)];
+  const index = entries.findIndex(entry => entry[1] === id);
+  assert.ok(index >= 0, `MISSING_CACHE_JOB:${id}`);
+  const start = entries[index].index;
+  const end = entries[index + 1]?.index ?? yaml.length;
+  const block = yaml.slice(start, end);
+  assert.ok(block.includes(before), `MISSING_CACHE_INPUT:${id}`);
+  return yaml.slice(0, start) + block.replace(before, after) + yaml.slice(end);
+}
+for (const [id, , save] of nativeCacheJobs) {
+  for (const [before, after] of [
+    ['prefix-key: v1-rust', 'prefix-key: v0-rust'],
+    ['cache-workspace-crates: true', 'cache-workspace-crates: false'],
+    [`save-if: ${save}`, 'save-if: true'],
+  ]) {
+    assert.throws(() => validate(changeJobInput(source, id, before, after), workflows));
+  }
+}
 console.log('CI_LEAN_MAIN_ROUTING_CONTROLS=PASS');

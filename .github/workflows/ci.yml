@@ -720,7 +720,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # New immutable generation: include the compiled workspace crates
+          # built by the trusted main test-cache seed.
+          prefix-key: v1-rust
           shared-key: trading-engine-tests-windows
+          cache-workspace-crates: true
+          save-if: false
 
       - name: Windows installation root migration contracts
         shell: pwsh
@@ -910,7 +915,10 @@ jobs:
           # Both runners restore the same trusted-main debug/test profile.
           # Their target directories are physically isolated by runner.
           cache-on-failure: true
+          prefix-key: v1-rust
           shared-key: trading-engine-tests-windows
+          cache-workspace-crates: true
+          save-if: false
 
       - name: Clippy native Windows crates
         shell: pwsh
@@ -1240,7 +1248,10 @@ jobs:
           cache-on-failure: true
           # Reuse the verified main TEST profile also used by finance/regressions.
           # Cargo still checks the current tree's own fingerprints before run.
+          prefix-key: v1-rust
           shared-key: trading-engine-tests-windows
+          cache-workspace-crates: true
+          save-if: false
       - name: Precompile current Rust property targets
         run: cargo test --locked -p okx-trading-engine -p okx-trade-execution -p okx-domain-core -p okx-ipc-contracts -p okx-market-runtime --lib --no-run
       - name: Public Native A/B cap, independent progress, replay and policy CAS
@@ -1327,7 +1338,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: release-cache
         with:
+          prefix-key: v1-rust
           shared-key: trading-engine-release-windows
+          cache-workspace-crates: true
+          save-if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
           cache-on-failure: false
       - name: Seed only missing Windows release outputs from trusted main
         if: github.event_name == 'workflow_dispatch' && steps.release-cache.outputs.cache-hit != 'true'
@@ -1464,7 +1478,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: test-cache
         with:
+          prefix-key: v1-rust
           shared-key: trading-engine-tests-windows
+          cache-workspace-crates: true
+          save-if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
           cache-on-failure: false
       - name: Seed only missing Windows debug/test outputs from trusted main
         if: steps.test-cache.outputs.cache-hit != 'true'
