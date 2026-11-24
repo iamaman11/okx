@@ -101,7 +101,10 @@ def classify(pages):
         categories.add(kind)
     if "research" in categories:
         if categories & {"host-controller", "host-launcher"}:
-            return "full"
+            if any(category(path) == "research" and not _research_source(path) for path in
+                   (entry["filename"] for entry in files)):
+                return "full"
+            return "research-host"
         return "research"
     if categories & {"host-controller", "host-launcher"}:
         # CONTROL consumes Launcher: either change needs both owner and
@@ -110,6 +113,10 @@ def classify(pages):
     if "cloudflare" in categories:
         return "cloudflare"
     return "docs"
+
+
+def _research_source(path):
+    return path.endswith(".rs") and any(path.startswith(root + "src/") for root in _RESEARCH_DIRS)
 
 
 def edge_changed(pages):
@@ -156,7 +163,7 @@ def _self_test() -> None:
     # The Actions shell guard must accept exactly the names produced by this
     # classifier. A stale host-control spelling once rejected host-controller
     # source changes before their dedicated short Windows job could start.
-    expected_scopes = {"docs", "cloudflare", "research", "host-controller", "host-launcher", "full"}
+    expected_scopes = {"docs", "cloudflare", "research", "research-host", "host-controller", "host-launcher", "full"}
     scope_guards = re.findall(r'case "\$scope" in ([a-z|-]+)\)', workflow)
     assert len(scope_guards) == 2, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
     for entry in scope_guards:  # raw file scope and final Cargo-proven scope
@@ -171,7 +178,7 @@ def _self_test() -> None:
     assert "needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows," in windows
     assert 'test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"' in windows
     assert 'test "${{ needs.trading_engine_regressions_windows.result }}" = "success"' in windows
-    assert windows.count('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"') == 4
+    assert windows.count('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"') == 5
     assert 'test "${{ needs.trading_engine_build_windows.result }}" = "success"' in windows
     host = workflow.split("\n  host_controller_launcher_checks:\n", 1)[1].split("\n  trading_engine_acceptance_windows:\n", 1)[0]
     assert "needs.component_impact.outputs.component_scope == 'host-controller'" in host
@@ -179,7 +186,7 @@ def _self_test() -> None:
     assert "cargo build --locked --release -p okx-host-launcher -p okx-host-controller" in host
     assert "cargo build --locked --release -p okx-trading-engine" not in host
     research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  required_windows:\n", 1)[0]
-    assert "if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'" in research
+    assert "if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
     # Reuse the same established Cargo cache action and one target directory.
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
@@ -194,6 +201,7 @@ def _self_test() -> None:
         "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/time_series.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md")],
         "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-protocol/src/lib.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md")],
         "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
+        "research-host": [files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs")],
     }
     for wanted, selections in cases.items():
         assert all(classify(pages) == wanted for pages in selections)
@@ -216,7 +224,6 @@ def _self_test() -> None:
         files("crates/okx-host-controller/src/migration.json"),
         files("crates/okx-host-launcher/src/main.rs", "crates/okx-trading-engine/src/main.rs"),
         files("crates/okx-host-controller/src/main.rs", "crates/okx-ipc-contracts/src/lib.rs"),
-        files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs"),
         files("Cargo.toml"), files("Cargo.lock"),
         files("crates/okx-research-service/Cargo.toml"),
         files("crates/okx-strategy-core/Cargo.toml"),

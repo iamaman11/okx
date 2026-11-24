@@ -121,8 +121,9 @@ RiskBook, финансовый SQLite/WAL, допуск и исполнение 
 | Только `crates/okx-strategy-core/src/time_series.rs`, возможно с документацией | `RESEARCH_OWNER_ONLY` → `research-service-tests-windows`. Engine/Execution отсутствуют в Cargo-запусках. `okx-agent.exe`, `okx-host-control.exe` и `okx-host-launcher.exe` берутся из принятой Windows-базы |
 | Только Rust-код `crates/okx-host-protocol/src/` или `crates/okx-host-controller/src/` | `HOST_WINDOWS_OWNER_AND_CONSUMER`, scope `host-controller` → `host-controller-launcher-checks`. Clippy и тесты охватывают новый протокол, Launcher, Controller и Rust Bridge; артефакт проверки содержит хэши двух host-бинарников |
 | Только Rust-код `crates/okx-host-launcher/src/` | Тот же Windows job и набор проверок, scope `host-launcher` |
+| Только Rust-код Research и Host в одном PR | `research-host`: обе проверки владельцев параллельно. Свежие бинарники Research и Host сохраняются с SHA и деревом исходников. Принятый Engine сверяется с опубликованной базой и Windows Cargo-графом, включая тесты |
 | Только документация или только Cloudflare MCP | Существующий маршрут соответствующего компонента, без запуска Windows-сборки |
-| Общий IPC, Domain Core, Engine/Execution, корневой Cargo, манифест нового Host-протокола, CI, смешанный Research + Host или неполный diff | Полный маршрут с финансовыми проверками. Для разрешённых манифестов Research или Host Controller/Launcher есть отдельный допуск по совпадению Windows Cargo closures |
+| Общий IPC, Domain Core, Engine/Execution, корневой Cargo, манифест нового Host-протокола, CI или неполный diff | Полный маршрут с финансовыми проверками. Для разрешённых манифестов Research или Host Controller/Launcher есть отдельный допуск по совпадению Windows Cargo closures |
 
 Единый [workflow](../.github/workflows/ci.yml) сохраняет обязательные
 `classify`, `linux-core` и `windows-native`. Узкие Rust-маршруты задают
@@ -141,9 +142,9 @@ RiskBook, финансовый SQLite/WAL, допуск и исполнение 
 Если код или зависимости Host поменялись после принятой базы, исследовательская
 сборка сама по себе не даёт зелёный Ready. Host-only job подтверждает
 сборку Host. Для публикации нового Native base нужен полный маршрут.
-Снятие этой зависимости для смешанных PR требует привести релизные
-проверки к раздельному подтверждению происхождения и совместимости
-Host- и Engine-бинарников.
+Смешанный маршрут подтверждает происхождение Engine и свежих бинарников
+компонентов отдельными свидетельствами. Установочные операции с пакетом
+по-прежнему используют собственную полную проверку совместимости релиза.
 
 ## 5. Как закрыть приёмку
 

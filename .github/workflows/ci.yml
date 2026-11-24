@@ -204,7 +204,7 @@ jobs:
               candidate="$(python3 -B scripts/check_ci_native_scope.py --dependency-candidate < "$RUNNER_TEMP/ci-files.json")"
             fi
           fi
-          case "$scope" in docs|cloudflare|research|host-controller|host-launcher|full) ;; *) exit 1;; esac
+          case "$scope" in docs|cloudflare|research|research-host|host-controller|host-launcher|full) ;; *) exit 1;; esac
           case "$candidate" in none|research|host-controller|host-launcher) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "manifest_candidate=$candidate" >> "$GITHUB_OUTPUT"
@@ -274,7 +274,7 @@ jobs:
             test "$scope" = full
             scope='${{ steps.cargo_closure.outputs.scope }}'
           fi
-          case "$scope" in docs|cloudflare|research|host-controller|host-launcher|full) ;; *) exit 1;; esac
+          case "$scope" in docs|cloudflare|research|research-host|host-controller|host-launcher|full) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "COMPONENT_SCOPE=$scope"
       - name: Decide whether compilation is required
@@ -297,7 +297,7 @@ jobs:
           scope="${{ steps.proven_scope.outputs.scope }}"
           case "$scope" in
             docs) edge_required=false ;;
-            host-controller|host-launcher) edge_required="${{ steps.file_scope.outputs.edge_changed }}" ;;
+            research-host|host-controller|host-launcher) edge_required="${{ steps.file_scope.outputs.edge_changed }}" ;;
             *) edge_required=true ;;
           esac
           echo "edge_required=$edge_required" >> "$GITHUB_OUTPUT"
@@ -354,6 +354,11 @@ jobs:
               echo "native_required=false" >> "$GITHUB_OUTPUT"
               echo "native_proof=RESEARCH_OWNER_ONLY" >> "$GITHUB_OUTPUT"
               echo "reason=Research owner; release job must verify the accepted Native base" >> "$GITHUB_OUTPUT"
+              ;;
+            research-host)
+              echo "native_required=false" >> "$GITHUB_OUTPUT"
+              echo "native_proof=RESEARCH_HOST_OWNER_CHECKS" >> "$GITHUB_OUTPUT"
+              echo "reason=Research and Host sources; release job must prove unchanged Engine inputs" >> "$GITHUB_OUTPUT"
               ;;
             host-controller|host-launcher)
               echo "native_required=false" >> "$GITHUB_OUTPUT"
@@ -596,7 +601,7 @@ jobs:
             docs|cloudflare) test "${{ needs.architecture_contracts.result }}" = "skipped" ;;
             *) test "${{ needs.architecture_contracts.result }}" = "success" ;;
           esac
-          if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
+          if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" || "${{ needs.component_impact.outputs.component_scope }}" == "research-host" ]]; then
             test "${{ needs.rust_tests_linux.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "success"
             echo "LINUX_FINANCE_REUSED_BASE=${{ needs.research_service_tests_windows.outputs.base_head }}"
@@ -626,7 +631,7 @@ jobs:
     # four-EXE release; publishing a new Native base still requires full CI.
     name: host-controller-launcher-checks
     needs: component_impact
-    if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.component_scope == 'host-controller' || needs.component_impact.outputs.component_scope == 'host-launcher')
+    if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.component_scope == 'host-controller' || needs.component_impact.outputs.component_scope == 'host-launcher' || needs.component_impact.outputs.component_scope == 'research-host')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -676,6 +681,19 @@ jobs:
           name: host-component-proof-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/host-component-proof.txt
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Retain fresh Host binaries for mixed owner evidence
+        if: needs.component_impact.outputs.component_scope == 'research-host'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mixed-host-windows-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            target/release/okx-host-control.exe
+            target/release/okx-host-launcher.exe
+            ${{ runner.temp }}/host-component-proof.txt
+          if-no-files-found: error
+          compression-level: 1
           retention-days: 14
 
   trading_engine_acceptance_windows:
@@ -1004,10 +1022,11 @@ jobs:
     name: research-service-tests-windows
     needs: component_impact
     # A successful, identical PR tree is already accepted; main must reuse it.
-    if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'
+    if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')
     runs-on: windows-latest
     outputs:
       base_head: ${{ steps.package.outputs.base_head }}
+      mixed_base_head: ${{ steps.mixed_evidence.outputs.base_head }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1036,6 +1055,7 @@ jobs:
 
       - name: Build deployable Windows binaries
         id: package
+        if: needs.component_impact.outputs.research_only == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1089,7 +1109,7 @@ jobs:
             Set-Content -LiteralPath (Join-Path $dist 'manifest.json') -Encoding utf8NoBOM
 
       - name: Upload isolated Research release evidence
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.research_only == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: research-only-release-evidence-${{ github.event.pull_request.head.sha }}
@@ -1100,11 +1120,53 @@ jobs:
           retention-days: 14
 
       - name: Upload deployable Windows bundle
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.research_only == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}\okx-windows-bundle
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
+
+      - name: Verify accepted Engine and build fresh Research for mixed owner evidence
+        id: mixed_evidence
+        if: needs.component_impact.outputs.component_scope == 'research-host'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse 'HEAD^{tree}').Trim()
+          $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
+          & ./scripts/prepare-research-release.ps1 -VerifyOnly -MixedHost
+          $proof = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
+          if ($proof.current_head_sha -cne $env:OKX_BUILD_SOURCE_HEAD -or
+              $proof.scope.scope -cne 'research-host' -or
+              $proof.scope.engine_windows_cargo_closure_identical -ne $true -or
+              $proof.base_head_sha -cnotmatch '^[0-9a-f]{40}$') { throw 'MIXED_ENGINE_PROOF_REQUIRED' }
+          cargo build --locked --release -p okx-research-service --bin okx-research-service
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = 'target/release/okx-research-service.exe'
+          [ordered]@{
+            fresh_component = 'okx-research-service.exe'
+            source_head_sha = $env:OKX_BUILD_SOURCE_HEAD
+            source_tree = $env:OKX_BUILD_SOURCE_TREE
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
+            reused_engine = $proof.components.'okx-agent.exe'
+            release_is_complete = $false
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'mixed-research-proof.json') -Encoding utf8NoBOM
+          "base_head=$($proof.base_head_sha)" >> $env:GITHUB_OUTPUT
+
+      - name: Retain fresh Research binary and verified Engine origin
+        if: needs.component_impact.outputs.component_scope == 'research-host'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mixed-research-windows-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            target/release/okx-research-service.exe
+            ${{ runner.temp }}/mixed-research-proof.json
+            ${{ runner.temp }}/research-release-proof.json
           if-no-files-found: error
           compression-level: 1
           retention-days: 14
@@ -1150,6 +1212,16 @@ jobs:
             test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.research_service_tests_windows.outputs.base_head }}"
+            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
+          elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "research-host" ]]; then
+            test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_HOST_OWNER_CHECKS"
+            [[ "${{ needs.research_service_tests_windows.outputs.mixed_base_head }}" =~ ^[0-9a-f]{40}$ ]]
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
+            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
+            test "${{ needs.host_controller_launcher_checks.result }}" = "success"
+            test "${{ needs.research_service_tests_windows.result }}" = "success"
+            echo "WINDOWS_NATIVE_PROOF=MIXED_OWNER_CHECKS_WITH_VERIFIED_ENGINE"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"

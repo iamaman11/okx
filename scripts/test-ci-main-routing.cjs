@@ -196,8 +196,16 @@ function validate(yaml, fileNames) {
   assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
   assert.match(windows, /test "\$\{\{ needs\.component_impact\.outputs\.native_proof \}\}" = "RESEARCH_OWNER_ONLY"/);
   assert.match(windows, /test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "success"/);
-  assert.equal((windows.match(/test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "skipped"/g) || []).length, 4,
+  assert.equal((windows.match(/test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "skipped"/g) || []).length, 5,
     'REGRESSION_JOB_MUST_BE_SKIPPED_ON_EVERY_NON_FINANCE_PATH');
+  const mixed = windows.slice(windows.indexOf('= "RESEARCH_HOST_OWNER_CHECKS"'),
+    windows.indexOf('WINDOWS_NATIVE_PROOF=MIXED_OWNER_CHECKS_WITH_VERIFIED_ENGINE'));
+  assert.ok(mixed.length > 0);
+  assert.match(mixed, /mixed_base_head.*\^\[0-9a-f\]\{40\}\$/);
+  for (const job of ['acceptance', 'regressions', 'build'])
+    assert.ok(mixed.includes('needs.trading_engine_' + job + '_windows.result }}" = "skipped"'));
+  for (const job of ['host_controller_launcher_checks', 'research_service_tests_windows'])
+    assert.ok(mixed.includes('needs.' + job + '.result }}" = "success"'));
   assert.match(windows, /test "\$\{\{ needs.trading_engine_build_windows.result \}\}" = "success"/);
   const publish = job('publish_accepted_windows_release');
   assert.match(publish, /^    name: publish-accepted-windows-release$/m);

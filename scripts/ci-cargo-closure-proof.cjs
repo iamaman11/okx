@@ -140,17 +140,8 @@ function normalizedCargo(metadata) {
 
 function verify(baseMetadata, headMetadata, changed, scope) {
   const files = candidateFiles(changed, scope);
-  const before = normalizedCargo(baseMetadata), after = normalizedCargo(headMetadata);
-  const protectedPaths = new Set();
-  for (const name of PROTECTED[scope]) {
-    const left = before.closure(name), right = after.closure(name);
-    for (const key of [...left.keys(), ...right.keys()]) {
-      if (key.startsWith('workspace:')) protectedPaths.add(key.split(':')[1]);
-      if (!left.has(key) || !right.has(key) || left.get(key) !== right.get(key))
-        throw Error(`PROTECTED_WINDOWS_CARGO_CLOSURE_CHANGED:${name}:${key}`);
-    }
-  }
-  if (files.some(file => protectedPaths.has(file)))
+  const protectedPaths = compareProtected(baseMetadata, headMetadata, PROTECTED[scope]);
+  if (files.some(file => protectedPaths.some(dir => file === dir + 'Cargo.toml')))
     throw Error('EDITED_MANIFEST_IN_PROTECTED_CARGO_CLOSURE');
   return {
     schema: 'okx.560.windows-cargo-closure-proof/v1',
@@ -159,6 +150,27 @@ function verify(baseMetadata, headMetadata, changed, scope) {
     protected_closures_identical: true,
     executed_financial_tests: false,
   };
+}
+
+function compareProtected(baseMetadata, headMetadata, roots) {
+  const before = normalizedCargo(baseMetadata), after = normalizedCargo(headMetadata);
+  const protectedPaths = new Set();
+  for (const name of roots) {
+    const left = before.closure(name), right = after.closure(name);
+    for (const key of [...left.keys(), ...right.keys()]) {
+      if (key.startsWith('workspace:')) protectedPaths.add(path.posix.dirname(key.split(':')[1]) + '/');
+      if (!left.has(key) || !right.has(key) || left.get(key) !== right.get(key))
+        throw Error(`PROTECTED_WINDOWS_CARGO_CLOSURE_CHANGED:${name}:${key}`);
+    }
+  }
+  return [...protectedPaths].sort();
+}
+
+function verifyEngineInputs(baseMetadata, headMetadata, files) {
+  const protectedPaths = compareProtected(baseMetadata, headMetadata, ['okx-trading-engine']);
+  if (files.some(file => protectedPaths.some(dir => file.startsWith(dir))))
+    throw Error('EDITED_SOURCE_IN_ENGINE_WINDOWS_CARGO_CLOSURE');
+  return protectedPaths;
 }
 
 if (require.main === module) {
@@ -172,4 +184,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = {verify, candidateFiles, normalizedCargo};
+module.exports = {verify, candidateFiles, normalizedCargo, verifyEngineInputs};
