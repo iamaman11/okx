@@ -32,6 +32,15 @@ host source owner (`ResearchClient::installed` delegates to
 access an account, reserve money, or place orders. **This is an existing
 runtime dependency, not the desired independent Research boundary.**
 
+The Research executable can also serve the existing framed commands with
+`--independent-source --root <research-dir> --scope <scope>`. Its local
+provider reads public OKX candle history. It rejects parent source replies
+in that mode. Use `--market-request --root <research-dir> --scope <scope>`
+to read one JSON `MarketRequest` from stdin and print the result. Explicit
+instruments are required. Candle-backed requests use the same analytics,
+coverage and artifact code as hosted requests. Universe, ticker, funding
+and open-interest requests require providers that implement those sources.
+
 The current live strategy turn in
 `okx-trading-engine/src/trade_service/strategies.rs` loads closed prices from
 the Engine's live source and awaits `ResearchClient::evaluate_signal` before

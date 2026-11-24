@@ -257,6 +257,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn market_request_replays_recorded_public_candles_without_engine() {
+        use crate::analytics::AnalyticsService;
+        use serde_json::json;
+
+        let transport = Arc::new(RecordedGet {
+            raw: RECORDED
+                .replace("1700000000000", "1699999980000")
+                .replace("1700000060000", "1700000040000")
+                .into_bytes(),
+            routes: Mutex::new(Vec::new()),
+        });
+        let root = std::env::temp_dir().join(format!(
+            "okx-independent-market-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = PublicSourceClient::new(Arc::new(IndependentOkxPublicSource::with_get(
+            transport.clone(),
+        )));
+        let service = AnalyticsService::new(root.clone(), source).unwrap();
+        let request = serde_json::from_value(json!({
+            "action": "screen",
+            "instruments": ["BTC-USDT-SWAP"],
+            "fields": ["returns"],
+            "timeframe_ms": 60000,
+            "start_ms": 1699999980000u64,
+            "end_ms": 1700000100000u64
+        }))
+        .unwrap();
+        let first = service.market(request, None, None).await.unwrap();
+        let metric = first["rows"][0]["metrics"]["returns"].as_f64().unwrap();
+        assert!((metric - (110.0 / 105.0 - 1.0)).abs() < 1e-9);
+        assert_eq!(transport.routes.lock().unwrap().len(), 1);
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn public_source_rejects_untrusted_requests_without_network() {
         let transport = Arc::new(RecordedGet {
             raw: RECORDED.as_bytes().to_vec(),

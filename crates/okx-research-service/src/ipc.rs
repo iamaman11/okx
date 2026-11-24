@@ -123,6 +123,36 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    serve_with_source(input, output, root, expected_scope, None).await
+}
+
+/// Serve the same typed Research commands using the public-only local source.
+pub async fn serve_independent<R, W>(
+    input: R,
+    output: W,
+    root: PathBuf,
+    expected_scope: ResearchScope,
+) -> Result<(), String>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let provider = crate::independent_source::IndependentOkxPublicSource::new()?;
+    let source = PublicSourceClient::new(Arc::new(provider));
+    serve_with_source(input, output, root, expected_scope, Some(source)).await
+}
+
+async fn serve_with_source<R, W>(
+    input: R,
+    output: W,
+    root: PathBuf,
+    expected_scope: ResearchScope,
+    source: Option<PublicSourceClient>,
+) -> Result<(), String>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let mut reader = FramedRead::new(input, codec());
     let mut writer = FramedWrite::new(output, codec());
     let bytes = tokio::time::timeout(Duration::from_millis(REQUEST_TIMEOUT_MS), reader.next())
@@ -143,20 +173,23 @@ where
     let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
     let pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let next_source = Arc::new(AtomicU64::new(1));
-    let provider = Arc::new(RemoteSource {
-        tx: tx.clone(),
-        order: Mutex::new(()),
-        session: session.clone(),
-        next: next_source.clone(),
-        pending: pending.clone(),
-        permits: Semaphore::new(MAX_IN_FLIGHT),
+    let remote_source = source.is_none();
+    let source = source.unwrap_or_else(|| {
+        PublicSourceClient::new(Arc::new(RemoteSource {
+            tx: tx.clone(),
+            order: Mutex::new(()),
+            session: session.clone(),
+            next: next_source.clone(),
+            pending: pending.clone(),
+            permits: Semaphore::new(MAX_IN_FLIGHT),
+        }))
     });
     let producer = tokio::task::spawn_blocking(crate::producer::Producer::current)
         .await
         .map_err(|_| "WORKER_PRODUCER_UNAVAILABLE")??;
     let service = AnalyticsService::new_scoped_with_producer(
         root,
-        PublicSourceClient::new(provider),
+        source,
         &expected_scope,
         producer.clone(),
     )?;
@@ -208,7 +241,7 @@ where
                 None => break,
                 Some(Err(e)) => return Err(e.to_string()),
                 Some(Ok(bytes)) => match serde_json::from_slice::<HostFrame>(&bytes).map_err(|e| e.to_string())? {
-                    HostFrame::SourceReply { id, session: s, result } if s == session => {
+                    HostFrame::SourceReply { id, session: s, result } if remote_source && s == session => {
                         accept_source_reply(&pending, next_source.load(Ordering::Acquire), &id, result)?;
                     },
                     HostFrame::Request { id, session: s, invocation, command } if s == session => {

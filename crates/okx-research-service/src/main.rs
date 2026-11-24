@@ -1,5 +1,9 @@
-use okx_ipc_contracts::research_ipc::ResearchScope;
+use okx_ipc_contracts::{
+    analytics::MarketRequest,
+    research_ipc::{MAX_FRAME_BYTES, ResearchScope},
+};
 use std::path::PathBuf;
+use tokio::io::AsyncReadExt;
 #[tokio::main]
 async fn main() {
     if tracing_subscriber::fmt()
@@ -31,6 +35,8 @@ async fn run() -> Result<(), String> {
     let mut args = all_args.into_iter();
     let mut root = None;
     let mut scope = None;
+    let mut independent_source = false;
+    let mut market_request = false;
     while let Some(arg) = args.next() {
         if arg == "--root" && root.is_none() {
             root = Some(PathBuf::from(args.next().ok_or("MISSING_ROOT")?));
@@ -44,6 +50,10 @@ async fn run() -> Result<(), String> {
                 )
                 .map_err(str::to_owned)?,
             );
+        } else if arg == "--independent-source" && !independent_source {
+            independent_source = true;
+        } else if arg == "--market-request" && !market_request {
+            market_request = true;
         } else {
             return Err("INVALID_ARGUMENT".into());
         }
@@ -57,13 +67,50 @@ async fn run() -> Result<(), String> {
         isolation = "nested_windows_job_object",
         "research worker OS commit fence verified"
     );
-    okx_research_service::ipc::serve(
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-        root.ok_or("MISSING_ROOT")?,
-        scope.ok_or("MISSING_SCOPE")?,
-    )
-    .await
+    let root = root.ok_or("MISSING_ROOT")?;
+    let scope = scope.ok_or("MISSING_SCOPE")?;
+    if market_request {
+        if independent_source {
+            return Err("INVALID_ARGUMENT".into());
+        }
+        return run_market_request(root, scope).await;
+    }
+    let input = tokio::io::stdin();
+    let output = tokio::io::stdout();
+    if independent_source {
+        okx_research_service::ipc::serve_independent(input, output, root, scope).await
+    } else {
+        okx_research_service::ipc::serve(input, output, root, scope).await
+    }
+}
+
+/// Read one MarketRequest as JSON from stdin and write the Research result.
+async fn run_market_request(root: PathBuf, scope: ResearchScope) -> Result<(), String> {
+    let mut bytes = Vec::new();
+    tokio::io::stdin()
+        .take(MAX_FRAME_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| "MARKET_REQUEST_READ_FAILED")?;
+    if bytes.len() > MAX_FRAME_BYTES {
+        return Err("MARKET_REQUEST_TOO_LARGE".into());
+    }
+    let request: MarketRequest =
+        serde_json::from_slice(&bytes).map_err(|_| "INVALID_MARKET_REQUEST")?;
+    if !request.valid() || request.universe.is_some() {
+        return Err("MARKET_REQUEST_REQUIRES_EXPLICIT_INSTRUMENTS".into());
+    }
+    std::fs::create_dir_all(&root).map_err(|_| "RESEARCH_ROOT_CREATE_FAILED")?;
+    let source = okx_research_service::source_api::PublicSourceClient::new(std::sync::Arc::new(
+        okx_research_service::independent_source::IndependentOkxPublicSource::new()?,
+    ));
+    let producer = okx_research_service::producer::Producer::current()?;
+    let service = okx_research_service::analytics::AnalyticsService::new_scoped_with_producer(
+        root, source, &scope, producer,
+    )?;
+    let result = service.market(request, None, None).await?;
+    println!("{result}");
+    Ok(())
 }
 
 /// A bounded standalone public-data proof path. The Research EXE can fetch
