@@ -459,10 +459,10 @@ crates/okx-trading-engine/src/finance_trace.rs	engine	move	vnext/engine/crates/o
 crates/okx-trading-engine/src/finance_window.rs	engine	move	vnext/engine/crates/okx-trading-engine/src/finance_window.rs
 crates/okx-trading-engine/src/github_auth.rs	edge	retire	-
 crates/okx-trading-engine/src/github_mailbox.rs	edge	retire	-
-crates/okx-trading-engine/src/identity.rs	engine	move	vnext/engine/crates/okx-trading-engine/src/identity.rs
+crates/okx-trading-engine/src/identity.rs	edge	retire	-
 crates/okx-trading-engine/src/lib.rs	engine	split	vnext/engine/crates/okx-trading-engine/src;vnext/edge/src;vnext/control/crates/okx-host-controller/src
 crates/okx-trading-engine/src/main.rs	engine	split	vnext/engine/crates/okx-trading-engine/src;vnext/edge/src;vnext/control/crates/okx-host-controller/src
-crates/okx-trading-engine/src/market_bootstrap.rs	engine	split	vnext/engine/crates/okx-trading-engine/src/adapters/okx/reference;vnext/research/crates/okx-research-service/src/adapters/okx
+crates/okx-trading-engine/src/market_bootstrap.rs	engine	retire	-
 crates/okx-trading-engine/src/native_acceptance_coverage_tests.rs	integration	oracle	vnext/integration/tests/crates/okx-trading-engine/src/native_acceptance_coverage_tests.rs
 crates/okx-trading-engine/src/native_account_connection.rs	engine	move	vnext/engine/crates/okx-trading-engine/src/native_account_connection.rs
 crates/okx-trading-engine/src/native_finance_admission.rs	engine	move	vnext/engine/crates/okx-trading-engine/src/native_finance_admission.rs
@@ -517,7 +517,7 @@ crates/okx-trading-engine/src/trade_service/terminal_release/tests.rs	engine	mov
 crates/okx-trading-engine/src/trade_service/terminal_release_trace.rs	engine	move	vnext/engine/crates/okx-trading-engine/src/trade_service/terminal_release_trace.rs
 crates/okx-trading-engine/src/trade_service/unsent_release.rs	engine	move	vnext/engine/crates/okx-trading-engine/src/trade_service/unsent_release.rs
 crates/okx-trading-engine/src/trade_service/unsent_release_tests.rs	engine	move	vnext/engine/crates/okx-trading-engine/src/trade_service/unsent_release_tests.rs
-crates/okx-trading-engine/src/windows_credentials.rs	engine	move	vnext/engine/crates/okx-trading-engine/src/windows_credentials.rs
+crates/okx-trading-engine/src/windows_credentials.rs	engine	split	vnext/engine/crates/okx-trading-engine/src/adapters/credentials;vnext/edge/compat/credentials
 crates/okx-trading-engine/tests/support/process_tree.rs	integration	oracle	vnext/integration/tests/crates/okx-trading-engine/tests/support/process_tree.rs
 crates/okx-ws/Cargo.toml	engine	archive	-
 crates/okx-ws/src/lib.rs	engine	split	vnext/engine/crates/okx-trading-engine/src/adapters/okx/ws;vnext/research/crates/okx-research-service/src/adapters/okx/ws
