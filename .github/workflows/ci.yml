@@ -773,7 +773,6 @@ jobs:
 
       - name: Mandatory current Rust financial property acceptance
         id: native-properties
-        if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
           # The old Native/Worker finance driver is retired. Its properties
@@ -781,53 +780,20 @@ jobs:
           # this full gate rather than falling back to historical26 results.
           cargo run --locked -p okx-trading-engine --example native_finance_acceptance > "$env:RUNNER_TEMP\native-finance-full.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $report = Get-Content -Raw "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
-          if ($report.overall -ne 'FULL_PASS') { throw 'FULL_NATIVE_PROPERTIES_NOT_PROVEN' }
-          # Regression's fast source-only skip set must be EXACTLY the roster
-          # executed by this independent, current-tree financial collector.
-          # The no-Cargo extraction never substitutes for FULL_PASS.
-          node scripts/ci-finance-witness-manifest.cjs --verify-report "$env:RUNNER_TEMP\native-finance-full.json"
+          # Exactly the roster excluded by the parallel regression step.
+          $head = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          node scripts/ci-finance-witness-manifest.cjs --verify-report "$env:RUNNER_TEMP\native-finance-full.json" $head $tree
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload current Rust property evidence even on failure
-        if: always() && github.event_name == 'pull_request' && steps.native-properties.outcome != 'skipped'
+        if: always() && steps.native-properties.outcome != 'skipped'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: native-finance-full-${{ github.event.pull_request.head.sha }}
+          name: native-finance-full-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}\native-finance-full.json
           if-no-files-found: error
           retention-days: 14
-
-      # This job remains the sole owner of the uninterrupted, budgeted finance
-      # report and the clock-sensitive OS/SQL/process witnesses. All other
-      # Windows regressions run on a DIFFERENT runner in parallel, but the
-      # protected windows-native check requires both jobs to succeed.
-      - name: Verify complete financial witness manifest on exact PR tree
-        shell: pwsh
-        run: |
-          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
-            $proof = Get-Content -Raw "$env:RUNNER_TEMP\native-finance-full.json" | ConvertFrom-Json
-            $head = (git rev-parse HEAD).Trim()
-            $tree = (git rev-parse 'HEAD^{tree}').Trim()
-            if ($proof.overall -cne 'FULL_PASS' -or $proof.git_clean -ne $true -or $proof.head -cne $head -or $proof.tree -cne $tree) { throw 'CURRENT_FINANCIAL_PROOF_REQUIRED' }
-            # The financial acceptance step above already built and executed
-            # this exact example. Listing its contracts must not re-enter Cargo
-            # and spend another dependency/fingerprint evaluation cycle.
-            $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path (Get-Location) 'target' }
-            $collector = Join-Path $targetDir 'debug\examples\native_finance_acceptance.exe'
-            if (-not (Test-Path -LiteralPath $collector -PathType Leaf)) { throw 'MISSING_VERIFIED_FINANCIAL_COLLECTOR_BINARY' }
-            $manifestJson = & $collector --list
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $manifest = $manifestJson | ConvertFrom-Json
-            if (@($proof.contracts).Count -ne @($manifest.contracts).Count -or @($proof.contracts | Where-Object status -ne 'PASS').Count -ne 0) { throw 'COMPLETE_FINANCIAL_CONTRACTS_REQUIRED' }
-            $expected = @($manifest.contracts.witnesses | Where-Object package -ne 'repository' | ForEach-Object { "$($_.package)`t$($_.test)" } | Sort-Object -Unique)
-            $covered = @($proof.observed_witnesses | Where-Object package -ne 'repository')
-            $actual = @($covered | ForEach-Object {
-              if ($_.status -cne 'ok') { throw 'UNVERIFIED_FINANCIAL_WITNESS' }
-              "$($_.package)`t$($_.test)"
-            } | Sort-Object -Unique)
-            if ($actual.Count -eq 0 -or $actual.Count -ne $covered.Count -or @(Compare-Object $expected $actual).Count -ne 0) { throw 'FINANCIAL_WITNESS_SET_MISMATCH' }
-          }
 
       - name: Build research worker for isolated process contracts
         shell: pwsh
@@ -922,7 +888,7 @@ jobs:
     # Non-clock-sensitive regression coverage can compile and run independently
     # of the one uninterrupted financial property acceptance on another runner.
     # It does not issue a financial PASS: windows-native joins both exact-tree
-    # jobs and the separate B1 + full Windows release gates before publication.
+    # jobs and the full Windows release build before publication.
     name: trading-engine-regressions-windows
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
@@ -968,28 +934,15 @@ jobs:
         shell: pwsh
         run: |
           $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
-          $covered = @()
-          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
-            # Compile no extra Engine example just to discover the reviewed
-            # Rust witness set (~79s in measured Ready). The source parser
-            # accepts only explicit immutable Witness + CONTRACTS syntax.
-            # Parallel acceptance independently proves FULL_PASS and compares
-            # this set to every current-tree executed witness; any difference
-            # keeps the protected windows-native gate RED.
-            $manifestJson = & node scripts/ci-finance-witness-manifest.cjs
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $manifest = $manifestJson | ConvertFrom-Json
-            if (@($manifest.witnesses).Count -eq 0 -or @($manifest.repository_witnesses).Count -lt 3) { throw 'FINANCIAL_MANIFEST_EMPTY' }
-            $financialWitnesses = @($manifest.witnesses)
-            $knownPackages = @('okx-domain-core','okx-trade-execution','okx-trading-engine','okx-ipc-contracts','okx-market-runtime')
-            if (@($financialWitnesses | Where-Object { $_.package -cnotin $knownPackages -or $_.test -cnotmatch '^[A-Za-z0-9_:]+$' }).Count -ne 0) {
-              throw 'FINANCIAL_MANIFEST_WITNESS_INVALID'
-            }
-            $covered = @($financialWitnesses | ForEach-Object {
-              [pscustomobject]@{ package = $_.package; test = $_.test }
-            } | Sort-Object package, test -Unique)
-            if ($covered.Count -eq 0) { throw 'FINANCIAL_WITNESS_MANIFEST_EMPTY' }
-          }
+          # Compile no extra Engine example just to discover the reviewed
+          # Rust witness set (~79s in measured Ready). The source parser
+          # accepts only explicit immutable Witness + CONTRACTS syntax.
+          # Parallel acceptance independently proves FULL_PASS and compares
+          # this set to every current-tree executed witness; any difference
+          # keeps the protected windows-native gate RED.
+          $manifestJson = & node scripts/ci-finance-witness-manifest.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $covered = @(($manifestJson | ConvertFrom-Json).witnesses)
           foreach ($package in @('okx-trading-engine','okx-host-controller','okx-host-launcher','okx-trade-execution')) {
             $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
             # OS-kill is checked exclusively in the finance/isolated job.
@@ -1205,7 +1158,7 @@ jobs:
     # on a real Windows gate or on the narrowly proven identical native tree;
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
-    needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows, trading_safety_acceptance_windows, host_controller_launcher_checks, cloudflare_mcp_contracts, research_service_tests_windows]
+    needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows, host_controller_launcher_checks, cloudflare_mcp_contracts, research_service_tests_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1215,7 +1168,6 @@ jobs:
           set -euo pipefail
           test "${{ needs.component_impact.result }}" = "success"
           if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
-            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
             # Manual trusted-main cache priming intentionally compiles release
@@ -1233,7 +1185,6 @@ jobs:
             [[ "${{ needs.component_impact.outputs.research_base_head }}" =~ ^[0-9a-f]{40}$ ]]
             [[ "${{ needs.component_impact.outputs.research_base_run }}" =~ ^[1-9][0-9]*$ ]]
             [[ "${{ needs.component_impact.outputs.research_base_artifact }}" =~ ^[1-9][0-9]*$ ]]
-            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
@@ -1242,7 +1193,6 @@ jobs:
             echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.component_impact.outputs.research_base_head }}"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
@@ -1253,7 +1203,6 @@ jobs:
             echo "WINDOWS_NATIVE_PROOF=HOST_COMPONENTS_TESTED_NO_ENGINE_REBUILD"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
-            test "${{ needs.trading_safety_acceptance_windows.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
             scope="${{ needs.component_impact.outputs.component_scope }}"
             [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]
@@ -1269,85 +1218,12 @@ jobs:
             echo "WINDOWS_NATIVE_PROOF=COMPONENT_${scope}_NO_NATIVE_SOURCE_CHANGED"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           else
-            test "${{ needs.trading_safety_acceptance_windows.result }}" = "success"
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "success"
             test "${{ needs.trading_engine_build_windows.result }}" = "success"
             echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
           fi
-
-  # Current Native A/B and semantic/CAS prerequisite on an isolated runner.
-  # Full property/physical/resource acceptance remains trading-engine-acceptance-windows.
-  trading_safety_acceptance_windows:
-    # This is the parallel B1 financial safety acceptance; its old remote-finance driver is
-    # replaced by the actual current Native public contracts, not an exemption.
-    name: trading-safety-acceptance-windows
-    needs: component_impact
-    if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
-    runs-on: windows-latest
-    timeout-minutes: 18
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
-        with:
-          toolchain: 1.100.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-on-failure: true
-          # Reuse the verified main TEST profile also used by finance/regressions.
-          # Cargo still checks the current tree's own fingerprints before run.
-          prefix-key: v1-rust
-          shared-key: trading-engine-tests-windows
-          cache-workspace-crates: true
-          save-if: false
-      - name: Precompile current Rust property targets
-        run: cargo test --locked -p okx-trading-engine -p okx-trade-execution -p okx-domain-core -p okx-ipc-contracts -p okx-market-runtime --lib --no-run
-      - name: Public Native A/B cap, independent progress, replay and policy CAS
-        shell: pwsh
-        run: |
-          $names = @(
-            'accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_post'
-            'accounts::native_trade_contracts::native_public_fairness::risk_book_contract_native_public_b_executes_and_keeps_reserve_while_a_source_blocked'
-            'accounts::native_trade_contracts::native_public_fairness::risk_book_contract_native_public_b_status_and_cancel_leave_blocked_a_held'
-            'accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_100_callers_one_send_policy_cas_and_payload_conflict'
-            'accounts::native_trade_contracts::native_strategies::risk_book_contract_native_public_strategies_crud_claim_no_trade_share_original_owner'
-          )
-          $packages = @('-p','okx-trading-engine','-p','okx-trade-execution','-p','okx-domain-core','-p','okx-ipc-contracts','-p','okx-market-runtime')
-          # The five recorded-source fixtures have time-bounded readiness
-          # maintenance. Isolate the fixtures; the 100-caller CAS test still
-          # exercises its real internal concurrency.
-          $output = & cargo test --locked @packages --lib -- --exact --test-threads 1 --nocapture @names 2>&1
-          $code = $LASTEXITCODE
-          $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-b1-current.log" | Out-Host
-          if ($code -ne 0) { exit $code }
-          $proof = [regex]::Matches(($output -join "`n"), 'test result: ok\.\s+([1-9]\d*) passed;')
-          if ($proof.Count -ne 1 -or [int]$proof[0].Groups[1].Value -ne $names.Count) {
-            throw 'CURRENT_NATIVE_B1_PUBLIC_WITNESSES_MISSING'
-          }
-      - name: Current single-writer queue deadlines and FIFO drain
-        shell: pwsh
-        run: |
-          $packages = @('-p','okx-trading-engine','-p','okx-trade-execution','-p','okx-domain-core','-p','okx-ipc-contracts','-p','okx-market-runtime')
-          $output = & cargo test --locked @packages --lib owner_queue_tests:: -- --nocapture 2>&1
-          $code = $LASTEXITCODE
-          $output | Tee-Object -FilePath "$env:RUNNER_TEMP\native-queue-current.log" | Out-Host
-          if ($code -ne 0) { exit $code }
-          $proof = [regex]::Matches(($output -join "`n"), 'test result: ok\.\s+([1-9]\d*) passed;')
-          if ($proof.Count -ne 1 -or [int]$proof[0].Groups[1].Value -ne 3) {
-            throw 'CURRENT_SINGLE_WRITER_QUEUE_WITNESSES_MISSING'
-          }
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: native-b1-current-${{ github.event.pull_request.head.sha || github.sha }}
-          path: |
-            ${{ runner.temp }}\native-b1-current.log
-            ${{ runner.temp }}\native-queue-current.log
-          if-no-files-found: error
-          retention-days: 14
 
   # #560: build the full Windows release in parallel with financial tests.
   # A manual accepted-main run can warm its release cache for future PRs.
@@ -1617,7 +1493,7 @@ jobs:
             jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
             # Require the *fresh* 4-EXE financial gate, never an aggregate
             # that reused older proof or the isolated Research-only worker.
-            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-engine-regressions-windows","trading-engine-build-windows","trading-safety-acceptance-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-engine-regressions-windows","trading-engine-build-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
               continue
             fi
             artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"

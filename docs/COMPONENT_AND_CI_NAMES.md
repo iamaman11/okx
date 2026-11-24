@@ -123,7 +123,6 @@ means proven reusable binary bytes, not a runtime library. Existing
 | `trading-engine-regressions-windows` | Parallel independent Engine/Execution/Host/Research regressions, Windows Clippy and K9; never substitutes for financial acceptance |
 | `trading-engine-build-windows` | Parallel fresh four-component Windows release build and artifact on full Ready PRs; manual accepted-`main` release cache seed |
 | `trusted-main-windows-test-cache-prime` | Optional manual compile-only test/collector cache seed from accepted `main`; no financial acceptance or deployment |
-| `trading-safety-acceptance-windows` | Independent mandatory B1 financial safety checks |
 | `research-service-tests-windows` | Research Service tests and build against the accepted unchanged Trading Engine |
 | `host-controller-launcher-checks` | Host Controller and Host Launcher tests/build without the Trading Engine |
 | `rust-tests-linux` | Rust library, Research Service IPC and financial SQLite tests executed on Linux (not a Linux trading service) |
@@ -137,7 +136,7 @@ The required check **display names** `classify`, `windows-native` and `linux-cor
 are retained for branch protection and accepted-CI reuse. `classify` is the
 actual `component_impact` job, without a redundant alias; the platform
 aggregators keep implementation IDs `required_windows` and `required_linux`.
-They require finance acceptance, independent regressions, B1 and release build on the
+They require finance acceptance, independent regressions and release build on the
 full Native route; on reuse they verify the accepted exact tree instead. They
 never claim that skipped financial tests ran. The old branch-only Draft jobs for closed
 issues #510 and #512 have been removed; normal Draft owner tests remain.
@@ -146,7 +145,7 @@ issues #510 and #512 have been removed; normal Draft owner tests remain.
 
 1. Keep binary names and v2 archive/manifest schema stable in this code-name
    migration; compile and test the renamed Cargo packages and both old EXE names.
-2. Require the full Windows finance/B1, Linux, architecture and MCP acceptance
+2. Require the full Windows finance (including B1), Linux, architecture and MCP acceptance
    once for this shared-dependency/workflow change. The Draft route is scoped.
 3. Verify the exact immutable HEAD/tree, all four EXE hashes, and the installed
    CONTROL/Launcher/Engine/Research compatibility before deploying anything.
