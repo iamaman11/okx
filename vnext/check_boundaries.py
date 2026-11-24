@@ -13,12 +13,7 @@ import tomllib
 
 ROOTS = {"engine", "research", "control", "edge"}
 OWNERS = ROOTS | {"integration", "repository"}
-WORKFLOWS = {
-    f".github/workflows/vnext-{owner}.yml": owner for owner in ROOTS
-} | {
-    ".github/workflows/vnext-boundaries.yml": "repository",
-    ".github/workflows/vnext-ci.yml": "repository",
-}
+WORKFLOWS = {".github/workflows/vnext-ci.yml": "repository"}
 REPOSITORY_FILES = {
     "vnext/README.md",
     "vnext/BOUNDARIES.md",
