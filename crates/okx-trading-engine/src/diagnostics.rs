@@ -148,21 +148,25 @@ pub async fn diagnostics(
         if request.cycle_id.is_some() || request.limit.is_some() {
             return Err("INVALID_DIAGNOSTICS_VIEW".into());
         }
-        let id = request
-            .reference
-            .as_deref()
-            .ok_or("JOB_REFERENCE_REQUIRED")?;
+        // Research belongs to the authenticated installation, not an account.
+        if request.account.is_some() || account.is_some() {
+            return Err("RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE".into());
+        }
+        let Some(id) = request.reference.as_deref() else {
+            return Ok(json!({
+                "schema": "okx.research.deployment/v1",
+                "engine_pid": std::process::id(),
+                "research": ctx.research.deployment_status(),
+                "evidence": "cached_engine_observation",
+                "read_only": true
+            }));
+        };
         if id.len() != 64
             || !id
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
             return Err("INVALID_JOB_REFERENCE".into());
-        }
-        // Research jobs belong to the authenticated installation, not a
-        // financial account. Explicit account routing is inapplicable here.
-        if request.account.is_some() || account.is_some() {
-            return Err("RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE".into());
         }
         return ctx.research.diagnostic_job(id).await;
     }

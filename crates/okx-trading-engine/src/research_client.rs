@@ -62,7 +62,10 @@ pub struct ResearchClientConfig {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ResearchDeploymentStatus {
     pub installed: Option<String>,
+    pub installed_check_error: Option<String>,
     pub active: Option<String>,
+    pub active_pid: Option<u32>,
+    pub handshake_verified_at_ms: Option<i64>,
     pub draining: bool,
 }
 #[derive(Clone)]
@@ -194,12 +197,14 @@ impl ResearchClient {
                 Ok(path) => {
                     if let Ok(mut state) = self.deployment.lock() {
                         state.installed = version_name(&path);
+                        state.installed_check_error = None;
                     }
                     Some(path)
                 }
                 Err(error) => {
                     if let Ok(mut state) = self.deployment.lock() {
                         state.installed = None;
+                        state.installed_check_error = Some(error.clone());
                     }
                     if slot
                         .as_ref()
@@ -274,13 +279,14 @@ impl ResearchClient {
         let executable = match &self.installation_runtime {
             Some(root) => {
                 let root = root.clone();
-                let path = tokio::task::spawn_blocking(move || installed::resolve(&root))
+                let resolved = tokio::task::spawn_blocking(move || installed::resolve(&root))
                     .await
-                    .map_err(|_| "RESEARCH_INSTALL_CHECK_FAILED")??;
+                    .map_err(|_| "RESEARCH_INSTALL_CHECK_FAILED")?;
                 if let Ok(mut state) = self.deployment.lock() {
-                    state.installed = version_name(&path);
+                    state.installed = resolved.as_ref().ok().and_then(|path| version_name(path));
+                    state.installed_check_error = resolved.as_ref().err().cloned();
                 }
-                path
+                resolved?
             }
             None => self.config.executable.clone(),
         };
@@ -301,6 +307,7 @@ impl ResearchClient {
         #[cfg(windows)]
         command.creation_flags(0x0000_4000); // BELOW_NORMAL_PRIORITY_CLASS
         let mut child = command.spawn().map_err(|_| "WORKER_START")?;
+        let pid = child.id().ok_or("WORKER_PID_UNAVAILABLE")?;
         let stdin = child.stdin.take().ok_or("WORKER_STDIN")?;
         let stdout = child.stdout.take().ok_or("WORKER_STDOUT")?;
         let mut writer = FramedWrite::new(stdin, codec());
@@ -322,7 +329,9 @@ impl ResearchClient {
             .await
             .ok_or("WORKER_EOF")?
             .map_err(|_| "WORKER_HELLO_READ")?;
-        match serde_json::from_slice::<WorkerFrame>(&frame).map_err(|_| "WORKER_HELLO_DECODE")? {
+        let producer_sha256 = match serde_json::from_slice::<WorkerFrame>(&frame)
+            .map_err(|_| "WORKER_HELLO_DECODE")?
+        {
             WorkerFrame::Hello {
                 protocol: PROTOCOL_VERSION,
                 storage: STORAGE_VERSION,
@@ -336,9 +345,12 @@ impl ResearchClient {
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
                 && (self.installation_runtime.is_none()
-                    || version_name(&executable).as_ref() == Some(&producer_sha256)) => {}
+                    || version_name(&executable).as_ref() == Some(&producer_sha256)) =>
+            {
+                producer_sha256
+            }
             _ => return Err("WORKER_HELLO_MISMATCH".into()),
-        }
+        };
         let (tx, mut rx) = mpsc::channel::<HostFrame>(QUEUE_CAPACITY);
         let (closed, _) = watch::channel(false);
         let c = Arc::new(Connection {
@@ -360,6 +372,12 @@ impl ResearchClient {
         let driver = c.clone();
         let source = self.source.clone();
         let deployment = self.deployment.clone();
+        if let Ok(mut state) = deployment.lock() {
+            state.active = Some(producer_sha256);
+            state.active_pid = Some(pid);
+            state.handshake_verified_at_ms = Some(jiff::Timestamp::now().as_millisecond());
+            state.draining = false;
+        }
         tokio::spawn(async move {
             let mut writer_task = tokio::spawn(async move {
                 while let Some(frame) = rx.recv().await {
@@ -411,17 +429,15 @@ impl ResearchClient {
             let _ = child.kill().await;
             let _ = child.wait().await;
             if let Ok(mut state) = deployment.lock()
-                && state.active == version_name(&driver.executable)
+                && state.active_pid == Some(pid)
             {
                 state.active = None;
+                state.active_pid = None;
+                state.handshake_verified_at_ms = None;
                 state.draining = false;
             }
             driver.closed.send_replace(true);
         });
-        if let Ok(mut state) = self.deployment.lock() {
-            state.active = version_name(&executable);
-            state.draining = false;
-        }
         *slot = Some(c.clone());
         Ok(c)
     }

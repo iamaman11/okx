@@ -211,6 +211,24 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
             account: account.map(str::to_owned),
             operation,
         };
+        let deployment = || {
+            request(
+                AgentOperation::Diagnostics {
+                    request: DiagnosticsRequest {
+                        view: Some(DiagnosticsView::Research),
+                        reference: None,
+                        account: None,
+                        cycle_id: None,
+                        limit: None,
+                    },
+                },
+                None,
+            )
+        };
+        let snapshot = dispatch(&context, &deployment()).await.result.unwrap();
+        assert_eq!(snapshot["schema"], "okx.research.deployment/v1");
+        assert!(snapshot["research"]["active_pid"].is_null());
+        assert!(!root.join("research").exists());
         let response = dispatch(
             &context,
             &request(
@@ -226,6 +244,9 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
             AgentResponseStatus::Completed,
             "{response:?}"
         );
+        let snapshot = dispatch(&context, &deployment()).await.result.unwrap();
+        assert_eq!(snapshot["engine_pid"], std::process::id());
+        assert!(snapshot["research"]["active_pid"].is_u64());
         let denied = dispatch(
             &context,
             &request(

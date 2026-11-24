@@ -86,9 +86,18 @@ handlers, then closes the old process before starting a verified replacement.
 Active and installed versions are separate observations. Invalid staging never
 authorizes a new executable or restarts the financial Engine.
 
-`deployment_status` reads only a cached projection. `diagnostic_job` does not
-start a child, refresh market sources, enqueue research, or recover finance.
-A diagnostic timeout does not terminate the worker.
+Call `diagnostics.explain` with `view: "research"` and omit `reference` to read
+the Engine PID and its cached deployment observation. The Research PID, active
+SHA-256 and handshake time describe the child that passed the IPC handshake.
+The installed SHA describes the candidate observed during the last connection
+check. It can differ from the active SHA while the old child drains. To drive
+an on-demand activation, call `research.capabilities`, then read the deployment
+observation again. Check the returned active SHA and PID after both update and
+rollback. A cached observation does not probe process health or verify Windows
+CONTROL, Launcher or Edge parity.
+
+Supplying a job `reference` to the same view reads that job. Neither diagnostic
+starts a child, refreshes sources, enqueues research, or recovers finance.
 
 Account diagnostics read NAV completeness, raw coverage, source time and checked
 time from one scoped financial snapshot, with a 250ms read deadline. They report

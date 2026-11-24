@@ -125,10 +125,10 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
     );
     client.installation_runtime = Some(runtime.clone());
     client.capabilities().await.unwrap();
-    assert_eq!(
-        client.deployment_status().active.as_deref(),
-        Some(v1.as_str())
-    );
+    let initial = client.deployment_status();
+    assert_eq!(initial.active.as_deref(), Some(v1.as_str()));
+    assert!(initial.active_pid.is_some());
+    assert!(initial.handshake_verified_at_ms.is_some());
     let first_session = client
         .connection
         .lock()
@@ -160,6 +160,7 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
     let status = client.deployment_status();
     assert_eq!(status.installed.as_deref(), Some(v2.as_str()));
     assert_eq!(status.active.as_deref(), Some(v1.as_str()));
+    assert_eq!(status.active_pid, initial.active_pid);
     assert!(status.draining);
     assert_eq!(
         client.research(job("new-during-drain")).await.unwrap_err(),
@@ -195,6 +196,7 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
         .session
         .clone();
     assert_ne!(first_session, second_session);
+    assert!(client.deployment_status().active_pid.is_some());
     let replay = client.research(request).await.unwrap();
     assert_eq!(replay["id"], id);
     assert_eq!(replay["state"], "cancelled");
@@ -216,6 +218,9 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
         Some(v2.as_str())
     );
     client.shutdown().await;
+    let stopped = client.deployment_status();
+    assert!(stopped.active_pid.is_none());
+    assert!(stopped.handshake_verified_at_ms.is_none());
     pointer(&runtime, &v1);
     assert_eq!(
         client.capabilities().await.unwrap_err(),
