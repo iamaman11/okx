@@ -1,13 +1,21 @@
-//! S0 offline vertical witness: strictly validated command -> original durable
-//! financial PREPARE. It deliberately stops BEFORE risk reserve/POST and must
-//! never be described as a production trading route or a venue acceptance.
+//! S0 offline vertical prototype: strictly validated command -> original
+//! SQLite/WAL financial state machine -> one simulated venue request ->
+//! lost ACK / restart / independent readback. This is NOT a production trading
+//! handler: its synthetic central receipt is not financial risk authorization,
+//! and only the native UnifiedFinanceHandle may mint CommittedVenueSend.
 
 use okx_trade_execution::{
-    AccountMeta, AccountStore, Decision, IntentPlan, IntentState, NewIntent, OpeningSnapshot,
+    AccountMeta, AccountStore, CentralReceipt, Decision, IntentPlan, IntentState, NewIntent,
+    OpeningSnapshot,
 };
 use okx_trading_engine::{PositionTarget, ValidatedCommand, validate_wire_command};
 use rust_decimal::Decimal;
-use std::{path::PathBuf, time::SystemTime};
+use std::{
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
+
+const WIRE: &str = r#"{"kind":"manual","account":"okx:real:verified","instrument":"BTC-USDT-SWAP","operation":"s0-command-1","target":{"kind":"long","quantity":"1.000"},"observed_at_ms":2,"expires_at_ms":100}"#;
 
 fn temporary_path() -> PathBuf {
     let nonce = SystemTime::now()
@@ -20,10 +28,8 @@ fn temporary_path() -> PathBuf {
     ))
 }
 
-#[test]
-fn typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send() {
-    let payload = r#"{"kind":"manual","account":"okx:real:verified","instrument":"BTC-USDT-SWAP","operation":"s0-command-1","target":{"kind":"long","quantity":"1.000"},"observed_at_ms":2,"expires_at_ms":100}"#;
-    let command = validate_wire_command(payload).expect("typed envelope");
+fn prepared_fixture() -> (PathBuf, String, AccountStore, NewIntent) {
+    let command = validate_wire_command(WIRE).expect("typed envelope");
     let ValidatedCommand::Manual(command) = command else {
         panic!("expected manual command");
     };
@@ -31,8 +37,8 @@ fn typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_s
         panic!("only this verified test target");
     };
 
-    // This is the exact existing financial SQLite/WAL owner, NOT a new schema.
-    // No venue client or send capability is constructed in this witness.
+    // This is the existing financial SQLite/WAL owner, NOT a new schema or
+    // production authority. Both offline tests share the exact same fixture.
     let path = temporary_path();
     let account = command.account.as_str().to_owned();
     let meta = AccountMeta {
@@ -100,14 +106,27 @@ fn typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_s
     assert!(saved.exchange_order_id.is_none());
     let repeated = owner.prepare(&decision, &intent).expect("idempotent retry");
     assert_eq!(repeated.intent_id, saved.intent_id);
+    (path, account, owner, intent)
+}
+
+fn cleanup(path: &Path) {
+    // Only this freshly created, uniquely named test database is disposable.
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
+#[test]
+fn typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send() {
+    let (path, account, owner, intent) = prepared_fixture();
 
     // Unvalidated input cannot reach the financial owner and cannot mutate
     // the existing prepared record. No risk reserve or POST is attempted.
-    let forged = payload.replace("\"quantity\":\"1.000\"", "\"quantity\":\"-1\"");
+    let forged = WIRE.replace("\"quantity\":\"1.000\"", "\"quantity\":\"-1\"");
     assert!(validate_wire_command(&forged).is_err());
     assert_eq!(
         owner
-            .by_idempotency(command.operation.as_str())
+            .by_idempotency(&intent.idempotency_key)
             .expect("read back")
             .expect("prepared")
             .state,
@@ -124,8 +143,93 @@ fn typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_s
     assert_eq!(persisted.state, IntentState::Prepared);
     assert!(persisted.exchange_order_id.is_none());
     drop(recovered);
-    // The uniquely created test DB is temporary; never open a user DB.
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
-    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    cleanup(&path);
+}
+
+#[derive(Default)]
+struct OfflineVenue {
+    posted_client_ids: Vec<String>,
+}
+
+impl OfflineVenue {
+    fn post_and_lose_ack(&mut self, client_order_id: &str) {
+        self.posted_client_ids.push(client_order_id.to_owned());
+        // The exchange may have accepted the POST; the caller sees no ACK.
+    }
+
+    fn independent_order_readback(&self, client_order_id: &str) -> Option<&'static str> {
+        self.posted_client_ids
+            .iter()
+            .any(|known| known == client_order_id)
+            .then_some("s0-simulated-venue-order")
+    }
+}
+
+#[test]
+fn typed_manual_target_sqlite_lost_ack_reopen_and_no_second_simulated_post() {
+    let (path, account, mut owner, intent) = prepared_fixture();
+    let receipt = CentralReceipt {
+        reservation_key: "s0-offline-central-reservation".into(),
+        account_key: account.clone(),
+        installation_id: "s0-fixture".into(),
+        instance_id: None,
+        intent_id: intent.intent_id.clone(),
+        plan_hash: intent.plan_hash.clone(),
+        policy_revision: 1,
+        receipt_hash: "s0-synthetic-risk-receipt".into(),
+        requested_loss_usd: Decimal::from(5),
+        conversion_digest: "s0-test-conversion".into(),
+    };
+    // S0-only: this preconstructed receipt is NOT a RiskBook authorization.
+    // S1 must replace this fixture with a real financial admission decision.
+    owner
+        .reserve(&receipt, 3)
+        .expect("real SQLite reserve transaction");
+    assert_eq!(
+        owner.intent(&intent.intent_id).unwrap().unwrap().state,
+        IntentState::Reserved
+    );
+    assert!(owner
+        .begin_post(&intent.intent_id, 1, 4)
+        .expect("durable begin-post"));
+    assert_eq!(owner.post_fence_evidence(&intent.intent_id).unwrap().0, 4);
+
+    // The simulated venue receives exactly one request; the ACK is lost.
+    let mut venue = OfflineVenue::default();
+    venue.post_and_lose_ack(&intent.client_order_id);
+    owner
+        .record_outcome(&intent.intent_id, IntentState::Unknown, None, "s0-lost-ack", 5)
+        .expect("persist UNKNOWN, never optimistically succeed");
+    drop(owner);
+
+    let mut recovered =
+        AccountStore::open_existing(&path, &account, "s0-fixture").expect("WAL restart");
+    assert_eq!(
+        recovered.intent(&intent.intent_id).unwrap().unwrap().state,
+        IntentState::Unknown
+    );
+    assert!(!recovered.begin_post(&intent.intent_id, 1, 6).unwrap());
+    assert_eq!(venue.posted_client_ids.len(), 1, "no repost after lost ACK/reopen");
+
+    // The reconciliation answer comes from the simulated venue's independent
+    // client-order lookup, not a guessed ACK or the mutable SQLite row.
+    let venue_order = venue
+        .independent_order_readback(&intent.client_order_id)
+        .expect("readback resolves original client order");
+    recovered
+        .record_outcome(
+            &intent.intent_id,
+            IntentState::Acknowledged,
+            Some(venue_order),
+            "s0-independent-venue-readback",
+            7,
+        )
+        .expect("reconcile original intent");
+    let resolved = recovered.intent(&intent.intent_id).unwrap().unwrap();
+    assert_eq!(resolved.state, IntentState::Acknowledged);
+    assert_eq!(resolved.exchange_order_id.as_deref(), Some(venue_order));
+    assert!(!recovered.begin_post(&intent.intent_id, 1, 8).unwrap());
+    assert_eq!(venue.posted_client_ids.len(), 1);
+    drop(recovered);
+    cleanup(&path);
 }

@@ -86,14 +86,19 @@ python3 -B vnext/s0/engine_topology_ab.py \
   --output /tmp/engine-finance-topology.json
 ```
 
-Both variants run the real SQLite/WAL handoff and the existing finance fake-venue
-lost-ACK/single-send witnesses, then rebuild after the same temporary
+Both variants now run the connected **offline** typed command → actual
+SQLite/WAL PREPARE → synthetic reserve → durable POST fence → one simulated
+venue send → lost ACK → UNKNOWN → reopen → no repost → readback scenario,
+as well as the existing production financial-owner fake-venue
+lost-ACK/single-send witnesses. They then rebuild after the same temporary
 production-source change. The **command** probe changes validated identifiers;
 the separately exported **finance** probe first proves its PREPARE-idempotency
 test fails against the unchanged source, then hardens the original financial
 writer implementation and measures the green test and release rebuild. Each
-probe runs the fake-venue witnesses again after its source change. Neither is a
-new Engine HTTP execution E2E or a financial SQL-schema migration. The first
+probe runs the fake-venue witnesses again after its source change. The new
+connected scenario has a **synthetic CentralReceipt**, not a RiskBook
+authorization or a real `CommittedVenueSend`; it is an S0 topology oracle,
+not a new Engine HTTP execution E2E or a financial SQL-schema migration. The first
 non-authoritative Linux **command** sample is preserved
 in [engine_ab_local_sample.json](engine_ab_local_sample.json).
 

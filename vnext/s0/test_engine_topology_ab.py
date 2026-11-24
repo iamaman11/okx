@@ -34,6 +34,8 @@ class EngineTopologyTests(unittest.TestCase):
             sql_test = (owner / "crates/okx-trade-execution/tests/sql_handoff.rs").read_text()
             self.assertIn("use okx_trade_execution::trading_engine::{", sql_test)
             self.assertIn("AccountStore::open_existing", sql_test)
+            self.assertIn("typed_manual_target_sqlite_lost_ack_reopen_and_no_second_simulated_post", sql_test)
+            self.assertIn("S0-only: this preconstructed receipt is NOT a RiskBook authorization", sql_test)
 
     def test_same_production_validation_change_applies_to_both_layouts(self):
         with tempfile.TemporaryDirectory(prefix="okx-s0-engine-unit-") as root:

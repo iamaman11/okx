@@ -179,6 +179,9 @@ def measure_cargo(cargo: str, workspace: Path, args: list[str], *, red_oracle: b
     observations["sqlite_handoff_executed"] = bool(
         re.search(r"typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send\s+\.\.\.\s+ok", result.stdout + result.stderr)
     )
+    observations["offline_venue_roundtrip_executed"] = bool(
+        re.search(r"typed_manual_target_sqlite_lost_ack_reopen_and_no_second_simulated_post\s+\.\.\.\s+ok", result.stdout + result.stderr)
+    )
     observations["topology_probe_executed"] = bool(
         re.search(r"rejects_ambiguous_terminal_segment\s+\.\.\.\s+ok", result.stdout + result.stderr)
     )
@@ -205,6 +208,7 @@ def run_variant(cargo: str, workspace: Path, name: str, probe: str = "command") 
     # selected real financial oracles: large unrelated finance tests can fill
     # /tmp when both topology experiments overlap on one runner.
     handoff_name = "typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send"
+    venue_name = "typed_manual_target_sqlite_lost_ack_reopen_and_no_second_simulated_post"
     lost_reply_names = [
         "risk_book_contract_fresh_owner_reserve_commit_lost_reply_exact_readback_once_send",
         "risk_book_contract_fresh_owner_begin_post_commit_lost_reply_no_second_claim_or_send",
@@ -212,6 +216,9 @@ def run_variant(cargo: str, workspace: Path, name: str, probe: str = "command") 
     cold_test = measure_cargo(cargo, workspace, ["test", "--locked", "--workspace", handoff_name])
     if not cold_test["observations"]["sqlite_handoff_executed"]:
         raise RuntimeError(f"{name}: durable SQLite oracle was not observed")
+    cold_venue = measure_cargo(cargo, workspace, ["test", "--locked", "--workspace", venue_name])
+    if not cold_venue["observations"]["offline_venue_roundtrip_executed"]:
+        raise RuntimeError(f"{name}: connected offline venue oracle was not observed")
     fake_venue_witnesses = []
     for witness in lost_reply_names:
         fake_venue_witnesses.append(
@@ -239,6 +246,7 @@ def run_variant(cargo: str, workspace: Path, name: str, probe: str = "command") 
         raise ValueError("probe must be command or finance")
     workspace_hash_after, files_after = source_fingerprint(workspace)
     edited_test = measure_cargo(cargo, workspace, ["test", "--locked", "--workspace", handoff_name])
+    edited_venue = measure_cargo(cargo, workspace, ["test", "--locked", "--workspace", venue_name])
     edited_probe = (
         measure_cargo(cargo, workspace, ["test", "--locked", "--workspace", "rejects_ambiguous_terminal_segment"])
         if probe == "command" else None
@@ -246,6 +254,8 @@ def run_variant(cargo: str, workspace: Path, name: str, probe: str = "command") 
     edited_release = measure_cargo(cargo, workspace, ["build", "--locked", "--release", "--workspace"])
     if not edited_test["observations"]["sqlite_handoff_executed"]:
         raise RuntimeError(f"{name}: durable SQLite oracle disappeared after source diff")
+    if not edited_venue["observations"]["offline_venue_roundtrip_executed"]:
+        raise RuntimeError(f"{name}: connected offline venue oracle disappeared after source diff")
     if edited_probe is not None and not edited_probe["observations"]["topology_probe_executed"]:
         raise RuntimeError(f"{name}: source diff probe was not executed")
     edited_fake_venue_witnesses = []
@@ -262,10 +272,12 @@ def run_variant(cargo: str, workspace: Path, name: str, probe: str = "command") 
         "source_after": workspace_hash_after,
         "source_file_counts": [files_before, files_after],
         "cold_test": cold_test,
+        "cold_venue": cold_venue,
         "fake_venue_lost_ack_witnesses": fake_venue_witnesses,
         "cold_release": cold_release,
         "red_test": red_test,
         "edited_test": edited_test,
+        "edited_venue": edited_venue,
         "edited_probe": edited_probe,
         "edited_release": edited_release,
         "edited_fake_venue_lost_ack_witnesses": edited_fake_venue_witnesses,
@@ -306,12 +318,12 @@ def main() -> int:
             if options.probe == "command"
             else "finance SQLite PREPARE idempotency validation + red/green test"
         ),
-        "durable_scenario": "actual AccountStore SQLite/WAL PREPARED/idempotent/reopen + existing fake venue once-send/lost-ACK witnesses",
+        "durable_scenario": "typed command -> actual SQLite/WAL PREPARED/RESERVED/POSTING/UNKNOWN/reopen -> simulated venue once-send -> reconciled ACK; plus native CommittedVenueSend witnesses",
         "variants": variants,
         "limitations": [
             "This is a local topology experiment, not the protected Ready CI gate.",
-            "Fake-send/lost-ACK SQL witnesses run separately from typed PREPARE handoff; no single end-to-end typed command to venue is proven.",
-            "No actual HTTP exchange emulator, real trading authority or full venue reconciliation is exercised.",
+            "The connected offline prototype uses a synthetic central receipt and AccountStore local API, not production RiskBook authority or CommittedVenueSend.",
+            "No actual HTTP exchange emulator, native owner process, real trading authority or source-complete venue reconciliation is exercised.",
             "Cargo verbose rustc commands are measured; actual linker invocations are not separately instrumented.",
             "Each run measures one source-change class; compare command and finance with separate fresh exports.",
             "Financial schema/SQL migration, feature growth, and complete production command-to-venue E2E are not measured.",
