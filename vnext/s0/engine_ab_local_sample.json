@@ -1,0 +1,485 @@
+{
+  "comparability": "same Rust toolchain/host/financial source; isolated target directories",
+  "durable_scenario": "actual AccountStore SQLite/WAL PREPARED/idempotent/reopen + existing fake venue once-send/lost-ACK witnesses",
+  "limitations": [
+    "This is a local topology experiment, not the protected Ready CI gate.",
+    "Fake-send/lost-ACK SQL witnesses run separately from typed PREPARE handoff; no single end-to-end typed command to venue is proven.",
+    "No actual HTTP exchange emulator, real trading authority or full venue reconciliation is exercised.",
+    "Cargo verbose rustc commands are measured; actual linker invocations are not separately instrumented.",
+    "Only a representative typed-command production diff is measured; finance-SQL edits and feature growth are not measured.",
+    "Separate runner-queue/provenance/artifact, Windows and warm p50/p95 proofs are required by #569."
+  ],
+  "ready_ci_gate_proof": false,
+  "schema": "okx-vnext-s0-engine-topology/v1",
+  "source_diff": "identical production change to identifier validation + its new test",
+  "variants": [
+    {
+      "cold_release": {
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--release",
+          "--workspace",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 46539,
+        "observations": {
+          "build_scripts": 11,
+          "cargo_artifacts": 57,
+          "compiler_warnings": 421,
+          "executable_artifacts": 0,
+          "fresh_artifacts": 0,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 57,
+          "passed_test_names": [],
+          "rustc_verbose_invocations": 46,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": false,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 0,
+          "topology_probe_executed": false
+        }
+      },
+      "cold_test": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--workspace",
+          "typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 19193,
+        "observations": {
+          "build_scripts": 14,
+          "cargo_artifacts": 86,
+          "compiler_warnings": 457,
+          "executable_artifacts": 3,
+          "fresh_artifacts": 0,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 86,
+          "passed_test_names": [
+            "typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send"
+          ],
+          "rustc_verbose_invocations": 66,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": true,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 1,
+          "topology_probe_executed": false
+        }
+      },
+      "edited_probe": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--workspace",
+          "rejects_ambiguous_terminal_segment",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 71,
+        "observations": {
+          "build_scripts": 14,
+          "cargo_artifacts": 86,
+          "compiler_warnings": 457,
+          "executable_artifacts": 3,
+          "fresh_artifacts": 86,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 0,
+          "passed_test_names": [
+            "trading_engine::s0_topology_probe::rejects_ambiguous_terminal_segment"
+          ],
+          "rustc_verbose_invocations": 0,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": false,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 1,
+          "topology_probe_executed": true
+        }
+      },
+      "edited_release": {
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--release",
+          "--workspace",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 11623,
+        "observations": {
+          "build_scripts": 11,
+          "cargo_artifacts": 57,
+          "compiler_warnings": 421,
+          "executable_artifacts": 0,
+          "fresh_artifacts": 56,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 1,
+          "passed_test_names": [],
+          "rustc_verbose_invocations": 1,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": false,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 0,
+          "topology_probe_executed": false
+        }
+      },
+      "edited_test": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--workspace",
+          "typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 3604,
+        "observations": {
+          "build_scripts": 14,
+          "cargo_artifacts": 86,
+          "compiler_warnings": 457,
+          "executable_artifacts": 3,
+          "fresh_artifacts": 83,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 3,
+          "passed_test_names": [
+            "typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send"
+          ],
+          "rustc_verbose_invocations": 3,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": true,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 1,
+          "topology_probe_executed": false
+        }
+      },
+      "fake_venue_lost_ack_witnesses": [
+        {
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "okx-trade-execution",
+            "risk_book_contract_fresh_owner_reserve_commit_lost_reply_exact_readback_once_send",
+            "--message-format=json",
+            "-vv"
+          ],
+          "elapsed_ms": 125,
+          "observations": {
+            "build_scripts": 14,
+            "cargo_artifacts": 85,
+            "compiler_warnings": 457,
+            "executable_artifacts": 2,
+            "fresh_artifacts": 85,
+            "linker_invocations_observed": null,
+            "linker_observation": "unknown: rustc does not report subprocess linker events",
+            "nonfresh_artifacts": 0,
+            "passed_test_names": [
+              "account_worker::unified::owner_reserve_reply_tests::risk_book_contract_fresh_owner_reserve_commit_lost_reply_exact_readback_once_send"
+            ],
+            "rustc_verbose_invocations": 0,
+            "rustdoc_verbose_invocations": 0,
+            "sqlite_handoff_executed": false,
+            "tests_failed": 0,
+            "tests_ignored": 0,
+            "tests_passed": 1,
+            "topology_probe_executed": false
+          }
+        },
+        {
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "okx-trade-execution",
+            "risk_book_contract_fresh_owner_begin_post_commit_lost_reply_no_second_claim_or_send",
+            "--message-format=json",
+            "-vv"
+          ],
+          "elapsed_ms": 120,
+          "observations": {
+            "build_scripts": 14,
+            "cargo_artifacts": 85,
+            "compiler_warnings": 457,
+            "executable_artifacts": 2,
+            "fresh_artifacts": 85,
+            "linker_invocations_observed": null,
+            "linker_observation": "unknown: rustc does not report subprocess linker events",
+            "nonfresh_artifacts": 0,
+            "passed_test_names": [
+              "account_worker::unified::owner_reserve_reply_tests::risk_book_contract_fresh_owner_begin_post_commit_lost_reply_no_second_claim_or_send"
+            ],
+            "rustc_verbose_invocations": 0,
+            "rustdoc_verbose_invocations": 0,
+            "sqlite_handoff_executed": false,
+            "tests_failed": 0,
+            "tests_ignored": 0,
+            "tests_passed": 1,
+            "topology_probe_executed": false
+          }
+        }
+      ],
+      "name": "compact",
+      "source_after": "6ba2942803b7b51aa7bd5017a3d42b4c08e67720a257007275388db6cef0973c",
+      "source_before": "932aa04d5f6f3d7ba23f7328e8bae09702a37387d6a91b8ee6a96ae3a5570189",
+      "source_file_counts": [
+        193,
+        193
+      ],
+      "workspace_members": 2
+    },
+    {
+      "cold_release": {
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--release",
+          "--workspace",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 47413,
+        "observations": {
+          "build_scripts": 11,
+          "cargo_artifacts": 58,
+          "compiler_warnings": 421,
+          "executable_artifacts": 0,
+          "fresh_artifacts": 0,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 58,
+          "passed_test_names": [],
+          "rustc_verbose_invocations": 47,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": false,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 0,
+          "topology_probe_executed": false
+        }
+      },
+      "cold_test": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--workspace",
+          "typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 18033,
+        "observations": {
+          "build_scripts": 14,
+          "cargo_artifacts": 88,
+          "compiler_warnings": 457,
+          "executable_artifacts": 4,
+          "fresh_artifacts": 0,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 88,
+          "passed_test_names": [
+            "typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send"
+          ],
+          "rustc_verbose_invocations": 68,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": true,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 1,
+          "topology_probe_executed": false
+        }
+      },
+      "edited_probe": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--workspace",
+          "rejects_ambiguous_terminal_segment",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 68,
+        "observations": {
+          "build_scripts": 14,
+          "cargo_artifacts": 88,
+          "compiler_warnings": 457,
+          "executable_artifacts": 4,
+          "fresh_artifacts": 88,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 0,
+          "passed_test_names": [
+            "s0_topology_probe::rejects_ambiguous_terminal_segment"
+          ],
+          "rustc_verbose_invocations": 0,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": false,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 1,
+          "topology_probe_executed": true
+        }
+      },
+      "edited_release": {
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--release",
+          "--workspace",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 964,
+        "observations": {
+          "build_scripts": 11,
+          "cargo_artifacts": 58,
+          "compiler_warnings": 421,
+          "executable_artifacts": 0,
+          "fresh_artifacts": 57,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 1,
+          "passed_test_names": [],
+          "rustc_verbose_invocations": 1,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": false,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 0,
+          "topology_probe_executed": false
+        }
+      },
+      "edited_test": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--workspace",
+          "typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send",
+          "--message-format=json",
+          "-vv"
+        ],
+        "elapsed_ms": 447,
+        "observations": {
+          "build_scripts": 14,
+          "cargo_artifacts": 88,
+          "compiler_warnings": 457,
+          "executable_artifacts": 4,
+          "fresh_artifacts": 85,
+          "linker_invocations_observed": null,
+          "linker_observation": "unknown: rustc does not report subprocess linker events",
+          "nonfresh_artifacts": 3,
+          "passed_test_names": [
+            "typed_manual_target_reaches_original_sql_writer_and_survives_reopen_without_send"
+          ],
+          "rustc_verbose_invocations": 3,
+          "rustdoc_verbose_invocations": 0,
+          "sqlite_handoff_executed": true,
+          "tests_failed": 0,
+          "tests_ignored": 0,
+          "tests_passed": 1,
+          "topology_probe_executed": false
+        }
+      },
+      "fake_venue_lost_ack_witnesses": [
+        {
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "okx-trade-execution",
+            "risk_book_contract_fresh_owner_reserve_commit_lost_reply_exact_readback_once_send",
+            "--message-format=json",
+            "-vv"
+          ],
+          "elapsed_ms": 135,
+          "observations": {
+            "build_scripts": 14,
+            "cargo_artifacts": 83,
+            "compiler_warnings": 457,
+            "executable_artifacts": 1,
+            "fresh_artifacts": 83,
+            "linker_invocations_observed": null,
+            "linker_observation": "unknown: rustc does not report subprocess linker events",
+            "nonfresh_artifacts": 0,
+            "passed_test_names": [
+              "account_worker::unified::owner_reserve_reply_tests::risk_book_contract_fresh_owner_reserve_commit_lost_reply_exact_readback_once_send"
+            ],
+            "rustc_verbose_invocations": 0,
+            "rustdoc_verbose_invocations": 0,
+            "sqlite_handoff_executed": false,
+            "tests_failed": 0,
+            "tests_ignored": 0,
+            "tests_passed": 1,
+            "topology_probe_executed": false
+          }
+        },
+        {
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "okx-trade-execution",
+            "risk_book_contract_fresh_owner_begin_post_commit_lost_reply_no_second_claim_or_send",
+            "--message-format=json",
+            "-vv"
+          ],
+          "elapsed_ms": 132,
+          "observations": {
+            "build_scripts": 14,
+            "cargo_artifacts": 83,
+            "compiler_warnings": 457,
+            "executable_artifacts": 1,
+            "fresh_artifacts": 83,
+            "linker_invocations_observed": null,
+            "linker_observation": "unknown: rustc does not report subprocess linker events",
+            "nonfresh_artifacts": 0,
+            "passed_test_names": [
+              "account_worker::unified::owner_reserve_reply_tests::risk_book_contract_fresh_owner_begin_post_commit_lost_reply_no_second_claim_or_send"
+            ],
+            "rustc_verbose_invocations": 0,
+            "rustdoc_verbose_invocations": 0,
+            "sqlite_handoff_executed": false,
+            "tests_failed": 0,
+            "tests_ignored": 0,
+            "tests_passed": 1,
+            "topology_probe_executed": false
+          }
+        }
+      ],
+      "name": "split",
+      "source_after": "ddf2df7ea73d7ba381fda4ffe2b6a0c7977c27422bcca1375f3b145ef27358a9",
+      "source_before": "48046c08d47d70a930c33b7a361a0b8d7c91f9a6d767ee41165da4de9f6aafef",
+      "source_file_counts": [
+        194,
+        194
+      ],
+      "workspace_members": 3
+    }
+  ]
+}

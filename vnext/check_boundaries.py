@@ -4,7 +4,7 @@
 import argparse
 import csv
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import subprocess
 import sys
@@ -28,6 +28,16 @@ REPOSITORY_FILES = {
     "vnext/s0/README.md",
     "vnext/s0/measure.py",
     "vnext/s0/test_measure.py",
+    "vnext/s0/engine_topology_ab.py",
+    "vnext/s0/test_engine_topology_ab.py",
+    "vnext/s0/engine_ab_local_sample.json",
+    "vnext/s0/research_topology.py",
+    "vnext/s0/research_oracle.py",
+    "vnext/s0/research_diff.py",
+    "vnext/s0/test_research_topology_ab.py",
+    "vnext/s0/research_ab_local_sample.json",
+    "vnext/s0/functional_coverage.md",
+    "vnext/s0/topology_decision.md",
 }
 RUST_SOURCE_PATH = re.compile(
     r'\binclude(?:_str|_bytes)?!\s*\(\s*"([^"]+)"|#\s*\[\s*path\s*=\s*"([^"]+)"'
@@ -38,6 +48,9 @@ JS_SOURCE_PATH = re.compile(
 
 JS_WORKING_PATH = re.compile(
     r'''\b(?:resolve|readFile|readFileSync)\(\s*["'](\.{1,2}/[^"']+)["']'''
+)
+TS_REFERENCE_PATH = re.compile(
+    r'''///\s*<reference\s+path\s*=\s*["']([^"']+)["']'''
 )
 
 
@@ -134,16 +147,59 @@ def npm_paths(value):
         yield value.split(":", 1)[1]
 
 
+def tsconfig_paths(value):
+    """Static local paths, including aliases that have no consumer yet."""
+    if not isinstance(value, dict):
+        return
+    for key in ("extends", "include", "exclude", "files", "references"):
+        item = value.get(key)
+        if isinstance(item, str):
+            if (key != "extends" or item.startswith((".", "/", "\\"))
+                    or PureWindowsPath(item).drive):
+                yield item
+        elif isinstance(item, list):
+            for part in item:
+                if isinstance(part, str):
+                    yield part
+                elif isinstance(part, dict) and isinstance(part.get("path"), str):
+                    yield part["path"]
+    compiler = value.get("compilerOptions", {})
+    if not isinstance(compiler, dict):
+        return
+    for key in ("baseUrl", "rootDir", "outDir", "rootDirs", "typeRoots"):
+        item = compiler.get(key)
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, list):
+            yield from (part for part in item if isinstance(part, str))
+    paths = compiler.get("paths", {})
+    base_url = compiler.get("baseUrl", ".")
+    if not isinstance(base_url, str):
+        base_url = "."
+    if isinstance(paths, dict):
+        for targets in paths.values():
+            if isinstance(targets, list):
+                yield from (
+                    (part if PureWindowsPath(part).anchor else f"{base_url}/{part}")
+                    for part in targets
+                    if isinstance(part, str)
+                )
+
+
 def local_references(path):
     if path.name == "Cargo.toml":
         yield from cargo_paths(tomllib.loads(path.read_text(encoding="utf-8")))
     elif path.name in {"package.json", "package-lock.json"}:
         yield from npm_paths(json.loads(path.read_text(encoding="utf-8")))
+    elif path.name.startswith("tsconfig") and path.name.endswith(".json"):
+        yield from tsconfig_paths(json.loads(path.read_text(encoding="utf-8")))
     elif path.suffix == ".rs":
         for match in RUST_SOURCE_PATH.finditer(path.read_text(encoding="utf-8")):
             yield match[1] or match[2]
-    elif path.suffix in {".ts", ".js", ".mjs", ".cjs"}:
-        yield from JS_SOURCE_PATH.findall(path.read_text(encoding="utf-8"))
+    elif path.suffix in {".ts", ".tsx", ".js", ".mjs", ".cjs"}:
+        source = path.read_text(encoding="utf-8")
+        yield from JS_SOURCE_PATH.findall(source)
+        yield from TS_REFERENCE_PATH.findall(source)
 
 
 def check_references(repo, ownership):
@@ -155,11 +211,19 @@ def check_references(repo, ownership):
         if not path.resolve().is_relative_to(boundary):
             raise ValueError(f"{file}: file resolves outside {boundary.relative_to(repo)}")
         references = [(path.parent, ref) for ref in local_references(path)]
-        if path.suffix in {".ts", ".js", ".mjs", ".cjs"}:
+        if path.suffix in {".ts", ".tsx", ".js", ".mjs", ".cjs"}:
             working_paths = JS_WORKING_PATH.findall(path.read_text(encoding="utf-8"))
             references.extend((boundary, ref) for ref in working_paths)
         for base, ref in references:
-            if not (base / ref).resolve().is_relative_to(boundary):
+            # Linux CI must also reject Windows drive, UNC and backslash
+            # traversal paths before a Windows build can resolve them.
+            windows_path = PureWindowsPath(ref)
+            # Preserve any traversal *after* a tsconfig glob as well.
+            # Stripping at the first '*' would silently miss `src/*/../../../other`.
+            normalized = ref.replace("\\", "/").replace("*", "_glob_")
+            if windows_path.drive or windows_path.root or not (
+                base / normalized
+            ).resolve().is_relative_to(boundary):
                 raise ValueError(f"{file}: local reference escapes {owner}: {ref}")
 
 

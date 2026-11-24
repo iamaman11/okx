@@ -29,7 +29,18 @@ TEST_RESULT = re.compile(
     r"test result: (?:ok|FAILED)\.\s+(\d+) passed;\s+(\d+) failed;"
     r"\s+(\d+) ignored;\s+(\d+) measured;\s+(\d+) filtered out"
 )
-RUSTC_RUN = re.compile(r"\bRunning\b.*(?:[/\\]|\b)rustc(?:\s|[`'\"])")
+RUNNING_COMMAND = re.compile(r"^\s*Running `(?P<command>.+)`\s*$")
+# Match a standalone executable token, not `RUSTC=/path/rustc` (an env var
+# present even when Cargo is launching a build script rather than rustc).
+RUSTC_RUN = re.compile(r"(?:^|\s)['\"]?(?:[^=\s'\"]+[/\\])?rustc(?:\.exe)?['\"]?(?=\s|$)")
+RUSTDOC_RUN = re.compile(r"(?:^|\s)['\"]?(?:[^=\s'\"]+[/\\])?rustdoc(?:\.exe)?['\"]?(?=\s|$)")
+BUILD_INPUTS = (
+    "RUSTUP_TOOLCHAIN", "RUSTFLAGS", "RUSTDOCFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET",
+    "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS",
+    "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOC",
+    "CC", "CXX", "CI", "RUNNER_OS", "ImageVersion",
+)
 
 
 def source_fingerprint(workspace: Path) -> tuple[str, int]:
@@ -99,15 +110,11 @@ def environment(repo: Path | None) -> dict[str, Any]:
         "node": capture_version(["node", "--version"]),
         "npm": capture_version(["npm", "--version"]),
         "git": git_ident(repo),
-        # An explicit allowlist: never serialize credentials or all process env.
+        # Explicit allowlist of *digests*, not raw environment values. Build flags
+        # and tool paths occasionally contain sensitive host-specific material.
         "build_inputs": {
-            name: os.environ[name] for name in (
-                "RUSTUP_TOOLCHAIN", "RUSTFLAGS", "RUSTDOCFLAGS",
-                "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET",
-                "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS",
-                "RUSTC_WORKSPACE_WRAPPER", "CC", "CXX",
-                "CI", "RUNNER_OS", "ImageVersion",
-            ) if name in os.environ
+            name: hashlib.sha256(os.fsencode(os.environ[name])).hexdigest()
+            for name in BUILD_INPUTS if name in os.environ
         },
     }
 
@@ -126,6 +133,14 @@ def allowed_command(raw: str, owner: str) -> list[str]:
         "fmt", "check", "clippy", "test", "build"
     }:
         raise ValueError("Rust owner supports cargo fmt/check/clippy/test/build")
+    if argv[1] in {"check", "clippy", "test", "build"}:
+        if any(flag in argv for flag in ("-q", "--quiet")):
+            raise ValueError("Cargo quiet output hides mandatory compiler evidence")
+        # Cargo's JSON artifact events are not rustc process counts. `-vv`
+        # additionally logs Cargo-started rustc/rustdoc invocations. It does
+        # not reveal the linker's subprocesses inside rustc.
+        if not any(flag.startswith("-vv") for flag in argv):
+            argv.insert(2, "-vv")
     # `cargo fmt` has its own output and does not accept JSON cargo messages.
     if argv[1] in {"check", "clippy", "test", "build"} and not any(
         x.startswith("--message-format") for x in argv
@@ -136,7 +151,7 @@ def allowed_command(raw: str, owner: str) -> list[str]:
     return argv
 
 
-def parse_cargo_output(lines: Iterable[str]) -> dict[str, Any]:
+def parse_cargo_output(lines: Iterable[str], *, verbose_evidence: bool = False) -> dict[str, Any]:
     stats: dict[str, Any] = {
         "cargo_artifacts": 0,
         "nonfresh_artifacts": 0,
@@ -148,8 +163,10 @@ def parse_cargo_output(lines: Iterable[str]) -> dict[str, Any]:
         "tests_failed": 0,
         "tests_ignored": 0,
         # These are *not* claims of exact rustc/linker invocations.
-        "rustc_verbose_invocations": None,
+        "rustc_verbose_invocations": 0 if verbose_evidence else None,
+        "rustdoc_verbose_invocations": 0 if verbose_evidence else None,
         "linker_invocations_observed": None,
+        "linker_observation": "unknown: rustc does not report subprocess linker events",
     }
     for line in lines:
         match = TEST_RESULT.search(line)
@@ -158,10 +175,17 @@ def parse_cargo_output(lines: Iterable[str]) -> dict[str, Any]:
             stats["tests_passed"] += passed
             stats["tests_failed"] += failed
             stats["tests_ignored"] += ignored
-        if RUSTC_RUN.search(line):
-            stats["rustc_verbose_invocations"] = (
-                (stats["rustc_verbose_invocations"] or 0) + 1
-            )
+        invocation = RUNNING_COMMAND.match(line)
+        if invocation:
+            command = invocation.group("command")
+            if RUSTC_RUN.search(command):
+                stats["rustc_verbose_invocations"] = (
+                    (stats["rustc_verbose_invocations"] or 0) + 1
+                )
+            elif RUSTDOC_RUN.search(command):
+                stats["rustdoc_verbose_invocations"] = (
+                    (stats["rustdoc_verbose_invocations"] or 0) + 1
+                )
         if not line.startswith("{"):
             continue
         try:
@@ -217,7 +241,12 @@ def measure_one(workspace: Path, argv: list[str]) -> dict[str, Any]:
             elapsed = (time.monotonic_ns() - start) // 1_000_000
             out.seek(0)
             err.seek(0)
-            stats = parse_cargo_output(chain(out, err))
+            stats = parse_cargo_output(
+                chain(out, err),
+                verbose_evidence=(argv[0] == "cargo" and any(
+                    flag in argv for flag in ("-vv", "--verbose")
+                )),
+            )
     return {"command": argv, "elapsed_ms": elapsed, "exit_code": exit_code,
             "observations": stats}
 
@@ -264,39 +293,95 @@ def run(args: argparse.Namespace) -> int:
 
 def compare_records(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     problems = []
+    if (baseline.get("schema") != "okx-s0-local-measure/v1"
+            or candidate.get("schema") != "okx-s0-local-measure/v1"):
+        problems.append("unsupported measurement schema")
+    if baseline.get("owner") not in ("engine", "research", "control", "edge"):
+        problems.append("unsupported owner")
     for key in ("schema", "owner", "commands"):
         if baseline.get(key) != candidate.get(key):
             problems.append(f"different {key}")
     for key in ("platform", "machine", "rustc", "cargo", "node", "npm", "cpu_count", "build_inputs"):
-        if (baseline.get("environment") or {}).get(key) != (
-            candidate.get("environment") or {}
-        ).get(key):
+        before_env = baseline.get("environment")
+        after_env = candidate.get("environment")
+        if not isinstance(before_env, dict) or not isinstance(after_env, dict):
+            problems.append("invalid environment")
+            break
+        if before_env.get(key) != after_env.get(key):
             problems.append(f"different environment.{key}")
+    env = baseline.get("environment")
+    env = env if isinstance(env, dict) else {}
+    required_tools = ("node", "npm") if baseline.get("owner") == "edge" else ("cargo", "rustc")
+    for key in ("platform", "machine", *required_tools):
+        if not env.get(key):
+            problems.append(f"missing environment.{key}")
     if baseline.get("workspace_source_sha256") == candidate.get("workspace_source_sha256"):
         problems.append("source fingerprints identical: no meaningful source diff proven")
     if not baseline.get("all_commands_passed") or not candidate.get("all_commands_passed"):
         problems.append("one or more commands failed")
     before = baseline.get("phases", [])
     after = candidate.get("phases", [])
+    if not isinstance(before, list) or not isinstance(after, list):
+        problems.append("missing phase arrays")
+        before, after = [], []
+    commands = baseline.get("commands", [])
+    if not isinstance(commands, list):
+        problems.append("invalid command array")
+        commands = []
+    if len(before) != len(after) or len(before) != len(commands):
+        problems.append("phase count does not match command count")
     phases = []
     for i in range(min(len(before), len(after))):
+        if not isinstance(before[i], dict) or not isinstance(after[i], dict):
+            problems.append(f"invalid phase object {i}")
+            continue
+        if (before[i].get("command") != after[i].get("command")
+                or i >= len(commands) or before[i].get("command") != commands[i]):
+            problems.append(f"different phase command {i}")
+        if before[i].get("exit_code") != 0 or after[i].get("exit_code") != 0:
+            problems.append(f"failed phase {i}")
+        before_ms = before[i].get("elapsed_ms")
+        after_ms = after[i].get("elapsed_ms")
+        if (not isinstance(before_ms, int) or before_ms < 0
+                or not isinstance(after_ms, int) or after_ms < 0):
+            problems.append(f"invalid duration in phase {i}")
+            continue
+        before_observations = before[i].get("observations")
+        after_observations = after[i].get("observations")
+        if (not isinstance(before_observations, dict)
+                or not isinstance(after_observations, dict)):
+            problems.append(f"invalid observations in phase {i}")
+            continue
         phases.append({
             "command": before[i].get("command"),
-            "baseline_ms": before[i].get("elapsed_ms"),
-            "candidate_ms": after[i].get("elapsed_ms"),
-            "delta_ms": after[i].get("elapsed_ms", 0) - before[i].get("elapsed_ms", 0),
-            "baseline_cargo_nonfresh_artifacts": before[i].get("observations", {}).get("nonfresh_artifacts"),
-            "candidate_cargo_nonfresh_artifacts": after[i].get("observations", {}).get("nonfresh_artifacts"),
+            "baseline_ms": before_ms,
+            "candidate_ms": after_ms,
+            "delta_ms": after_ms - before_ms,
+            "baseline_cargo_nonfresh_artifacts": before_observations.get("nonfresh_artifacts"),
+            "candidate_cargo_nonfresh_artifacts": after_observations.get("nonfresh_artifacts"),
+            "baseline_rustc_invocations": before_observations.get("rustc_verbose_invocations"),
+            "candidate_rustc_invocations": after_observations.get("rustc_verbose_invocations"),
+            "baseline_linker_invocations": before_observations.get("linker_invocations_observed"),
+            "candidate_linker_invocations": after_observations.get("linker_invocations_observed"),
         })
+    before_total = baseline.get("total_elapsed_ms")
+    after_total = candidate.get("total_elapsed_ms")
+    if (not isinstance(before_total, int) or before_total < 0
+            or not isinstance(after_total, int) or after_total < 0):
+        problems.append("invalid total duration")
+        total_delta = None
+    else:
+        total_delta = after_total - before_total
     return {
         "schema": "okx-s0-local-compare/v1",
         "comparable": not problems,
         "invalid_reasons": problems,
         "baseline_name": baseline.get("name"),
         "candidate_name": candidate.get("name"),
-        "total_delta_ms": candidate.get("total_elapsed_ms", 0) - baseline.get("total_elapsed_ms", 0),
+        "total_delta_ms": total_delta,
         "phases": phases,
         "ready_ci_gate_proof": False,
+        "semantic_equivalence_proven": False,
     }
 
 

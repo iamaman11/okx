@@ -44,6 +44,46 @@ class Boundaries(unittest.TestCase):
             "edge",
         )
 
+    def test_tsconfig_alias_extends_and_project_reference_cannot_cross_owner(self):
+        for source in (
+            '{"extends":"../research/tsconfig.json"}',
+            '{"references":[{"path":"../control"}]}',
+            '{"compilerOptions":{"baseUrl":"src","paths":'
+            '{"@data/*":["../../research/src/*"]}}}',
+            '{"compilerOptions":{"paths":'
+            '{"@data/*":["src/*/../../../../research/src/*"]}}}',
+        ):
+            with self.subTest(source=source):
+                self.check_escape("vnext/edge/tsconfig.json", source, "edge")
+
+    def test_tsconfig_paths_respect_baseurl_inside_the_same_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            filename = "vnext/edge/tsconfig.json"
+            path = repo / filename
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                '{"compilerOptions":{"baseUrl":"src",'
+                '"paths":{"@data/*":["../src/data/*"]}}}',
+                encoding="utf-8",
+            )
+            check_references(repo, {filename: ("edge", "active", filename)})
+
+    def test_typescript_triple_slash_reference_cannot_cross_owner(self):
+        self.check_escape(
+            "vnext/edge/src/test.ts",
+            '/// <reference path="../../research/src/types.d.ts" />',
+            "edge",
+        )
+
+    def test_windows_backslash_and_drive_paths_are_rejected_on_linux(self):
+        for source in (
+            "[dev-dependencies]\nunsafe = { path = '..\\research' }\n",
+            "[build-dependencies]\nunsafe = { path = 'C:\\shared\\crate' }\n",
+        ):
+            with self.subTest(source=source):
+                self.check_escape("vnext/edge/Cargo.toml", source, "edge")
+
     def test_two_legacy_files_cannot_claim_the_same_move_target(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy-files.tsv"

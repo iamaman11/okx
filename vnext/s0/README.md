@@ -61,3 +61,55 @@ Check the tool without Rust installed:
 ```sh
 python3 -B -m unittest discover -s vnext/s0 -p 'test_*.py'
 ```
+
+## Executable topology experiments
+
+The S0 candidate comparison and its current evidence limits are tracked in
+[topology_decision.md](topology_decision.md). The functional-equivalence checklist
+is in [functional_coverage.md](functional_coverage.md). The two alternatives
+are temporary **owner-only** exports; they never edit production source, install
+an EXE, restart an account owner, or call a live trading endpoint.
+
+Run the Engine comparison on a machine with sufficient temporary disk space
+(the command compiles two independent Cargo targets and deletes its own exports
+when it finishes):
+
+```sh
+python3 -B vnext/s0/engine_topology_ab.py \
+  --engine vnext/engine \
+  --output /tmp/engine-topology-local.json
+```
+
+Both variants run the real SQLite/WAL handoff and the existing finance fake-venue
+lost-ACK/single-send witnesses, then rebuild after the same temporary
+production-source change. This is **not** the new Engine HTTP execution E2E
+or a finance-only diff. Its first non-authoritative Linux sample is preserved
+in [engine_ab_local_sample.json](engine_ab_local_sample.json).
+
+The Research export is deliberately separate from the fast oracle and the
+source-diff benchmark, allowing the same exact topology and data to be tested
+without copying any Engine code:
+
+```sh
+python3 -B vnext/s0/research_topology.py \
+  --source vnext/research --output-dir /tmp/research-s0-variants
+python3 -B vnext/s0/research_oracle.py \
+  --workspace-root /tmp/research-s0-variants
+python3 -B vnext/s0/research_diff.py \
+  --source vnext/research --workspace-root /tmp/research-s0-variants \
+  --probe kernel-only
+```
+
+Use a fresh export for the alternative `--probe adapter-only`. Both probe
+classes intentionally modify **only the disposable copies**, not the canonical
+Research source. Run the same `measure.py run --command ...` list *before and
+after* each probe and compare records only when host, toolchain, cache policy,
+commands and semantic oracle match. The first local measurements of both
+classes are recorded in [research_ab_local_sample.json](research_ab_local_sample.json).
+Do not run the heavy Engine and Research
+experiments concurrently on a shared small `/tmp` filesystem: `SQLITE_FULL`
+invalidates a finance result, it does not demonstrate a financial regression.
+
+Neither one successful isolated workflow nor a single warm local sample proves
+the protected Ready gate's ≤120 seconds, live install/rollback, Finance/OS B1 or
+four independent production runtimes. These remain **OPEN** in #569.

@@ -1,0 +1,94 @@
+{
+  "schema": "okx-s0-research-ab-local-sample/v1",
+  "ready_ci_gate_proof": false,
+  "semantic_equivalence_proven": false,
+  "recorded_replay_oracle_passed": true,
+  "source_commit": "6bd96bd922f3ae95a9fe27dbf31e01ea8a8d1990",
+  "source_tree": "64dc4d542cf5c9e94f4fd1ddea15f8901019b328",
+  "run_environment": {
+    "os": "Linux",
+    "arch": "x86_64",
+    "cpu_count": 9,
+    "rustc": "1.100.0 (0ef1bc386 2026-11-09)",
+    "cargo": "1.100.0 (3acc79c0c 2026-11-05)"
+  },
+  "measurement": {
+    "tool": "vnext/s0/measure.py",
+    "isolation": "independent temporary Research exports, own Cargo target dirs, sequential local runs",
+    "commands_in_order": [
+      "cargo test --locked --workspace -vv --message-format=json",
+      "cargo build --locked --release --bin okx-research-replay -vv --message-format=json"
+    ],
+    "before": "cold local compile of each topology",
+    "after": "one changed source file, retain that topology's compiler cache"
+  },
+  "topologies": {
+    "compact": {"cargo_workspace_packages": 1, "numeric_kernel": "embedded in replay binary crate"},
+    "split": {"cargo_workspace_packages": 2, "numeric_kernel": "independent okx-strategy-core package"}
+  },
+  "probes": [
+    {
+      "source_class": "kernel-only",
+      "source_path": "crates/okx-strategy-core/src/query_plan.rs",
+      "change": "MAX_COMPOSITION_WORK_UNITS: 64_000_000 -> 48_000_000",
+      "before_sha256": "18043bea605f6a4738e2b70364ce595bd229fdd5f065e17cd132e173b64f6ac2",
+      "after_sha256": "98922b41cb5d7a577f4f1e255c5801f680dc3db5176c9b265295d3941ede2c1a",
+      "compact": {
+        "cold_total_ms": 40826,
+        "warm_changed_total_ms": 2681,
+        "phases": [
+          {"name": "test", "cold_ms": 13136, "changed_ms": 741, "cold_rustc": 92, "changed_rustc": 2},
+          {"name": "release", "cold_ms": 22719, "changed_ms": 1562, "cold_rustc": 91, "changed_rustc": 1}
+        ]
+      },
+      "split": {
+        "cold_total_ms": 35129,
+        "warm_changed_total_ms": 3415,
+        "phases": [
+          {"name": "test", "cold_ms": 12140, "changed_ms": 721, "cold_rustc": 94, "changed_rustc": 5},
+          {"name": "release", "cold_ms": 22753, "changed_ms": 2502, "cold_rustc": 92, "changed_rustc": 2}
+        ]
+      }
+    },
+    {
+      "source_class": "adapter-only",
+      "source_path": "src/adapters/okx_candles.rs",
+      "change": "MAX_BODY: 128KiB -> 96KiB",
+      "before_sha256": "b09df4188075d112aa3dbca172dcefbd8759cfa05aa9016bf3ecc56adf3c5c18",
+      "after_sha256": "aae5c4e9d372507c2732c708e72265acfaac0ae6040b860af4f753770a862ceb",
+      "compact": {
+        "cold_total_ms": 37331,
+        "warm_changed_total_ms": 2386,
+        "phases": [
+          {"name": "test", "cold_ms": 14139, "changed_ms": 678, "cold_rustc": 92, "changed_rustc": 2},
+          {"name": "release", "cold_ms": 22961, "changed_ms": 1510, "cold_rustc": 91, "changed_rustc": 1}
+        ]
+      },
+      "split": {
+        "cold_total_ms": 33821,
+        "warm_changed_total_ms": 1757,
+        "phases": [
+          {"name": "test", "cold_ms": 11534, "changed_ms": 475, "cold_rustc": 94, "changed_rustc": 2},
+          {"name": "release", "cold_ms": 22080, "changed_ms": 1095, "cold_rustc": 92, "changed_rustc": 1}
+        ]
+      }
+    }
+  ],
+  "oracle": {
+    "both_topologies": "PASS after each probe",
+    "positive": "recorded closed 60-second bars 2.0,4.0 yield rolling_mean(2): null,3.0",
+    "negative": ["future_leak", "duplicate_bar", "missing_bar", "unknown_wire_field"],
+    "baseline_cargo_test": "PASS in both topologies, 87 tests per topology"
+  },
+  "limitations": {
+    "real_finance_or_live_trading": false,
+    "source_changes_are_benchmark_policy_probes_not_product_changes": true,
+    "replay_oracle_does_not_prove_changed_budget_or_http_size_cap_policy": true,
+    "test_runner": "local non-isolated host; no repeated p50/p95; caches may be affected by other work",
+    "cold_to_warm_speedup_is_not_topology_impact": true,
+    "linker_subprocess_invocations": null,
+    "windows_runner": false,
+    "protected_ready_gate": false,
+    "full_120_second_acceptance_proven": false
+  }
+}
