@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import re
 import shutil
@@ -60,7 +59,7 @@ def copy_owner(source: Path, destination: Path) -> None:
     )
 
 
-def make_compact(workspace: Path, cargo: str) -> None:
+def make_compact(workspace: Path) -> None:
     """Keep the real financial owner, embed only its thin command boundary."""
     command_package = workspace / "crates" / "okx-trading-engine"
     finance_package = workspace / "crates" / "okx-trade-execution"
@@ -89,14 +88,17 @@ def make_compact(workspace: Path, cargo: str) -> None:
         encoding="utf-8",
     )
     shutil.rmtree(command_package)
-    # This variant has a different workspace member list. Regenerate the lockfile
-    # from the already pinned dependency versions in an isolated, offline copy.
-    result = subprocess.run(
-        [cargo, "generate-lockfile", "--offline"], cwd=workspace,
-        capture_output=True, text=True, check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(f"compact Cargo.lock: {result.stderr[-2000:]}")
+    # Remove precisely the local package stanza; the remaining pinned finance
+    # dependencies are unchanged. A clean CI runner need not download the
+    # registry just to execute this fast structural unit test.
+    lockfile = workspace / "Cargo.lock"
+    lock = lockfile.read_text(encoding="utf-8")
+    package = ('[[package]]\nname = "okx-trading-engine"\nversion = "0.1.0"\n'
+               'dependencies = [\n "okx-trade-execution",\n "rust_decimal",\n'
+               ' "serde",\n "serde_json",\n]\n\n')
+    if lock.count(package) != 1:
+        raise ValueError("unexpected Engine lockfile; compact export requires review")
+    lockfile.write_text(lock.replace(package, ""), encoding="utf-8")
 
 
 def typed_boundary_path(workspace: Path, variant: str) -> Path:
@@ -219,7 +221,7 @@ def main() -> int:
         compact.parent.mkdir()
         copy_owner(source, split)
         copy_owner(source, compact)
-        make_compact(compact, cargo)
+        make_compact(compact)
         variants = [run_variant(cargo, compact, "compact"), run_variant(cargo, split, "split")]
     report = {
         "schema": "okx-vnext-s0-engine-topology/v1",
