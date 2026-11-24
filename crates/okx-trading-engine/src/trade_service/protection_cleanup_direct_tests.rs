@@ -2,7 +2,10 @@
 //! Inputs are independent inventory/position observations, not success flags.
 //! These tests exercise the exact durable decision called by TradeService.
 use super::*;
-use crate::accounts::native_trade_contracts::fixture::{self as native, NativeFixture};
+use crate::accounts::native_trade_contracts::{
+    filled_fixture as filled,
+    fixture::{self as native, NativeFixture},
+};
 use okx_api::{PendingDerivativeAlgoRiskInventory, PendingProtectiveAlgoSample};
 const INST: &str = "BTC-USDT-SWAP";
 const ALGO: &str = "owned-protection-001";
@@ -12,13 +15,29 @@ struct Fixture {
     native: NativeFixture,
 }
 async fn fixture() -> Fixture {
-    // pc_01..pc_06 test the original SQL owner's durable cleanup BEGIN and
-    // readback, which depend on a connected account/ExecutionStore, not on
-    // TradeService's unrelated campaign-opening maintenance scheduler.
-    // native::fixture still verifies private identity, source cursors,
-    // governance and the real SQL owner; pc_07 separately proves the full
-    // market/maintenance/HTTP cancellation flow on its original path.
-    let native = native::fixture().await;
+    // Even a direct durable BEGIN needs the SQL owner's original verified
+    // campaign opening. Reuse the already exercised production bootstrap
+    // instead of a second maintenance polling loop or an artificial source
+    // refresh; pc_07 uses the same path for signed HTTP cancellation.
+    let mut native = native::fixture().await;
+    let (market_stop, market_task, _socket, _public) = filled::opened_market(&mut native).await;
+    // No market observations are needed after bootstrap for these six direct
+    // SQL contracts. Stop and join the public fixture before testing BEGIN.
+    market_stop.send(true).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), market_task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        native
+            .owner
+            .campaign_summary(native.campaign.clone())
+            .await
+            .unwrap()
+            .opening
+            .is_some(),
+        "verified campaign opening is mandatory for direct SQL cleanup"
+    );
     let store = native._account.execution.store.clone();
     Fixture { store, native }
 }
@@ -424,7 +443,6 @@ async fn pc_06_two_callers_share_one_begin_and_old_read_never_confirms() {
 #[tokio::test]
 async fn pc_07_recorded_signed_http_cancel_ack_readback_and_sql_receipt() {
     use crate::account_bootstrap::AccountBootstrapper;
-    use crate::accounts::native_trade_contracts::filled_fixture as filled;
     use crate::accounts::recorded_support::{RecordedAccountHttp, RecordedGet, RecordedPost};
     use okx_api::{
         Credentials, HttpTransport, OkxEnvironment, OkxRestClient, RateBudget, Region, TradeApi,
