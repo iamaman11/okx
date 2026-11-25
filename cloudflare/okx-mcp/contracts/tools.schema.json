@@ -286,163 +286,172 @@
           },
           {
             "properties": {
-              "action": {
-                "const": "create"
-              },
               "idempotency_key": {
-                "$ref": "#/$defs/k"
-              },
-              "instance_id": {
-                "$ref": "#/$defs/s"
-              },
-              "definition_id": {
-                "$ref": "#/$defs/s"
-              },
-              "version": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 1
-              },
-              "parameters": {
-                "$ref": "#/$defs/h"
-              },
-              "instruments": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/s"
-                },
-                "maxItems": 32,
-                "uniqueItems": true
-              },
-              "timeframe_ms": {
-                "type": "integer",
-                "minimum": 1000,
-                "maximum": 9007199254740991
-              },
-              "budget_usd": {
-                "$ref": "#/$defs/d"
-              }
-            },
-            "required": [
-              "action",
-              "idempotency_key",
-              "instance_id",
-              "definition_id",
-              "version",
-              "parameters",
-              "instruments",
-              "timeframe_ms",
-              "budget_usd"
-            ]
-          },
-          {
-            "properties": {
-              "action": {
-                "const": "update"
-              },
-              "idempotency_key": {
-                "$ref": "#/$defs/k"
-              },
-              "instance_id": {
-                "$ref": "#/$defs/s"
-              },
-              "expected_revision": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
-              },
-              "parameters": {
-                "$ref": "#/$defs/h"
-              },
-              "budget_usd": {
-                "$ref": "#/$defs/d"
-              }
-            },
-            "required": [
-              "action",
-              "idempotency_key",
-              "instance_id",
-              "expected_revision",
-              "parameters",
-              "budget_usd"
-            ]
-          },
-          {
-            "properties": {
-              "action": {
-                "const": "start"
-              },
-              "idempotency_key": {
-                "$ref": "#/$defs/k"
-              },
-              "instance_id": {
-                "$ref": "#/$defs/s"
-              },
-              "expected_revision": {
-                "$ref": "#/$defs/n"
-              },
-              "configuration_digest": {
                 "type": "string",
-                "pattern": "^[0-9a-f]{64}$"
-              }
-            },
-            "required": [
-              "action",
-              "idempotency_key",
-              "instance_id",
-              "expected_revision",
-              "configuration_digest"
-            ]
-          },
-          {
-            "properties": {
-              "action": {
-                "const": "stop"
-              },
-              "idempotency_key": {
-                "$ref": "#/$defs/k"
+                "minLength": 8,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
               },
               "instance_id": {
                 "$ref": "#/$defs/s"
               }
             },
             "required": [
-              "action",
               "idempotency_key",
               "instance_id"
-            ]
-          },
-          {
-            "properties": {
-              "action": {
-                "const": "capital_assign"
-              },
-              "idempotency_key": {
-                "$ref": "#/$defs/k"
-              },
-              "instance_id": {
-                "$ref": "#/$defs/s"
-              },
-              "direction": {
-                "enum": [
-                  "assign",
-                  "release"
+            ],
+            "oneOf": [
+              {
+                "properties": {
+                  "action": {
+                    "const": "create"
+                  },
+                  "definition_id": {
+                    "$ref": "#/$defs/s"
+                  },
+                  "version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1
+                  },
+                  "parameters": {
+                    "$ref": "#/$defs/h"
+                  },
+                  "instruments": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/s"
+                    },
+                    "maxItems": 32,
+                    "uniqueItems": true
+                  },
+                  "timeframe_ms": {
+                    "$ref": "#/$defs/f"
+                  },
+                  "budget_usd": {
+                    "$ref": "#/$defs/d"
+                  }
+                },
+                "required": [
+                  "action",
+                  "definition_id",
+                  "version",
+                  "parameters",
+                  "instruments",
+                  "timeframe_ms",
+                  "budget_usd"
                 ]
               },
-              "amount_usd": {
-                "$ref": "#/$defs/d"
+              {
+                "properties": {
+                  "action": {
+                    "const": "update"
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "parameters": {
+                    "$ref": "#/$defs/h"
+                  },
+                  "budget_usd": {
+                    "$ref": "#/$defs/d"
+                  },
+                  "instruments": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/s"
+                    },
+                    "maxItems": 32,
+                    "uniqueItems": true,
+                    "minItems": 1
+                  },
+                  "timeframe_ms": {
+                    "$ref": "#/$defs/f"
+                  }
+                },
+                "required": [
+                  "action",
+                  "expected_revision",
+                  "parameters",
+                  "budget_usd"
+                ]
               },
-              "expected_authority_revision": {
-                "$ref": "#/$defs/n"
+              {
+                "properties": {
+                  "action": {
+                    "const": "restore_configuration"
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 9007199254740991
+                  },
+                  "source_revision": {
+                    "$ref": "#/$defs/n"
+                  }
+                },
+                "required": [
+                  "action",
+                  "expected_revision",
+                  "source_revision"
+                ]
+              },
+              {
+                "properties": {
+                  "action": {
+                    "const": "start"
+                  },
+                  "expected_revision": {
+                    "$ref": "#/$defs/n"
+                  },
+                  "configuration_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "action",
+                  "expected_revision",
+                  "configuration_digest"
+                ]
+              },
+              {
+                "properties": {
+                  "action": {
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              {
+                "properties": {
+                  "action": {
+                    "const": "capital_assign"
+                  },
+                  "direction": {
+                    "enum": [
+                      "assign",
+                      "release"
+                    ]
+                  },
+                  "amount_usd": {
+                    "$ref": "#/$defs/d"
+                  },
+                  "expected_authority_revision": {
+                    "$ref": "#/$defs/n"
+                  }
+                },
+                "required": [
+                  "action",
+                  "direction",
+                  "amount_usd",
+                  "expected_authority_revision"
+                ]
               }
-            },
-            "required": [
-              "action",
-              "idempotency_key",
-              "instance_id",
-              "direction",
-              "amount_usd",
-              "expected_authority_revision"
             ]
           }
         ],
@@ -457,15 +466,14 @@
             "minLength": 1,
             "maxLength": 64
           },
-          "k": {
-            "type": "string",
-            "minLength": 8,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9_-]+$"
-          },
           "n": {
             "type": "integer",
             "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "f": {
+            "type": "integer",
+            "minimum": 1000,
             "maximum": 9007199254740991
           },
           "h": {

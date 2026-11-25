@@ -117,6 +117,16 @@ pub enum StrategyRequest {
         expected_revision: u64,
         parameters: serde_json::Value,
         budget_usd: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instruments: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeframe_ms: Option<u64>,
+    },
+    RestoreConfiguration {
+        idempotency_key: String,
+        instance_id: String,
+        expected_revision: u64,
+        source_revision: u64,
     },
     Start {
         idempotency_key: String,
@@ -522,6 +532,18 @@ impl StrategyRequest {
                 idempotency_key,
                 instance_id,
             } => id(idempotency_key) && name(instance_id),
+            Self::RestoreConfiguration {
+                idempotency_key,
+                instance_id,
+                expected_revision,
+                source_revision,
+            } => {
+                id(idempotency_key)
+                    && name(instance_id)
+                    && instance_id != "manual"
+                    && *source_revision > 0
+                    && source_revision < expected_revision
+            }
             Self::Create {
                 idempotency_key,
                 instance_id,
@@ -549,6 +571,8 @@ impl StrategyRequest {
                 instance_id,
                 parameters,
                 budget_usd,
+                instruments,
+                timeframe_ms,
                 ..
             } => {
                 id(idempotency_key)
@@ -556,6 +580,10 @@ impl StrategyRequest {
                     && StrategyParametersV1::parse(parameters).is_some()
                     && parameters.to_string().len() <= 4096
                     && decimal(budget_usd)
+                    && instruments.as_ref().is_none_or(|values| {
+                        !values.is_empty() && values.len() <= 32 && values.iter().all(|v| name(v))
+                    })
+                    && timeframe_ms.is_none_or(|value| value >= 1000)
             }
         }
     }

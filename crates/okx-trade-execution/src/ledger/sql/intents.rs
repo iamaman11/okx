@@ -1872,6 +1872,9 @@ impl AccountStore {
         if revision != policy_revision || current != revision {
             return Err(StoreError::Invalid("POLICY_CHANGED"));
         }
+        if let Some(scope) = scope {
+            Self::verify_strategy_send_sql(tx, scope, id)?;
+        }
         if increase {
             let strategy_sql = if scope.is_some() {
                 "SELECT EXISTS(SELECT 1 FROM intent_plans p

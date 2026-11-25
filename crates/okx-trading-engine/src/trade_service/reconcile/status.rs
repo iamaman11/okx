@@ -964,7 +964,7 @@ impl TradeService {
                 .map(|(side, quantity)| (side.as_str(), *quantity)),
         )?;
         let key = format!("safety_close_{}", i.client_order_id);
-        let outcome = Box::pin(self.close(r, &key, &i.intent_id, 2000, None)).await?;
+        let outcome = Box::pin(self.close(r, &key, &i.intent_id, 2000, None, None)).await?;
         Ok(json!({
             "kind":"source_bound_close",
             "intent_id":i.intent_id,

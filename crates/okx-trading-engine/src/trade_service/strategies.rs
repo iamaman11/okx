@@ -108,6 +108,9 @@ impl TradeService {
                 }
                 | StrategyRequest::Stop {
                     idempotency_key, ..
+                }
+                | StrategyRequest::RestoreConfiguration {
+                    idempotency_key, ..
                 } => idempotency_key,
                 _ => {
                     return Err(okx_trade_execution::StoreError::Invalid(
@@ -183,6 +186,8 @@ impl TradeService {
                     expected_revision,
                     parameters,
                     budget_usd,
+                    instruments,
+                    timeframe_ms,
                 } => {
                     let mut i = instances
                         .iter()
@@ -198,6 +203,12 @@ impl TradeService {
                     config.parameters = StrategyParametersV1::parse(parameters).ok_or(
                         okx_trade_execution::StoreError::Invalid("STRATEGY_PARAMETERS_INVALID"),
                     )?;
+                    if let Some(instruments) = instruments {
+                        config.instruments.clone_from(instruments);
+                    }
+                    if let Some(timeframe_ms) = timeframe_ms {
+                        config.timeframe_ms = *timeframe_ms;
+                    }
                     if !config.valid() {
                         return Err(okx_trade_execution::StoreError::Invalid(
                             "STRATEGY_CONFIGURATION_INVALID",
@@ -218,6 +229,45 @@ impl TradeService {
                                 "INSTANCE_REVISION_OVERFLOW",
                             ))?;
                     (idempotency_key.clone(), "update", i, Some(expected))
+                }
+                StrategyRequest::RestoreConfiguration {
+                    idempotency_key,
+                    instance_id,
+                    expected_revision,
+                    source_revision,
+                } => {
+                    use okx_trade_execution::StoreError;
+                    let expected = i64::try_from(*expected_revision)
+                        .map_err(|_| StoreError::Invalid("INSTANCE_REVISION_CONFLICT"))?;
+                    let source = i64::try_from(*source_revision)
+                        .map_err(|_| StoreError::Invalid("STRATEGY_RESTORE_REVISION_INVALID"))?;
+                    let (owner, account) = r.execution.store.scope();
+                    let mut archived = owner
+                        .strategy_configuration_at_revision(
+                            deadline(),
+                            account.to_owned(),
+                            instance_id.clone(),
+                            source,
+                        )
+                        .await?;
+                    if !strategy_signal::supports_definition(&archived.definition_id) {
+                        return Err(StoreError::Invalid("STRATEGY_DEFINITION_UNSUPPORTED"));
+                    }
+                    let config: StrategyConfigurationV1 =
+                        serde_json::from_str(&archived.parameters)
+                            .map_err(|_| StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT"))?;
+                    if !config.valid() {
+                        return Err(StoreError::Invalid("STRATEGY_CONFIGURATION_INVALID"));
+                    }
+                    archived.policy_revision = expected
+                        .checked_add(1)
+                        .ok_or(StoreError::Invalid("INSTANCE_REVISION_OVERFLOW"))?;
+                    (
+                        idempotency_key.clone(),
+                        "restore_configuration",
+                        archived,
+                        Some(expected),
+                    )
                 }
                 StrategyRequest::Start {
                     idempotency_key,
@@ -305,6 +355,12 @@ impl TradeService {
                 } => Some(configuration_digest.clone()),
                 _ => None,
             };
+            let restore_revision = match &body {
+                StrategyRequest::RestoreConfiguration {
+                    source_revision, ..
+                } => i64::try_from(*source_revision).ok(),
+                _ => None,
+            };
             r.execution
                 .store
                 .mutate_strategy_instance(
@@ -316,6 +372,7 @@ impl TradeService {
                         instance,
                         expected_revision: expected,
                         confirmed_configuration_digest,
+                        restore_revision,
                         time: now(),
                     },
                 )
@@ -335,6 +392,15 @@ impl TradeService {
                     "committed_at": receipt.committed_at,
                     "confirmed_revision": instance.policy_revision - 1,
                     "configuration_digest": digest,
+                });
+            } else if let StrategyRequest::RestoreConfiguration {
+                source_revision, ..
+            } = request
+            {
+                reply["configuration_restore_receipt"] = json!({
+                    "operation_id": receipt.operation_id,
+                    "committed_at": receipt.committed_at,
+                    "source_revision": source_revision,
                 });
             }
         }
@@ -553,6 +619,7 @@ impl TradeService {
                 input_digest: decision_digest,
                 policy_revision: revision,
                 expected_version: instance.definition_version.clone(),
+                activation_revision: instance.policy_revision,
                 time: decision_time,
             };
             let claimed = r
@@ -605,7 +672,14 @@ impl TradeService {
                             &digest(&(decision_key.clone(), reference))?[..32]
                         );
                         let _ = self
-                            .close(r, &close_key, reference, 10000, Some(&state))
+                            .close(
+                                r,
+                                &close_key,
+                                reference,
+                                10000,
+                                Some(&state),
+                                Some(instance),
+                            )
                             .await?;
                     }
                 }
@@ -657,13 +731,16 @@ impl TradeService {
                 expires_in_ms: 10000,
             };
             let _ = self
-                .execute_for_definition(
+                .execute_inner(
                     r,
                     &command,
                     Some(&state),
-                    instance.definition_version.clone(),
-                    input_for_execute,
-                    claimed_decision_id,
+                    None,
+                    Some(super::execute::StrategyDispatch {
+                        revision: instance.policy_revision,
+                        definition_version: instance.definition_version.clone(),
+                        opening_claim: Some((input_for_execute, claimed_decision_id)),
+                    }),
                 )
                 .await?;
         }

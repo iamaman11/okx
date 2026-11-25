@@ -337,6 +337,15 @@ for(const action of ['backtest','grid']) {
 
 
 const capitalAction=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='capital_assign')!.positive;
+const restore=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='restore_configuration')!;
+for(const invalid of [
+ {...restore.positive,source_revision:restore.positive.expected_revision},
+ {...restore.positive,instance_id:'manual'},
+ {...restore.positive,source_instance:'other'},
+]){
+ fail(!validTool('strategies',invalid),'invalid or foreign strategy restoration must be rejected');
+ restore.negative.push(invalid);
+}
 for(const invalid of [
  {...capitalAction,amount_usd:'0'},
  {...capitalAction,amount_usd:'-10'},
@@ -386,7 +395,12 @@ for(const tool of PUBLIC_TOOLS as any[]){
   fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
     'native protocol never accepts host-only link selector');
  }else{
-  const variants=tool.name==='strategies'?expanded.oneOf.map((branch:any)=>({
+  const strategyBranches=tool.name==='strategies'?expanded.oneOf.flatMap((branch:any)=>
+   branch.oneOf?branch.oneOf.map((action:any)=>({
+    properties:{action:action.properties.action,...branch.properties,...action.properties},
+    required:['action',...branch.required,...action.required.filter((key:string)=>key!=='action')],
+   })): [branch]):[];
+  const variants=tool.name==='strategies'?strategyBranches.map((branch:any)=>({
     properties:{action:branch.properties.action,account:expanded.properties.account,...branch.properties},
     required:['action','account',...branch.required.filter((key:string)=>key!=='action')],
     additionalProperties:false,

@@ -398,6 +398,69 @@
   },
   {
     "tool": "strategies",
+    "action": "restore_configuration",
+    "positive": {
+      "action": "restore_configuration",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture",
+      "expected_revision": 2,
+      "source_revision": 1
+    },
+    "negative": [
+      {
+        "action": "restore_configuration",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 2,
+        "source_revision": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 2,
+        "source_revision": 1
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 2,
+        "source_revision": 1
+      },
+      {
+        "action": "restore_configuration",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 2,
+        "source_revision": 2
+      },
+      {
+        "action": "restore_configuration",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "manual",
+        "expected_revision": 2,
+        "source_revision": 1
+      },
+      {
+        "action": "restore_configuration",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 2,
+        "source_revision": 1,
+        "source_instance": "other"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
     "action": "start",
     "positive": {
       "action": "start",

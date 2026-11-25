@@ -292,11 +292,12 @@ if(nativeReadCount!==100||maxInFlightRead<2||hundred.length!==100||
  throw Error('100 concurrent Worker read-only fixture requests lost or incorrectly projected');
 console.log('worker_100_concurrent_readonly_fixture PASS 100 native fixture reads zero real POST');
 
-// Eleven real Worker MCP routes through an in-memory DO with NO exchange access.
+// Worker MCP mutation routes through an in-memory DO with NO exchange access.
 // Success and business refusal: route fidelity, identity, retries, bounded shell.
 const fakeMutationActions:[string,string][]=[
  ['accounts','connect'],['accounts','pause'],['accounts','resume'],['accounts','set_limits'],
  ['strategies','create'],['strategies','update'],['strategies','start'],['strategies','stop'],
+ ['strategies','restore_configuration'],
  ['trade','execute'],['trade','cancel'],['trade','close'],
 ];
 for(const [tool,action] of fakeMutationActions){
@@ -356,7 +357,7 @@ for(const [tool,action] of fakeMutationActions){
   }else if(visits.length!==1)throw Error('mutation dispatched repeatedly '+tool+'.'+action);
  }
 }
-console.log('mcp_fake_venue_mutation_routes PASS 11 actions positive/negative 0 real exchange POST');
+console.log(`mcp_fake_venue_mutation_routes PASS ${fakeMutationActions.length} actions positive/negative 0 real exchange POST`);
 
 const connectFixture=payloadFixtures.find(x=>x.tool==='accounts'&&x.action==='connect')!;
 const attachArgs={...connectFixture.positive,enabled:false};

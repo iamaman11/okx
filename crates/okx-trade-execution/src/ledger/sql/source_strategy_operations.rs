@@ -1,6 +1,68 @@
 //! Original strategy projections and decision journal on one account-scoped snapshot.
 use super::super::*;
 impl AccountStore {
+    pub(crate) fn verify_strategy_activation_sql(
+        db: &Connection,
+        scope: (&str, &str),
+        instance_id: &str,
+        activation_revision: i64,
+    ) -> StoreResult<()> {
+        let current = Self::instance_sql(db, Some(scope), instance_id)?
+            .ok_or(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;
+        if !current.enabled {
+            return Err(StoreError::Invalid("STRATEGY_STOPPED"));
+        }
+        if current.policy_revision != activation_revision {
+            return Err(StoreError::Invalid("STRATEGY_ACTIVATION_CHANGED"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_strategy_send_sql(
+        tx: &rusqlite::Transaction<'_>,
+        scope: (&str, &str),
+        intent: &StoredIntent,
+        activation_revision: i64,
+        now: i64,
+    ) -> StoreResult<()> {
+        let operation = format!("strategy-send:{}", intent.intent_id);
+        Self::insert_strategy_receipt_sql(
+            tx,
+            Some(scope),
+            &operation,
+            "STRATEGY_SEND_ACTIVATION",
+            &intent.request_hash,
+            &activation_revision.to_string(),
+            now,
+        )
+    }
+
+    pub(crate) fn verify_strategy_send_sql(
+        tx: &rusqlite::Transaction<'_>,
+        scope: (&str, &str),
+        intent_id: &str,
+    ) -> StoreResult<()> {
+        let operation = format!("strategy-send:{intent_id}");
+        let Some(receipt) = Self::operation_sql(tx, Some(scope), &operation)? else {
+            return Ok(());
+        };
+        let (instance, hash): (String, String) = tx.query_row(
+            "SELECT p.strategy_instance,i.request_hash FROM intent_plans p
+             JOIN intents i USING(installation_id,account_key,intent_id)
+             WHERE p.installation_id=?1 AND p.account_key=?2 AND p.intent_id=?3",
+            params![scope.0, scope.1, intent_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if receipt.kind != "STRATEGY_SEND_ACTIVATION" || receipt.request_hash != hash {
+            return Err(StoreError::Invalid("STRATEGY_SEND_ACTIVATION_CORRUPT"));
+        }
+        let activation_revision = receipt
+            .result_ref
+            .parse()
+            .map_err(|_| StoreError::Invalid("STRATEGY_SEND_ACTIVATION_CORRUPT"))?;
+        Self::verify_strategy_activation_sql(tx, scope, &instance, activation_revision)
+    }
+
     pub(crate) fn strategy_status_sql(
         db: &Connection,
         scope: Option<(&str, &str)>,

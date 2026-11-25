@@ -150,6 +150,7 @@ pub(super) async fn fresh_at(root: PathBuf) -> UnifiedFinanceHandle {
                 },
                 expected_revision: None,
                 confirmed_configuration_digest: None,
+                restore_revision: None,
                 time: 101,
             },
         )
@@ -206,6 +207,7 @@ async fn strategy_confirmation_is_checked_in_sql_and_receipt_replays_after_reope
         instance: proposed,
         expected_revision: Some(1),
         confirmed_configuration_digest: Some("0".repeat(64)),
+        restore_revision: None,
         time: 102,
     };
     assert!(matches!(

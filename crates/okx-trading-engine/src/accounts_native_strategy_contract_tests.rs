@@ -100,6 +100,16 @@ async fn risk_book_contract_native_public_strategies_crud_claim_no_trade_share_o
     assert_eq!(started["enabled"], true);
     assert_eq!(started["policy_revision"], 2);
     assert_eq!(started["definition_version"], version);
+    let active_restore = StrategyRequest::RestoreConfiguration {
+        idempotency_key: "native_strategy_restore_active".into(),
+        instance_id: INSTANCE.into(),
+        expected_revision: 2,
+        source_revision: 1,
+    };
+    assert_eq!(
+        request(&fixture, &active_restore).await.unwrap_err(),
+        "STRATEGY_RESTORE_REQUIRES_STOPPED"
+    );
     assert_eq!(
         request(&fixture, &start).await.unwrap()["data"]["instance"],
         started
@@ -113,6 +123,7 @@ async fn risk_book_contract_native_public_strategies_crud_claim_no_trade_share_o
         input_digest: "closed-bars-inputs".into(),
         policy_revision: i64::try_from(fixture.authority.state.revision).unwrap(),
         expected_version: version.clone(),
+        activation_revision: 2,
         time: jiff::Timestamp::now().as_millisecond(),
     };
     let decision = account
@@ -189,6 +200,8 @@ async fn risk_book_contract_native_public_strategies_crud_claim_no_trade_share_o
         expected_revision: 3,
         parameters: json!({"fast":5,"slow":30}),
         budget_usd: "3".into(),
+        instruments: Some(vec!["ETH-USDT-SWAP".into()]),
+        timeframe_ms: Some(300_000),
     };
     let updated = request(&fixture, &update)
         .await
@@ -217,11 +230,57 @@ async fn risk_book_contract_native_public_strategies_crud_claim_no_trade_share_o
         request(&fixture, &start).await.unwrap()["data"]["instance"],
         started
     );
+    let restore = StrategyRequest::RestoreConfiguration {
+        idempotency_key: "native_strategy_restore".into(),
+        instance_id: INSTANCE.into(),
+        expected_revision: 4,
+        source_revision: 1,
+    };
+    let restored_reply = request(&fixture, &restore).await.unwrap();
+    let restored = &restored_reply["data"]["instance"];
+    assert_eq!(restored["policy_revision"], 5);
+    assert_eq!(restored["enabled"], false);
+    for field in [
+        "definition_id",
+        "definition_version",
+        "parameters",
+        "budget",
+    ] {
+        assert_eq!(
+            restored[field], created[field],
+            "configuration field {field}"
+        );
+    }
+    assert_eq!(restored["last_decision_key"], claim.decision_key);
+    assert_eq!(
+        restored_reply["data"]["configuration_digest"],
+        initial_status["data"]["configuration_digest"]
+    );
+    assert_eq!(
+        request(&fixture, &restore).await.unwrap()["data"],
+        restored_reply["data"]
+    );
+    assert_eq!(
+        restored_reply["data"]["configuration_restore_receipt"]["source_revision"],
+        1
+    );
+    let mut stale_restore = restore.clone();
+    if let StrategyRequest::RestoreConfiguration {
+        idempotency_key, ..
+    } = &mut stale_restore
+    {
+        *idempotency_key = "native_strategy_restore_stale".into();
+    }
+    assert_eq!(
+        request(&fixture, &stale_restore).await.unwrap_err(),
+        "INSTANCE_REVISION_CONFLICT"
+    );
+
     let final_status = request(&fixture, &status).await.unwrap();
-    assert_eq!(final_status["data"]["instance"], updated);
+    assert_eq!(&final_status["data"]["instance"], restored);
     assert_eq!(
         final_status["data"]["definition"]["version"],
-        updated["definition_version"]
+        restored["definition_version"]
     );
     let stored = fixture
         .owner
@@ -233,9 +292,36 @@ async fn risk_book_contract_native_public_strategies_crud_claim_no_trade_share_o
         .unwrap();
     assert_eq!(
         stored.definition_version,
-        updated["definition_version"].as_str().unwrap()
+        restored["definition_version"].as_str().unwrap()
     );
-    assert_eq!(stored.policy_revision, 4);
+    assert_eq!(stored.policy_revision, 5);
+    let reactivation = StrategyRequest::Start {
+        idempotency_key: "native_strategy_reactivate_restored".into(),
+        instance_id: INSTANCE.into(),
+        expected_revision: 5,
+        configuration_digest: restored_reply["data"]["configuration_digest"]
+            .as_str()
+            .unwrap()
+            .into(),
+    };
+    let reactivated = request(&fixture, &reactivation).await.unwrap();
+    assert_eq!(reactivated["data"]["instance"]["policy_revision"], 6);
+    assert_eq!(reactivated["data"]["instance"]["enabled"], true);
+    assert!(
+        account
+            .execution
+            .store
+            .claim_strategy_decision(
+                deadline(),
+                okx_trade_execution::account_worker::StrategyDecisionClaimCommand {
+                    activation_revision: 6,
+                    ..claim
+                },
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         fixture
             .owner

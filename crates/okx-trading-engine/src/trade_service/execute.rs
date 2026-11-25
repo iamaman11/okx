@@ -1,5 +1,11 @@
 use super::census::*;
 use super::*;
+
+pub(super) struct StrategyDispatch {
+    pub revision: i64,
+    pub definition_version: String,
+    pub opening_claim: Option<(String, String)>,
+}
 use okx_api::{
     ApiOrderSide, ApiOrderType, ApiPositionSide, ApiTradeMode, ApiTriggerPriceType,
     AttachedAlgoOrderRequest, PlaceOrderRequest,
@@ -699,37 +705,25 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
     ) -> Result<Value, String> {
-        self.execute_inner(r, request, supplied, bound_hash, None, None)
+        self.execute_inner(r, request, supplied, bound_hash, None)
             .await
     }
-    pub(super) async fn execute_for_definition(
-        &self,
-        r: &Arc<AccountResources>,
-        request: &TradeRequest,
-        supplied: Option<&CentralGovernanceSnapshot>,
-        version: String,
-        decision_digest: String,
-        claimed_decision_id: String,
-    ) -> Result<Value, String> {
-        self.execute_inner(
-            r,
-            request,
-            supplied,
-            None,
-            Some(version),
-            Some((decision_digest, claimed_decision_id)),
-        )
-        .await
-    }
-    async fn execute_inner(
+    pub(super) async fn execute_inner(
         &self,
         r: &Arc<AccountResources>,
         request: &TradeRequest,
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
-        expected_definition: Option<String>,
-        claimed_decision: Option<(String, String)>,
+        strategy: Option<StrategyDispatch>,
     ) -> Result<Value, String> {
+        let (activation_revision, expected_definition, claimed_decision) = match strategy {
+            Some(strategy) => (
+                Some(strategy.revision),
+                Some(strategy.definition_version),
+                strategy.opening_claim,
+            ),
+            None => (None, None, None),
+        };
         let TradeRequest::Execute {
             idempotency_key,
             operation,
@@ -945,7 +939,13 @@ impl TradeService {
                 let (owner, account) = r.execution.store.scope();
 
                 owner
-                    .prepare_admission(until, account.to_owned(), decision, intent)
+                    .prepare_admission_with_activation(
+                        until,
+                        account.to_owned(),
+                        decision,
+                        intent,
+                        activation_revision,
+                    )
                     .await
                     .map_err(err)?
             }

@@ -1,6 +1,39 @@
 //! Same original strategy mutation and immutable definition rules, scoped SQL.
 use super::super::*;
 impl AccountStore {
+    pub(crate) fn strategy_configuration_at_revision_sql(
+        db: &Connection,
+        scope: (&str, &str),
+        instance_id: &str,
+        revision: i64,
+    ) -> StoreResult<StrategyInstance> {
+        Self::verify_source_account_sql(db, scope.0, scope.1)?;
+        let mut query = db.prepare(
+            "SELECT result_ref FROM operation_receipts
+             WHERE installation_id=?1 AND account_key=?2
+               AND kind IN ('STRATEGY_create','STRATEGY_update','STRATEGY_start',
+                            'STRATEGY_stop','STRATEGY_restore_configuration')
+               AND CASE WHEN json_valid(result_ref) THEN
+                    json_extract(result_ref,'$.instance_id')=?3
+                    AND json_extract(result_ref,'$.policy_revision')=?4
+               ELSE 0 END LIMIT 2",
+        )?;
+        let mut rows = query.query(params![scope.0, scope.1, instance_id, revision])?;
+        let snapshot: String = rows
+            .next()?
+            .ok_or(StoreError::Invalid(
+                "STRATEGY_CONFIGURATION_REVISION_NOT_FOUND",
+            ))?
+            .get(0)?;
+        if rows.next()?.is_some() {
+            return Err(StoreError::Invalid(
+                "STRATEGY_CONFIGURATION_HISTORY_AMBIGUOUS",
+            ));
+        }
+        serde_json::from_str(&snapshot)
+            .map_err(|_| StoreError::Invalid("STRATEGY_CONFIGURATION_HISTORY_CORRUPT"))
+    }
+
     pub(crate) fn instances_sql(
         db: &Connection,
         scope: Option<(&str, &str)>,
@@ -113,8 +146,10 @@ impl AccountStore {
             }
             return Ok(old);
         }
-        if !matches!(action, "create" | "update" | "start" | "stop")
-            || instance.budget < Decimal::ZERO
+        if !matches!(
+            action,
+            "create" | "update" | "start" | "stop" | "restore_configuration"
+        ) || instance.budget < Decimal::ZERO
         {
             return Err(StoreError::Invalid("INVALID_INSTANCE_MUTATION"));
         }
@@ -130,6 +165,9 @@ impl AccountStore {
         }
         if scope.is_some() && action == "update" && prior.as_ref().is_some_and(|i| i.enabled) {
             return Err(StoreError::Invalid("STRATEGY_UPDATE_REQUIRES_STOPPED"));
+        }
+        if action == "restore_configuration" && prior.as_ref().is_some_and(|i| i.enabled) {
+            return Err(StoreError::Invalid("STRATEGY_RESTORE_REQUIRES_STOPPED"));
         }
         let next_revision = prior
             .as_ref()
@@ -154,7 +192,7 @@ impl AccountStore {
         committed.last_decision_key = prior.as_ref().and_then(|i| i.last_decision_key.clone());
         committed.enabled = match action {
             "start" => true,
-            "stop" => false,
+            "stop" | "restore_configuration" => false,
             _ => committed.enabled,
         };
         let prior_definition = prior
@@ -166,7 +204,39 @@ impl AccountStore {
             d.definition_id != candidate.definition_id
                 || d.parameters_digest != candidate.parameters_digest
         });
-        let definition = if changed {
+        let definition = if action == "restore_configuration" {
+            let (installation, account) =
+                scope.ok_or(StoreError::Invalid("STRATEGY_RESTORE_SCOPE_REQUIRED"))?;
+            let original_revision = committed
+                .definition_version
+                .split_once('-')
+                .and_then(|(revision, _)| revision.parse().ok())
+                .ok_or(StoreError::Invalid(
+                    "STRATEGY_CONFIGURATION_DEFINITION_UNAVAILABLE",
+                ))?;
+            let restored =
+                super::definitions::canonical_definition(&committed, original_revision, now)?;
+            let present: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM strategy_definition_versions
+                 WHERE installation_id=?1 AND account_key=?2 AND definition_id=?3 AND version=?4
+                   AND parameters_digest=?5 AND parameters=?6)",
+                params![
+                    installation,
+                    account,
+                    restored.definition_id,
+                    restored.version,
+                    restored.parameters_digest,
+                    restored.parameters
+                ],
+                |row| row.get(0),
+            )?;
+            if !present || restored.version != committed.definition_version {
+                return Err(StoreError::Invalid(
+                    "STRATEGY_CONFIGURATION_DEFINITION_UNAVAILABLE",
+                ));
+            }
+            restored
+        } else if changed {
             let revision = if let Some(old) = &prior_definition {
                 old.version
                     .split('-')
@@ -228,7 +298,7 @@ impl AccountStore {
         if changed != 1 {
             return Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"));
         }
-        if matches!(action, "create" | "update") {
+        if matches!(action, "create" | "update" | "restore_configuration") {
             let delta = committed
                 .budget
                 .checked_sub(prior.as_ref().map_or(Decimal::ZERO, |i| i.budget))

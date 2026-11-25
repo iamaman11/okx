@@ -11,6 +11,7 @@ pub struct StrategyMutationCommand {
     pub instance: StrategyInstance,
     pub expected_revision: Option<i64>,
     pub confirmed_configuration_digest: Option<String>,
+    pub restore_revision: Option<i64>,
     pub time: i64,
 }
 #[derive(Clone)]
@@ -20,9 +21,28 @@ pub struct StrategyDecisionClaimCommand {
     pub input_digest: String,
     pub policy_revision: i64,
     pub expected_version: String,
+    pub activation_revision: i64,
     pub time: i64,
 }
 impl UnifiedFinanceHandle {
+    pub async fn strategy_configuration_at_revision(
+        &self,
+        deadline: Instant,
+        account: String,
+        instance_id: String,
+        revision: i64,
+    ) -> StoreResult<StrategyInstance> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            AccountStore::strategy_configuration_at_revision_sql(
+                db,
+                (&installation, &account),
+                &instance_id,
+                revision,
+            )
+        })
+        .await
+    }
     pub async fn strategy_status(
         &self,
         deadline: Instant,
@@ -74,6 +94,20 @@ impl UnifiedFinanceHandle {
                 if current.enabled {
                     return Err(StoreError::Invalid("STRATEGY_ALREADY_ACTIVE"));
                 }
+            } else if !replay && command.action == "restore_configuration" {
+                let source = command
+                    .restore_revision
+                    .filter(|revision| *revision > 0 && Some(*revision) < command.expected_revision)
+                    .ok_or(StoreError::Invalid("STRATEGY_RESTORE_REVISION_INVALID"))?;
+                let snapshot = AccountStore::strategy_configuration_at_revision_sql(
+                    &tx,
+                    (&installation, &account),
+                    &command.instance.instance_id,
+                    source,
+                )?;
+                let next = command.instance.policy_revision;
+                command.instance = snapshot;
+                command.instance.policy_revision = next;
             } else if !replay && command.action == "stop" {
                 // Protective stop targets the current instance in the writer turn.
                 command.instance = AccountStore::instance_sql(
@@ -116,6 +150,12 @@ impl UnifiedFinanceHandle {
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             super::finance_authority::require_preparation_authority(&tx, &installation)?;
+            AccountStore::verify_strategy_activation_sql(
+                &tx,
+                (&installation, &account),
+                &command.instance_id,
+                command.activation_revision,
+            )?;
             let result = AccountStore::claim_strategy_decision_sql(
                 &tx,
                 Some((&installation, &account)),

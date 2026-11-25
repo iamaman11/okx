@@ -663,8 +663,15 @@ impl TradeService {
                     reference,
                     expires_in_ms,
                 } => {
-                    self.close(&r, idempotency_key, reference, *expires_in_ms, governance)
-                        .await
+                    self.close(
+                        &r,
+                        idempotency_key,
+                        reference,
+                        *expires_in_ms,
+                        governance,
+                        None,
+                    )
+                    .await
                 }
                 TradeRequest::Preview {
                     operation,

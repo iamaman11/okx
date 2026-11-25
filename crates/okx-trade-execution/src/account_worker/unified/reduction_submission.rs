@@ -157,7 +157,7 @@ mod tests {
     use rusqlite::{Connection, TransactionBehavior, params};
     use rust_decimal::Decimal;
 
-    fn fixture(operation: &str, increasing_b: bool) -> Connection {
+    fn fixture(operation: &str, increasing_b: bool, automated: bool) -> Connection {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(include_str!("../../../schema/finance-unified-v1.sql"))
             .unwrap();
@@ -176,14 +176,33 @@ mod tests {
             let tx = db
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .unwrap();
-            let definition =
-                AccountStore::ensure_manual_instance_sql(&tx, Some(("I", account)), 1).unwrap();
+            let scope = Some(("I", account));
+            let instance_id = if automated { "automated" } else { "manual" };
+            let definition = if automated {
+                let instance = crate::StrategyInstance {
+                    instance_id: instance_id.into(),
+                    definition_id: "no_trade".into(),
+                    definition_version: "1".into(),
+                    parameters: "{}".into(),
+                    enabled: true,
+                    policy_revision: 1,
+                    budget: Decimal::ONE,
+                    last_decision_key: None,
+                };
+                AccountStore::mutate_instance_sql(
+                    &tx, scope, "create", "create", "create", &instance, None, 1,
+                )
+                .unwrap();
+                AccountStore::strategy_definition_sql(&tx, scope, instance_id).unwrap()
+            } else {
+                AccountStore::ensure_manual_instance_sql(&tx, scope, 1).unwrap()
+            };
             AccountStore::prepare_sql_transaction(
                 &tx,
                 Some(("I", account)),
                 &Decision {
                     decision_id: "decision".into(),
-                    instance_id: None,
+                    instance_id: automated.then(|| instance_id.into()),
                     decision_at: 2,
                     input_digest: "inputs".into(),
                     policy_revision: 1,
@@ -205,7 +224,7 @@ mod tests {
                         quantity: Decimal::ONE,
                         limit_price: Decimal::from(100),
                         stop_price: None,
-                        strategy_instance: "manual".into(),
+                        strategy_instance: instance_id.into(),
                         planned_loss_usd: Decimal::ZERO,
                         source_generation: 1,
                         position_side: "long".into(),
@@ -220,6 +239,12 @@ mod tests {
                 },
             )
             .unwrap();
+            if automated {
+                let intent = AccountStore::find_intent_sql(&tx, scope, "intent_id", "intent")
+                    .unwrap()
+                    .unwrap();
+                AccountStore::bind_strategy_send_sql(&tx, ("I", account), &intent, 1, 2).unwrap();
+            }
             tx.commit().unwrap();
         }
         db
@@ -240,7 +265,7 @@ mod tests {
     }
     #[test]
     fn risk_book_contract_reduction_reserve_and_post_use_original_scoped_once_cas() {
-        let mut db = fixture("close", false);
+        let mut db = fixture("close", false, false);
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
@@ -260,7 +285,7 @@ mod tests {
     }
     #[test]
     fn risk_book_contract_reduction_rejects_increase_and_rolls_back_uncommitted_claim() {
-        let mut db = fixture("close", true);
+        let mut db = fixture("close", true, false);
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
@@ -286,7 +311,7 @@ mod tests {
     }
     #[test]
     fn risk_book_contract_reduction_rejects_open_with_forged_nonincreasing_flag() {
-        let mut db = fixture("open", false);
+        let mut db = fixture("open", false, false);
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
@@ -302,12 +327,68 @@ mod tests {
     }
     #[test]
     fn risk_book_contract_partial_reduce_uses_same_original_cas() {
-        let mut db = fixture("reduce", false);
+        let mut db = fixture("reduce", false, false);
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
         reserve_reduction_sql(&tx, "I", "A", &receipt("A"), 3).unwrap();
         assert!(claim_reduction_sql(&tx, "I", "A", "intent", "plan", 1, 4).unwrap());
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn strategy_stop_and_send_are_ordered_by_the_same_writer() {
+        let mut db = fixture("close", false, true);
+        let change = |tx: &rusqlite::Transaction<'_>, account, action, revision, now| {
+            let scope = Some(("I", account));
+            let mut instance = AccountStore::instance_sql(tx, scope, "automated")
+                .unwrap()
+                .unwrap();
+            instance.policy_revision = revision + 1;
+            AccountStore::mutate_instance_sql(
+                tx,
+                scope,
+                action,
+                action,
+                action,
+                &instance,
+                Some(revision),
+                now,
+            )
+            .unwrap();
+        };
+        let tx = db.transaction().unwrap();
+        for account in ["A", "B"] {
+            let strategy_receipt = CentralReceipt {
+                instance_id: Some("automated".into()),
+                ..receipt(account)
+            };
+            reserve_reduction_sql(&tx, "I", account, &strategy_receipt, 3).unwrap();
+        }
+        assert!(claim_reduction_sql(&tx, "I", "B", "intent", "plan", 1, 4).unwrap());
+        tx.commit().unwrap();
+
+        let tx = db.transaction().unwrap();
+        change(&tx, "A", "stop", 1, 5);
+        change(&tx, "B", "stop", 1, 5);
+        tx.commit().unwrap();
+
+        let tx = db.transaction().unwrap();
+        assert!(matches!(
+            claim_reduction_sql(&tx, "I", "A", "intent", "plan", 1, 6),
+            Err(StoreError::Invalid("STRATEGY_STOPPED"))
+        ));
+        assert!(!claim_reduction_sql(&tx, "I", "B", "intent", "plan", 1, 6).unwrap());
+        change(&tx, "A", "start", 2, 7);
+        assert!(matches!(
+            claim_reduction_sql(&tx, "I", "A", "intent", "plan", 1, 8),
+            Err(StoreError::Invalid("STRATEGY_ACTIVATION_CHANGED"))
+        ));
+        let unsent: Option<i64> = tx.query_row(
+            "SELECT begin_post_at FROM intents WHERE installation_id='I' AND account_key='A' AND intent_id='intent'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(unsent, None);
         tx.commit().unwrap();
     }
 }

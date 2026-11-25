@@ -9,6 +9,7 @@ impl TradeService {
         reference: &str,
         expires: u64,
         governance: Option<&CentralGovernanceSnapshot>,
+        activation: Option<&StrategyInstance>,
     ) -> Result<Value, String> {
         let public = TradeRequest::Close {
             idempotency_key: key.into(),
@@ -36,6 +37,11 @@ impl TradeService {
             return self.status_intent(r, &prior.intent_id, None).await;
         }
         let original = self.find_intent(r, reference).await?;
+        if activation
+            .is_some_and(|strategy| strategy.instance_id != original.plan.strategy_instance)
+        {
+            return Err("STRATEGY_OWNER_MISMATCH".into());
+        }
         let instrument = original.instrument_id.clone();
         let lots = r
             .execution
@@ -70,7 +76,12 @@ impl TradeService {
             protection: None,
             expires_in_ms: expires,
         };
-        self.execute_bound(r, &command, governance, Some(bound_hash))
+        let strategy = activation.map(|instance| crate::trade_service::execute::StrategyDispatch {
+            revision: instance.policy_revision,
+            definition_version: instance.definition_version.clone(),
+            opening_claim: None,
+        });
+        self.execute_inner(r, &command, governance, Some(bound_hash), strategy)
             .await
     }
 }

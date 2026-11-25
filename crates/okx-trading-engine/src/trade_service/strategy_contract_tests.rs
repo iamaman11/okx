@@ -103,6 +103,8 @@ fn update(key: &str, revision: u64) -> StrategyRequest {
         expected_revision: revision,
         parameters: json!({"fast":5,"slow":30}),
         budget_usd: "3".into(),
+        instruments: None,
+        timeframe_ms: None,
     }
 }
 fn completed_data(response: AgentResponse) -> Value {

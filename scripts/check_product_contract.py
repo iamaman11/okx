@@ -18,19 +18,33 @@ def check_source(text):
     return sorted(set(FORBIDDEN.findall(text)))
 
 def closed_strategy_union(schema):
+    common = {'idempotency_key', 'instance_id'}
+
+    def action(branch):
+        return (
+            set(branch) == {'properties', 'required'} and
+            'action' in branch['properties'] and
+            'action' in branch['required'] and
+            'account' not in branch['properties']
+        )
+
+    def mutation_group(branch):
+        return (
+            set(branch) == {'properties', 'required', 'oneOf'} and
+            set(branch['properties']) == common and
+            set(branch['required']) == common and
+            bool(branch['oneOf']) and
+            all(action(child) and not common.intersection(child['properties'])
+                for child in branch['oneOf'])
+        )
+
     return (
         schema.get('type') == 'object' and
         schema.get('unevaluatedProperties') is False and
         set(schema.get('properties', {})) == {'account'} and
         schema.get('required') == ['account'] and
         bool(schema.get('oneOf')) and
-        all(
-            set(branch) == {'properties', 'required'} and
-            'action' in branch['properties'] and
-            'action' in branch['required'] and
-            'account' not in branch['properties']
-            for branch in schema['oneOf']
-        )
+        all(action(branch) or mutation_group(branch) for branch in schema['oneOf'])
     )
 
 def check(root):
@@ -73,8 +87,10 @@ def check(root):
     # all five read-only research result views (one source, no stale snapshot).
     catalog={t['name']:t for t in tools}
     def variant(tool,action):
-        return next((v for v in catalog[tool]['inputSchema']['oneOf']
-                     if v.get('properties',{}).get('action',{}).get('const')==action),None)
+        branches = catalog[tool]['inputSchema']['oneOf']
+        if tool == 'strategies':
+            branches = [child for branch in branches for child in branch.get('oneOf', [branch])]
+        return next((v for v in branches if v.get('properties',{}).get('action',{}).get('const')==action),None)
     view=variant('research','result')
     if (view is None or view['properties'].get('view',{}).get('enum')!=
         ['summary','trades','equity','variants','export']):
@@ -106,6 +122,9 @@ def check(root):
     if (not {'expected_revision','configuration_digest'} <= set(start.get('required',[])) or
         start_fields.get('configuration_digest',{}).get('pattern')!='^[0-9a-f]{64}$'):
         errors.append('strategies.start must confirm revision and configuration digest')
+    restore=variant('strategies','restore_configuration') or {}
+    if not {'expected_revision','source_revision'} <= set(restore.get('required',[])):
+        errors.append('strategies.restore_configuration must name current and source revisions')
     return errors
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--self-test',action='store_true');args=parser.parse_args()
@@ -120,6 +139,10 @@ if __name__=='__main__':
         assert closed_strategy_union(strict)
         assert not closed_strategy_union({**strict, 'unevaluatedProperties': True})
         assert not closed_strategy_union({**strict, 'properties': {'account': {}, 'extra': {}}})
+        group = {'properties': {'idempotency_key': {}, 'instance_id': {}},
+                 'required': ['idempotency_key', 'instance_id'], 'oneOf': strict['oneOf']}
+        assert closed_strategy_union({**strict, 'oneOf': [group]})
+        assert not closed_strategy_union({**strict, 'oneOf': [{**group, 'required': ['instance_id']}]})
         print('PRODUCT_CONTRACT_SELF_TEST=PASS');sys.exit(0)
     errors=check(ROOT)
     for error in errors:print(error,file=sys.stderr)
