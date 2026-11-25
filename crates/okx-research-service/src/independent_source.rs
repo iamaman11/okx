@@ -22,11 +22,11 @@ const PUBLIC_CANDLES_PATH: &str = "/api/v5/market/history-candles";
 const PUBLIC_ORIGIN: &str = "https://www.okx.com";
 const MAX_PUBLIC_BYTES: usize = MAX_FRAME_BYTES / 8;
 
-type GetFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>>;
+pub(crate) type GetFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>>;
 
 /// Narrow injection point for recorded public HTTP responses in offline tests.
 /// The production implementation is GET-only on a compile-time fixed origin.
-trait PublicGet: Send + Sync {
+pub(crate) trait PublicGet: Send + Sync {
     fn get(&self, path: &'static str, parameters: Vec<(&'static str, String)>) -> GetFuture<'_>;
 }
 
@@ -98,8 +98,16 @@ impl IndependentOkxPublicSource {
         })
     }
 
+    pub(crate) async fn get_bytes(
+        &self,
+        path: &'static str,
+        query: Vec<(&'static str, String)>,
+    ) -> Result<Vec<u8>, String> {
+        self.get.get(path, query).await
+    }
+
     #[cfg(test)]
-    fn with_get(get: Arc<dyn PublicGet>) -> Self {
+    pub(crate) fn with_get(get: Arc<dyn PublicGet>) -> Self {
         Self { get }
     }
 }
@@ -283,7 +291,7 @@ struct Envelope<T> {
     data: Vec<T>,
 }
 
-fn rows<T: DeserializeOwned>(
+pub(crate) fn rows<T: DeserializeOwned>(
     raw: &[u8],
     max_rows: usize,
     error: &'static str,
@@ -298,7 +306,7 @@ fn rows<T: DeserializeOwned>(
     Ok(envelope.data)
 }
 
-fn one<T: DeserializeOwned>(raw: &[u8], error: &'static str) -> Result<T, String> {
+pub(crate) fn one<T: DeserializeOwned>(raw: &[u8], error: &'static str) -> Result<T, String> {
     rows(raw, 1, error)?.pop().ok_or_else(|| error.into())
 }
 

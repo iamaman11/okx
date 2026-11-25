@@ -80,12 +80,66 @@ fn validate_composition_source_products(
     Ok(())
 }
 
+fn market_request_fingerprint(
+    request: &MarketRequest,
+    page: &Option<Value>,
+) -> Result<String, String> {
+    okx_research::canonical_sha256(&("market/448.cursor-v1", request, page))
+        .map_err(|e| e.to_string())
+}
+
+fn recorded_universe_input(
+    result: &Value,
+    request: &MarketRequest,
+) -> Result<Option<Value>, String> {
+    let mut page = result
+        .get("universe_page")
+        .filter(|page| page.is_object())
+        .cloned()
+        .ok_or("MARKET_CURSOR_REQUEST_MISMATCH")?;
+    if page["global_ranking"] == true {
+        // Completion adjusted these two display fields. Reconstruct the input
+        // values used by both historical venue registry and paging contracts.
+        let size = page["universe_size"]
+            .as_u64()
+            .ok_or("MARKET_CURSOR_REQUEST_MISMATCH")?;
+        page["has_more"] = json!(size > u64::from(request.limit));
+        page["page_count"] = json!(size.min(u64::from(request.limit)));
+    }
+    Ok(Some(page))
+}
+
+fn remove_universe_receipt_time(page: &mut Option<Value>) {
+    if let Some(fields) = page.as_mut().and_then(Value::as_object_mut) {
+        fields.remove("reference_received_at");
+    }
+}
+
 impl AnalyticsService {
     pub async fn market(
         &self,
         request: MarketRequest,
         universe_page: Option<Value>,
         resolved_instruments: Option<Vec<String>>,
+    ) -> Result<Value, String> {
+        self.run_market(request, universe_page, resolved_instruments, None)
+            .await
+    }
+
+    pub(crate) async fn market_standalone(
+        &self,
+        request: MarketRequest,
+        source: &crate::independent_source::IndependentOkxPublicSource,
+    ) -> Result<Value, String> {
+        self.run_market(request, None, None, Some(source)).await
+    }
+
+    async fn run_market(
+        &self,
+        request: MarketRequest,
+        mut universe_page: Option<Value>,
+        mut resolved_instruments: Option<Vec<String>>,
+        standalone_source: Option<&crate::independent_source::IndependentOkxPublicSource>,
     ) -> Result<Value, String> {
         if !request.valid() {
             return Err("INVALID_MARKET_REQUEST".into());
@@ -107,68 +161,9 @@ impl AnalyticsService {
         if window.end_ms > closed_end {
             return Err("RANGE_NOT_CLOSED".into());
         }
-        let global_rank = request.universe.as_ref().is_some_and(|u| u.rank_globally);
-        if global_rank && resolved_instruments.is_none() {
-            return Err("GLOBAL_RANK_UNIVERSE_REQUIRED".into());
-        }
-        let mut compute_request = request.clone();
-        if let Some(names) = resolved_instruments {
-            compute_request.instruments = names;
-            compute_request.universe = None;
-        }
-        validate_composition_source_products(
-            &compute_request.instruments,
-            oi_composition,
-            funding_composition,
-        )?;
         let mut hash_request = request.clone();
-        // A page selector is not a separate computation.
         let cursor = hash_request.cursor.take();
-        // Unlike the time bucket, this request fingerprint is immutable
-        // across pages, but binds the exact typed query and reference generation.
-        let rank_fingerprint = if global_rank {
-            Some(
-                okx_research::canonical_sha256(&(
-                    "market/398.global-v1",
-                    &hash_request,
-                    &universe_page,
-                ))
-                .map_err(|e| e.to_string())?,
-            )
-        } else {
-            None
-        };
-        let request_fingerprint = okx_research::canonical_sha256(&(
-            "market/448.cursor-v1",
-            &hash_request,
-            &universe_page,
-        ))
-        .map_err(|e| e.to_string())?;
-        let bucket = if request
-            .fields
-            .iter()
-            .any(|f| matches!(f.as_str(), "spread_bps" | "oi_change"))
-            || oi_composition
-        {
-            jiff::Timestamp::now().as_millisecond() / 1000
-        } else if request.end_ms > jiff::Timestamp::now().as_millisecond().max(0) as u64 {
-            jiff::Timestamp::now().as_millisecond() / request.timeframe_ms as i64
-        } else {
-            0
-        };
-        let hash = okx_research::canonical_sha256(&(
-            market_request_schema(
-                &hash_request.fields,
-                hash_request.composition.is_some(),
-                oi_composition,
-                funding_composition,
-            ),
-            &hash_request,
-            &universe_page,
-            bucket,
-        ))
-        .map_err(|e| e.to_string())?;
-        let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
+        let standalone_universe = standalone_source.is_some() && request.universe.is_some();
         if let Some(cursor) = cursor.as_deref() {
             // Reuse the original completed immutable artifact even if the
             // live source bucket has advanced since the preceding page.
@@ -194,9 +189,21 @@ impl AnalyticsService {
                     let value: Value = store
                         .read_evidence_json(&artifact)
                         .map_err(|e| e.to_string())?;
-                    if value["market_request_fingerprint"] != request_fingerprint
-                        || value["job_id"] != job_id
-                    {
+                    let mut page = if standalone_universe {
+                        recorded_universe_input(&value, &hash_request)?
+                    } else {
+                        universe_page
+                    };
+                    let expected = &value["market_request_fingerprint"];
+                    let mut matches =
+                        *expected == market_request_fingerprint(&hash_request, &page)?;
+                    if standalone_universe && !matches {
+                        // Standalone scans use reference generation as content identity.
+                        // Older artifacts also used the original receipt timestamp.
+                        remove_universe_receipt_time(&mut page);
+                        matches = *expected == market_request_fingerprint(&hash_request, &page)?;
+                    }
+                    if !matches || value["job_id"] != job_id {
                         return Err("MARKET_CURSOR_REQUEST_MISMATCH".into());
                     }
                     // A queued request may finish after its live-source time
@@ -211,6 +218,70 @@ impl AnalyticsService {
                 })
                 .await;
         }
+        if let Some(source) = standalone_source
+            && request.universe.is_some()
+        {
+            let (page, instruments) =
+                crate::public_catalog::resolve_universe(source, &request).await?;
+            universe_page = Some(page);
+            resolved_instruments = Some(instruments);
+        }
+        let global_rank = request.universe.as_ref().is_some_and(|u| u.rank_globally);
+        if global_rank && resolved_instruments.is_none() {
+            return Err("GLOBAL_RANK_UNIVERSE_REQUIRED".into());
+        }
+        let mut compute_request = request.clone();
+        if let Some(names) = resolved_instruments {
+            compute_request.instruments = names;
+            compute_request.universe = None;
+        }
+        validate_composition_source_products(
+            &compute_request.instruments,
+            oi_composition,
+            funding_composition,
+        )?;
+        let mut identity_page = universe_page.clone();
+        if standalone_universe {
+            remove_universe_receipt_time(&mut identity_page);
+        }
+        let rank_fingerprint = if global_rank {
+            Some(
+                okx_research::canonical_sha256(&(
+                    "market/398.global-v1",
+                    &hash_request,
+                    &identity_page,
+                ))
+                .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
+        let request_fingerprint = market_request_fingerprint(&hash_request, &identity_page)?;
+        let bucket = if request
+            .fields
+            .iter()
+            .any(|f| matches!(f.as_str(), "spread_bps" | "oi_change"))
+            || oi_composition
+        {
+            jiff::Timestamp::now().as_millisecond() / 1000
+        } else if request.end_ms > jiff::Timestamp::now().as_millisecond().max(0) as u64 {
+            jiff::Timestamp::now().as_millisecond() / request.timeframe_ms as i64
+        } else {
+            0
+        };
+        let hash = okx_research::canonical_sha256(&(
+            market_request_schema(
+                &hash_request.fields,
+                hash_request.composition.is_some(),
+                oi_composition,
+                funding_composition,
+            ),
+            &hash_request,
+            &identity_page,
+            bucket,
+        ))
+        .map_err(|e| e.to_string())?;
+        let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
         // A cursor reads its immutable original result. Only a new job needs
         // to bind the resolved venue instruments before durable admission.
         // The checked operation IDs/parameters remain those of the first plan.

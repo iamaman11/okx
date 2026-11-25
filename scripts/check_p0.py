@@ -21,6 +21,7 @@ WORKER_TESTS = (
     "analytics::planner::tests::market_plan_rejects_unknown_operator_before_any_source_read",
     "analytics::market::tests::interior_gap_never_imputed",
     "analytics::market::tests::c20_rolling_mean_reuses_existing_market_pipeline_without_new_routing",
+    "edge_runtime::market_tests::public_market_operations_work_from_research_owner_and_cursor_reads_persisted_job",
 )
 SCOPES = {"kernel", "strategy", "analysis", "research", "worker", "wire", "ipc", "mcp", "host", "expanded"}
 LOCAL_COMPONENTS = {

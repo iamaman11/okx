@@ -129,8 +129,7 @@ enum ResearchOperation {
     FindInstruments {
         asset: String,
         settle_currency: Option<String>,
-        #[serde(rename = "instrument_type")]
-        _instrument_type: Option<InstrumentTypeFilter>,
+        instrument_type: Option<InstrumentTypeFilter>,
     },
     MarketOverview {
         instrument: String,
@@ -151,9 +150,9 @@ struct ResearchDiagnostics {
     _limit: Option<u8>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
-enum InstrumentTypeFilter {
+pub enum InstrumentTypeFilter {
     Swap,
     Futures,
 }
@@ -164,7 +163,18 @@ pub enum ResearchCommand {
     Research(ResearchRequest),
     PortfolioScenario(PortfolioScenarioRequest),
     ExplainJob(Option<String>),
-    PublicLiveView,
+    MarketMicrostructure {
+        instrument: String,
+        size_contracts: Option<String>,
+    },
+    FindInstruments {
+        asset: String,
+        settle_currency: Option<String>,
+        instrument_type: Option<InstrumentTypeFilter>,
+    },
+    MarketOverview {
+        instrument: String,
+    },
 }
 
 impl TryFrom<ResearchRequestEnvelope> for ResearchCommand {
@@ -206,17 +216,24 @@ impl TryFrom<ResearchRequestEnvelope> for ResearchCommand {
                         .is_ok_and(|n| n.is_finite() && n > 0.0 && n <= 1_000_000.0)
                 }) =>
             {
-                Self::PublicLiveView
+                Self::MarketMicrostructure {
+                    instrument,
+                    size_contracts,
+                }
             }
             ResearchOperation::MarketOverview { instrument } if valid_instrument(&instrument) => {
-                Self::PublicLiveView
+                Self::MarketOverview { instrument }
             }
             ResearchOperation::FindInstruments {
                 asset,
                 settle_currency,
-                ..
+                instrument_type,
             } if valid_asset(&asset) && settle_currency.as_deref().is_none_or(valid_asset) => {
-                Self::PublicLiveView
+                Self::FindInstruments {
+                    asset,
+                    settle_currency,
+                    instrument_type,
+                }
             }
             ResearchOperation::Forbidden => return Err("RESEARCH_OPERATION_FORBIDDEN"),
             _ => return Err("INVALID_RESEARCH_REQUEST"),

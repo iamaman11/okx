@@ -2,8 +2,9 @@
 //! no account store, exchange credentials, execution trait or Engine client.
 //! Every source reachable through `AnalyticsService` is a bounded public GET.
 use crate::{
-    analytics::AnalyticsService, ipc::portfolio_scenario_wire, producer::Producer,
-    source_api::PublicSourceClient,
+    analytics::AnalyticsService, independent_source::IndependentOkxPublicSource,
+    ipc::portfolio_scenario_wire, producer::Producer, public_catalog, public_microstructure,
+    public_overview, source_api::PublicSourceClient,
 };
 use futures_util::{SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_research_protocol::{
@@ -128,15 +129,17 @@ impl EdgeRuntimeConfig {
 pub async fn run(root: PathBuf, scope: ResearchScope) -> Result<(), String> {
     let config = EdgeRuntimeConfig::from_environment()?;
     std::fs::create_dir_all(&root).map_err(|_| "RESEARCH_ROOT_CREATE_FAILED")?;
-    let source = PublicSourceClient::new(Arc::new(
-        crate::independent_source::IndependentOkxPublicSource::new()?,
-    ));
+    let source = Arc::new(IndependentOkxPublicSource::new()?);
     let producer = Producer::current()?;
-    let service =
-        AnalyticsService::new_scoped_with_producer(root, source, &scope, producer.clone())?;
+    let service = AnalyticsService::new_scoped_with_producer(
+        root,
+        PublicSourceClient::new(source.clone()),
+        &scope,
+        producer.clone(),
+    )?;
     let mut retries = 0usize;
     loop {
-        if let Err(code) = session(&config, &producer, &service).await {
+        if let Err(code) = session(&config, &producer, &service, &source).await {
             // Error codes contain no secret, request body, URL or market data.
             tracing::warn!(reason = code, "research-only WSS disconnected");
         }
@@ -212,6 +215,7 @@ async fn session(
     config: &EdgeRuntimeConfig,
     producer: &Producer,
     service: &AnalyticsService,
+    public_data: &Arc<IndependentOkxPublicSource>,
 ) -> Result<(), String> {
     let mut request = config
         .url
@@ -227,13 +231,14 @@ async fn session(
         .await
         .map_err(|_| "RESEARCH_EDGE_CONNECT_TIMEOUT")?
         .map_err(|_| "RESEARCH_EDGE_CONNECT_FAILED")?;
-    run_session(socket, config.hello(producer), service).await
+    run_session(socket, config.hello(producer), service, public_data).await
 }
 
 async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
     socket: WebSocketStream<S>,
     hello: OutgoingFrame,
     service: &AnalyticsService,
+    public_data: &Arc<IndependentOkxPublicSource>,
 ) -> Result<(), String> {
     let (mut sink, mut source) = socket.split();
     send(&mut sink, hello).await?;
@@ -333,9 +338,10 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
                         } else {
                             pending.insert(id.clone());
                             let executor = service.clone();
+                            let public_data = public_data.clone();
                             requests.push(Box::pin(async move {
                                 let result = tokio::time::timeout(
-                                    REQUEST_DEADLINE, dispatch(&executor, command)
+                                    REQUEST_DEADLINE, dispatch(&executor, &public_data, command)
                                 ).await.unwrap_or_else(|_| Err("RESEARCH_REQUEST_TIMEOUT".into()));
                                 (id.clone(), response_for(&id, result))
                             }));
@@ -350,15 +356,11 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
 
 async fn dispatch(
     service: &AnalyticsService,
+    public_data: &IndependentOkxPublicSource,
     command: ResearchCommand,
 ) -> Result<serde_json::Value, String> {
     match command {
-        ResearchCommand::Market(request) => {
-            if request.universe.is_some() {
-                return Err("RESEARCH_MARKET_EXPLICIT_INSTRUMENTS_REQUIRED".into());
-            }
-            service.market(request, None, None).await
-        }
+        ResearchCommand::Market(request) => service.market_standalone(request, public_data).await,
         ResearchCommand::MarketCapabilities => Ok(service.market_capabilities()),
         ResearchCommand::Research(request) => service.research(request).await,
         ResearchCommand::PortfolioScenario(request) => portfolio_scenario_wire(&request),
@@ -380,10 +382,33 @@ async fn dispatch(
             }
             Ok(service.diagnostic_job(id))
         }
-        // These originally used Engine's *WebSocket cache* and global
-        // reference registry. Do not quietly claim equivalent independent
-        // public evidence until their Research-owned source is implemented.
-        ResearchCommand::PublicLiveView => Err("RESEARCH_PUBLIC_LIVE_VIEW_UNAVAILABLE".into()),
+        ResearchCommand::FindInstruments {
+            asset,
+            settle_currency,
+            instrument_type,
+        } => {
+            public_catalog::find_instruments(
+                public_data,
+                &asset,
+                settle_currency.as_deref(),
+                instrument_type,
+            )
+            .await
+        }
+        ResearchCommand::MarketOverview { instrument } => {
+            public_overview::market_overview(public_data, &instrument).await
+        }
+        ResearchCommand::MarketMicrostructure {
+            instrument,
+            size_contracts,
+        } => {
+            public_microstructure::market_microstructure(
+                public_data,
+                &instrument,
+                size_contracts.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -410,10 +435,11 @@ fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentRes
                 || code == "RESEARCH_REQUEST_TIMEOUT";
             let safe_code = if source_deferred {
                 "MARKET_SOURCE_RETRYABLE".into()
-            } else if code.len() <= 96
-                && code
-                    .bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            } else if code == "GLOBAL_RANK_UNIVERSE_LIMIT:512"
+                || (code.len() <= 96
+                    && code
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'))
             {
                 code
             } else {
@@ -611,10 +637,10 @@ mod tests {
         )
         .unwrap();
         let scope = ResearchScope::new("test-research-scope".to_owned()).unwrap();
-        let public = crate::independent_source::IndependentOkxPublicSource::new().unwrap();
+        let public = Arc::new(IndependentOkxPublicSource::new().unwrap());
         let service = AnalyticsService::new_scoped_with_producer(
             dir.path().to_path_buf(),
-            PublicSourceClient::new(Arc::new(public)),
+            PublicSourceClient::new(public.clone()),
             &scope,
             producer.clone(),
         )
@@ -714,7 +740,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
                 () = fake_edge => {},
-                result = run_session(research, config.hello(&producer), &service) => {
+                result = run_session(research, config.hello(&producer), &service, &public) => {
                     panic!("Research session ended unexpectedly: {result:?}");
                 }
             }
@@ -723,3 +749,7 @@ mod tests {
         .expect("Research frame round trip timed out");
     }
 }
+
+#[cfg(test)]
+#[path = "edge_market_tests.rs"]
+mod market_tests;
