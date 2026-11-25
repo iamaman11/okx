@@ -10,6 +10,7 @@ pub struct StrategyMutationCommand {
     pub action: String,
     pub instance: StrategyInstance,
     pub expected_revision: Option<i64>,
+    pub confirmed_configuration_digest: Option<String>,
     pub time: i64,
 }
 #[derive(Clone)]
@@ -53,17 +54,28 @@ impl UnifiedFinanceHandle {
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             super::finance_authority::require_preparation_authority(&tx, &installation)?;
-            // Start/Stop carry no caller revision. Read their current revision
-            // inside the writer turn, as the original serialized command did.
             let mut command = command;
-            if matches!(command.action.as_str(), "start" | "stop")
-                && AccountStore::operation_sql(
-                    &tx,
-                    Some((&installation, &account)),
-                    &command.operation_id,
-                )?
-                .is_none()
-            {
+            let scope = Some((installation.as_str(), account.as_str()));
+            let replay = AccountStore::operation_sql(&tx, scope, &command.operation_id)?.is_some();
+            if !replay && command.action == "start" {
+                let current =
+                    AccountStore::instance_sql(&tx, scope, &command.instance.instance_id)?
+                        .ok_or(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;
+                if Some(current.policy_revision) != command.expected_revision {
+                    return Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"));
+                }
+                if command.confirmed_configuration_digest.as_deref()
+                    != Some(current.configuration_digest(&account)?.as_str())
+                {
+                    return Err(StoreError::Invalid(
+                        "STRATEGY_CONFIGURATION_DIGEST_MISMATCH",
+                    ));
+                }
+                if current.enabled {
+                    return Err(StoreError::Invalid("STRATEGY_ALREADY_ACTIVE"));
+                }
+            } else if !replay && command.action == "stop" {
+                // Protective stop targets the current instance in the writer turn.
                 command.instance = AccountStore::instance_sql(
                     &tx,
                     Some((&installation, &account)),

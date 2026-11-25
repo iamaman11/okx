@@ -24,6 +24,11 @@ if(body.result.tools.some((t:any)=>t.name==='trade'))throw Error('generic trade 
 
 if(body.result.tools.length!==13||bytes>24576)throw Error(`tools budget ${bytes}`);
 for(const fixture of payloadFixtures){const r:any=await(await call('tools/call',publicArgs(fixture.tool,fixture.negative[0]))).json();if(r.error?.code!==-32602)throw Error('negative dispatched');}
+const unconfirmedStart:any=await(await call('tools/call',{name:'strategies',arguments:{
+ action:'start',account:'fixture',instance_id:'alpha',idempotency_key:'start_fixture'
+}})).json();
+if(unconfirmedStart.error?.code!==-32602||!unconfirmedStart.error.message.includes('configuration_digest'))
+ throw Error('old strategy start must explain the missing confirmation');
 console.log(`tools_list_actual_serialized PASS 13 tools ${bytes} bytes`);
 
 const fixture=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!;

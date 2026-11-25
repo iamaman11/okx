@@ -146,6 +146,7 @@ async fn fresh(path: &std::path::Path) -> UnifiedFinanceHandle {
                     last_decision_key: None,
                 },
                 expected_revision: None,
+                confirmed_configuration_digest: None,
                 time: 101,
             },
         )

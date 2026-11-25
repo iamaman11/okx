@@ -247,29 +247,33 @@
       "name": "strategies",
       "description": "Strategies; may trade.",
       "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "unevaluatedProperties": false,
         "oneOf": [
           {
             "properties": {
               "action": {
                 "const": "list"
-              },
-              "account": {
-                "$ref": "#/$defs/t"
               }
             },
             "required": [
-              "action",
-              "account"
-            ],
-            "additionalProperties": false
+              "action"
+            ]
           },
           {
             "properties": {
               "action": {
                 "const": "status"
-              },
-              "account": {
-                "$ref": "#/$defs/t"
               },
               "instance_id": {
                 "$ref": "#/$defs/s"
@@ -277,18 +281,13 @@
             },
             "required": [
               "action",
-              "account",
               "instance_id"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
               "action": {
                 "const": "create"
-              },
-              "account": {
-                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
                 "$ref": "#/$defs/k"
@@ -326,7 +325,6 @@
             },
             "required": [
               "action",
-              "account",
               "idempotency_key",
               "instance_id",
               "definition_id",
@@ -335,16 +333,12 @@
               "instruments",
               "timeframe_ms",
               "budget_usd"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
               "action": {
                 "const": "update"
-              },
-              "account": {
-                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
                 "$ref": "#/$defs/k"
@@ -366,25 +360,44 @@
             },
             "required": [
               "action",
-              "account",
               "idempotency_key",
               "instance_id",
               "expected_revision",
               "parameters",
               "budget_usd"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
               "action": {
-                "enum": [
-                  "start",
-                  "stop"
-                ]
+                "const": "start"
               },
-              "account": {
-                "$ref": "#/$defs/t"
+              "idempotency_key": {
+                "$ref": "#/$defs/k"
+              },
+              "instance_id": {
+                "$ref": "#/$defs/s"
+              },
+              "expected_revision": {
+                "$ref": "#/$defs/n"
+              },
+              "configuration_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "action",
+              "idempotency_key",
+              "instance_id",
+              "expected_revision",
+              "configuration_digest"
+            ]
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "stop"
               },
               "idempotency_key": {
                 "$ref": "#/$defs/k"
@@ -395,19 +408,14 @@
             },
             "required": [
               "action",
-              "account",
               "idempotency_key",
               "instance_id"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
               "action": {
                 "const": "capital_assign"
-              },
-              "account": {
-                "$ref": "#/$defs/t"
               },
               "idempotency_key": {
                 "$ref": "#/$defs/k"
@@ -425,21 +433,17 @@
                 "$ref": "#/$defs/d"
               },
               "expected_authority_revision": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/n"
               }
             },
             "required": [
               "action",
-              "account",
               "idempotency_key",
               "instance_id",
               "direction",
               "amount_usd",
               "expected_authority_revision"
-            ],
-            "additionalProperties": false
+            ]
           }
         ],
         "$defs": {
@@ -447,11 +451,6 @@
             "type": "string",
             "pattern": "^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
             "maxLength": 29
-          },
-          "t": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
           },
           "s": {
             "type": "string",
@@ -463,6 +462,11 @@
             "minLength": 8,
             "maxLength": 128,
             "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
           },
           "h": {
             "type": "object",

@@ -16,6 +16,23 @@ READ_TRADE = {'preview','status','capabilities','preflight'}
 WRITE_TRADE = {'execute','cancel','close'}
 def check_source(text):
     return sorted(set(FORBIDDEN.findall(text)))
+
+def closed_strategy_union(schema):
+    return (
+        schema.get('type') == 'object' and
+        schema.get('unevaluatedProperties') is False and
+        set(schema.get('properties', {})) == {'account'} and
+        schema.get('required') == ['account'] and
+        bool(schema.get('oneOf')) and
+        all(
+            set(branch) == {'properties', 'required'} and
+            'action' in branch['properties'] and
+            'action' in branch['required'] and
+            'account' not in branch['properties']
+            for branch in schema['oneOf']
+        )
+    )
+
 def check(root):
     errors=[]
     for base in ['crates/okx-trading-engine/src','crates/okx-trade-execution/src','crates/okx-ipc-contracts/src','crates/okx-host-controller/src','cloudflare/okx-mcp/src']:
@@ -49,7 +66,8 @@ def check(root):
             variants=tool['inputSchema'].get('oneOf',[])
             if not variants:errors.append(f'{name}: missing strict action union')
         for variant in variants:
-            if variant.get('additionalProperties') is not False:
+            if (variant.get('additionalProperties') is not False and
+                not (name == 'strategies' and closed_strategy_union(tool['inputSchema']))):
                 errors.append(f'{name}: action accepts unknown fields')
     # Generated MCP contract must reflect the live Rust strategy v1 and
     # all five read-only research result views (one source, no stale snapshot).
@@ -83,12 +101,25 @@ def check(root):
             errors.append('strategies.'+action+' does not match Rust StrategyParametersV1 bounds')
         if action=='create' and rule['properties'].get('version',{}).get('maximum')!=1:
             errors.append('strategies.create must reject unsupported version > 1')
+    start=variant('strategies','start') or {}
+    start_fields=start.get('properties',{})
+    if (not {'expected_revision','configuration_digest'} <= set(start.get('required',[])) or
+        start_fields.get('configuration_digest',{}).get('pattern')!='^[0-9a-f]{64}$'):
+        errors.append('strategies.start must confirm revision and configuration digest')
     return errors
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--self-test',action='store_true');args=parser.parse_args()
     if args.self_test:
         assert check_source('pub struct ExecutionLedgerStore;')==['ExecutionLedgerStore']
         assert not check_source('pub struct AccountStore;')
+        strict = {
+            'type':'object', 'unevaluatedProperties':False,
+            'properties':{'account':{'type':'string'}}, 'required':['account'],
+            'oneOf':[{'properties':{'action':{'const':'start'}},'required':['action']}],
+        }
+        assert closed_strategy_union(strict)
+        assert not closed_strategy_union({**strict, 'unevaluatedProperties': True})
+        assert not closed_strategy_union({**strict, 'properties': {'account': {}, 'extra': {}}})
         print('PRODUCT_CONTRACT_SELF_TEST=PASS');sys.exit(0)
     errors=check(ROOT)
     for error in errors:print(error,file=sys.stderr)

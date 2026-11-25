@@ -149,6 +149,7 @@ pub(super) async fn fresh_at(root: PathBuf) -> UnifiedFinanceHandle {
                     last_decision_key: None,
                 },
                 expected_revision: None,
+                confirmed_configuration_digest: None,
                 time: 101,
             },
         )
@@ -183,6 +184,74 @@ pub(super) fn command() -> CapitalAssignmentCommand {
         authority_receipt: "governance_reply_001".into(),
         time: 102,
     }
+}
+
+#[tokio::test]
+async fn strategy_confirmation_is_checked_in_sql_and_receipt_replays_after_reopen() {
+    let (root, owner) = fresh().await;
+    let stored = owner
+        .strategy_instances(deadline(), account())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.instance_id == "alpha")
+        .unwrap();
+    let confirmed = stored.configuration_digest(&account()).unwrap();
+    let mut proposed = stored;
+    proposed.policy_revision += 1;
+    let mut command = StrategyMutationCommand {
+        operation_id: "activate_alpha_001".into(),
+        request_hash: "f".repeat(64),
+        action: "start".into(),
+        instance: proposed,
+        expected_revision: Some(1),
+        confirmed_configuration_digest: Some("0".repeat(64)),
+        time: 102,
+    };
+    assert!(matches!(
+        owner
+            .mutate_strategy_instance(deadline(), account(), command.clone())
+            .await,
+        Err(StoreError::Invalid(
+            "STRATEGY_CONFIGURATION_DIGEST_MISMATCH"
+        ))
+    ));
+    assert!(
+        owner
+            .operation(deadline(), account(), command.operation_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    command.confirmed_configuration_digest = Some(confirmed);
+    let original = owner
+        .mutate_strategy_instance(deadline(), account(), command.clone())
+        .await
+        .unwrap();
+    close(owner).await;
+    let reopened = UnifiedFinanceHandle::open_native(root.clone(), INSTALLATION.into())
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .mutate_strategy_instance(deadline(), account(), command.clone())
+            .await
+            .unwrap(),
+        original
+    );
+    command.request_hash = "1".repeat(64);
+    assert!(matches!(
+        reopened
+            .mutate_strategy_instance(deadline(), account(), command)
+            .await,
+        Err(StoreError::Invalid("IDEMPOTENCY_CONFLICT"))
+    ));
+    let active: StrategyInstance = serde_json::from_str(&original.result_ref).unwrap();
+    assert_eq!(active.policy_revision, 2);
+    assert!(active.enabled);
+    assert_eq!(original.committed_at, 102);
+    close(reopened).await;
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 pub(super) async fn assert_once(owner: &UnifiedFinanceHandle) -> OperationReceipt {

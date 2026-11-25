@@ -11,6 +11,13 @@ pub(super) enum Position {
     Flat,
 }
 
+pub(super) fn supports_definition(definition_id: &str) -> bool {
+    matches!(
+        definition_id,
+        "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
+    )
+}
+
 pub(super) fn evaluate(
     definition_id: &str,
     parameters: &StrategyParametersV1,

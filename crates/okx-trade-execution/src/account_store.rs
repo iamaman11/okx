@@ -397,6 +397,26 @@ pub struct StrategyInstance {
     pub budget: Decimal,
     pub last_decision_key: Option<String>,
 }
+impl StrategyInstance {
+    /// Hash the persisted configuration, independent of activation state and
+    /// decimal scale. The revision is confirmed separately by the SQL CAS.
+    pub fn configuration_digest(&self, account_key: &str) -> StoreResult<String> {
+        use sha2::{Digest, Sha256};
+        let parameters: serde_json::Value = serde_json::from_str(&self.parameters)
+            .map_err(|_| StoreError::Invalid("STRATEGY_CONFIGURATION_CORRUPT"))?;
+        let canonical = serde_json::to_vec(&(
+            "okx.strategy-configuration/v1",
+            account_key,
+            &self.instance_id,
+            &self.definition_id,
+            &self.definition_version,
+            parameters,
+            exact(self.budget),
+        ))
+        .map_err(|_| StoreError::Invalid("STRATEGY_CONFIGURATION_DIGEST_FAILED"))?;
+        Ok(format!("{:x}", Sha256::digest(canonical)))
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StrategyDefinitionVersion {
     pub definition_id: String,

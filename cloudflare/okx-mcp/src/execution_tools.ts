@@ -55,7 +55,6 @@ screenCompare.properties.action=choice('screen','compare');
 screenCompare.allOf=[{oneOf:[{required:['instruments']},{required:['universe']}]},
  {if:{properties:{action:{const:'compare'}}},then:{required:['instruments']}}];
 const portfolioHistory=action('summary',{accounts:array(account),start_ms:integer(0),end_ms:integer(1),strategies:array(text()),currencies:array(text(16)),cursor:text(512),limit:integer(1,50)},['accounts','start_ms','end_ms','limit']);portfolioHistory.properties.action=choice('summary','history');
-const startStop=action('start',{account,...mutation,...instance});startStop.properties.action=choice('start','stop');
 // These pairs differ only by action; share strict schemas, not public semantics.
 const pauseResume=action('pause',{account,...mutation,expected_revision:integer()});pauseResume.properties.action=choice('pause','resume');
 const researchRun=action('backtest',{...research,parameters:researchParameters,variants:array(researchParameters,64)},Object.keys(research).filter(k=>k!=='seed'));
@@ -73,7 +72,7 @@ const economicCase=object({instrument:text(64),product:choice('spot','linear_swa
  ['instrument','product','side','quantity','entry_price','exit_price','fees','funding']);
 export const ACTION_SCHEMAS:Record<string,Schema[]>={
  accounts:[action('list'),action('status',{account}),action('connect',{...mutation,credential_ref:text(),alias:text(64),label:text(128),limits,enabled:{type:'boolean'}},['idempotency_key','credential_ref','alias','limits','enabled']),pauseResume,action('set_limits',{account,...mutation,expected_revision:integer(),limits:limitsWithEntry})],
- strategies:[action('list',{account}),action('status',{account,...instance}),action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1,1),parameters:liveStrategyParams,instruments:array(text(64)),timeframe_ms:integer(1000),budget_usd:money}),action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:liveStrategyParams,budget_usd:money}),startStop,action('capital_assign',{account,...mutation,...instance,direction:choice('assign','release'),amount_usd:money,expected_authority_revision:integer(1)},['account','idempotency_key','instance_id','direction','amount_usd','expected_authority_revision'])],
+ strategies:[action('list',{account}),action('status',{account,...instance}),action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1,1),parameters:liveStrategyParams,instruments:array(text(64)),timeframe_ms:integer(1000),budget_usd:money}),action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:liveStrategyParams,budget_usd:money}),action('start',{account,...mutation,...instance,expected_revision:integer(1),configuration_digest:{type:'string',pattern:'^[0-9a-f]{64}$'}}),action('stop',{account,...mutation,...instance}),action('capital_assign',{account,...mutation,...instance,direction:choice('assign','release'),amount_usd:money,expected_authority_revision:integer(1)},['account','idempotency_key','instance_id','direction','amount_usd','expected_authority_revision'])],
  market:[screenCompare,action('instruments',{asset:text(16),settle_currency:text(16)},['asset']),action('snapshot',{instrument:text(64)}),action('microstructure',{instrument:text(64),size_contracts:money},['instrument']),action('capabilities')],
  research:[action('record_decision',{job_id:decisionJob,result_id:artifactId,expected_decision_id:artifactId,name:annotationText(128),hypothesis:annotationText(4096),status:choice('accepted','rejected','deferred'),reason:annotationText(2048)},['job_id','result_id','name','hypothesis','status','reason']),action('decision',{job_id:decisionJob,decision_id:artifactId},['job_id']),researchRun,action('benchmark',{idempotency_key:token}),action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50),view:choice('summary','trades','equity','variants','export')},['job_id','limit']),action('capabilities'),action('economics',{cases:{type:'array',items:economicCase,minItems:1,maxItems:8},data_mode:choice('counterfactual','historical_observed')}),action('validate',{...range,range_mode:choice('strict','normalize'),instruments:{...array(text(64),8),minItems:1},strategy_id:researchStrategies,parameters:researchParameters,costs,data_mode:choice('counterfactual','historical_observed')},['instruments','timeframe_ms','start_ms','end_ms','strategy_id','parameters','costs','data_mode'])],
  trade:[action('preview',{account,...trade},['account','operation','strategy_instance','instrument','side','sizing','order']),action('execute',{account,...mutation,...trade,expires_in_ms:integer(1,30000)},['account','idempotency_key','operation','strategy_instance','instrument','side','sizing','order','expires_in_ms']),action('status',{account,reference:text()}),action('cancel',{account,...mutation,reference:text()}),action('close',{account,...mutation,reference:text(),expires_in_ms:integer(1,30000)}),action('capabilities',{account}),action('preflight',{account})],
@@ -132,14 +131,9 @@ const definitions:Record<string,Schema>={d:money,t:text(),s:text(64),b:text(16),
  return Object.keys(used).length?{...factor(schema),$defs:shared}:schema;
 }
 
-// Multi-action accounts is an object tool with a strict server-side oneOf.
-// Unlike a top-level bare oneOf, an object root lets linked MCP clients add
-// their host-managed account selector (link_id) without changing action DTOs.
-// The host consumes that selector; validTool still rejects any extra wire keys.
+// A linked MCP account selector is consumed by the host, outside the wire DTO.
 function publicAccountsSchema():Schema {
  const variants=ACTION_SCHEMAS.accounts;
- // One typed field dictionary and strict action-specific allowed keys.
- // The linked-app host consumes link_id; native validTool still rejects it.
  const linkSelector={type:'string',pattern:'^link_[a-f0-9]{32}$'};
  const properties=Object.assign({},...variants.map(s=>s.properties));
  properties.action=choice('list','status','connect','pause','resume','set_limits');
@@ -156,10 +150,21 @@ function publicAccountsSchema():Schema {
    }))
  });
 }
+// Every strategy action requires the same account. Close additional fields
+// after the selected branch has evaluated its own action-specific properties.
+function publicStrategiesSchema():Schema {
+ return publicSchema({
+   type:'object',properties:{account},required:['account'],unevaluatedProperties:false,
+   oneOf:ACTION_SCHEMAS.strategies.map(({properties,required})=>{
+     const {account:_account,...actionProperties}=properties;
+     return {properties:actionProperties,required:required.filter((key:string)=>key!=='account')};
+   })
+ });
+}
 export const PUBLIC_TOOLS:Json[]=[
  ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')
    .map(([name,schemas])=>({name,description:TOOL_NOTES[name].description,
-     inputSchema:name==='accounts'?publicAccountsSchema():publicSchema({oneOf:schemas}),
+     inputSchema:name==='accounts'?publicAccountsSchema():name==='strategies'?publicStrategiesSchema():publicSchema({oneOf:schemas}),
      annotations:annotation(TOOL_NOTES[name])})),
  ...ACTION_SCHEMAS.trade.map(schema=>{
    const scopedAction=String(schema.properties.action.const);

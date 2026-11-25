@@ -236,8 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     if matches!(cli.command, Command::RuntimeContract) {
         println!(
-            "{}",
-            r#"{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false}"#
+            r#"{{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false}}"#
         );
         return Ok(());
     }

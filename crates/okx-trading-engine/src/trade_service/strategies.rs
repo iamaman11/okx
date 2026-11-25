@@ -16,6 +16,7 @@ impl TradeService {
             return Err("INVALID_STRATEGY_REQUEST".into());
         }
         let r = self.resources(account).await?;
+        let account_key = r.configuration.account_key.wire();
         if matches!(
             request,
             StrategyRequest::List {} | StrategyRequest::Status { .. }
@@ -94,7 +95,7 @@ impl TradeService {
             return Ok(completed(serde_json::to_value(result).map_err(err)?));
         }
         let body = request.clone();
-        let result: okx_trade_execution::StoreResult<StrategyInstance> = async {
+        let result = async {
             let operation = match &body {
                 StrategyRequest::Create {
                     idempotency_key, ..
@@ -128,9 +129,7 @@ impl TradeService {
                         "IDEMPOTENCY_CONFLICT",
                     ));
                 }
-                return serde_json::from_str::<StrategyInstance>(&old.result_ref).map_err(|_| {
-                    okx_trade_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT")
-                });
+                return Ok(old);
             }
             let instances = r.execution.store.strategy_instances(deadline()).await?;
             let (operation, action, instance, expected) = match &body {
@@ -144,10 +143,7 @@ impl TradeService {
                     timeframe_ms,
                     budget_usd,
                 } => {
-                    if !matches!(
-                        definition_id.as_str(),
-                        "ema_cross_v1" | "no_trade" | "close_momentum" | "two_bar_momentum"
-                    ) {
+                    if !strategy_signal::supports_definition(definition_id) {
                         return Err(okx_trade_execution::StoreError::Invalid(
                             "STRATEGY_DEFINITION_UNSUPPORTED",
                         ));
@@ -226,6 +222,7 @@ impl TradeService {
                 StrategyRequest::Start {
                     idempotency_key,
                     instance_id,
+                    ..
                 }
                 | StrategyRequest::Stop {
                     idempotency_key,
@@ -238,7 +235,35 @@ impl TradeService {
                         .ok_or(okx_trade_execution::StoreError::Invalid(
                             "STRATEGY_INSTANCE_NOT_FOUND",
                         ))?;
-                    let expected = i.policy_revision;
+                    let expected = match &body {
+                        StrategyRequest::Start {
+                            expected_revision, ..
+                        } => {
+                            if !strategy_signal::supports_definition(&i.definition_id) {
+                                return Err(okx_trade_execution::StoreError::Invalid(
+                                    "STRATEGY_DEFINITION_UNSUPPORTED",
+                                ));
+                            }
+                            let config =
+                                serde_json::from_str::<StrategyConfigurationV1>(&i.parameters)
+                                    .map_err(|_| {
+                                        okx_trade_execution::StoreError::Invalid(
+                                            "STRATEGY_CONFIGURATION_CORRUPT",
+                                        )
+                                    })?;
+                            if !config.valid() {
+                                return Err(okx_trade_execution::StoreError::Invalid(
+                                    "STRATEGY_CONFIGURATION_INVALID",
+                                ));
+                            }
+                            i64::try_from(*expected_revision).map_err(|_| {
+                                okx_trade_execution::StoreError::Invalid(
+                                    "INSTANCE_REVISION_CONFLICT",
+                                )
+                            })?
+                        }
+                        _ => i.policy_revision,
+                    };
                     i.policy_revision =
                         expected
                             .checked_add(1)
@@ -267,11 +292,20 @@ impl TradeService {
             // Strategy budget is a per-decision maximum modeled loss in USD, NOT a
             // notional allocation and NOT a central reservation. Only actual plans
             // reserve aggregate campaign capacity through RiskBook CAS.
-            let ceiling = Decimal::from_str(&campaign_limit_usd)
-                .map_err(|_| okx_trade_execution::StoreError::Invalid("INVALID_CAMPAIGN_BUDGET"))?;
-            validate_strategy_risk_budget_usd(instance.budget, ceiling)?;
-            let receipt = r
-                .execution
+            if action != "stop" {
+                let ceiling = Decimal::from_str(&campaign_limit_usd).map_err(|_| {
+                    okx_trade_execution::StoreError::Invalid("INVALID_CAMPAIGN_BUDGET")
+                })?;
+                validate_strategy_risk_budget_usd(instance.budget, ceiling)?;
+            }
+            let confirmed_configuration_digest = match &body {
+                StrategyRequest::Start {
+                    configuration_digest,
+                    ..
+                } => Some(configuration_digest.clone()),
+                _ => None,
+            };
+            r.execution
                 .store
                 .mutate_strategy_instance(
                     deadline(),
@@ -281,16 +315,30 @@ impl TradeService {
                         action: action.into(),
                         instance,
                         expected_revision: expected,
+                        confirmed_configuration_digest,
                         time: now(),
                     },
                 )
-                .await?;
-            serde_json::from_str::<StrategyInstance>(&receipt.result_ref)
-                .map_err(|_| okx_trade_execution::StoreError::Invalid("STRATEGY_RECEIPT_CORRUPT"))
+                .await
         }
         .await;
-        let result = result.map_err(err)?;
-        Ok(completed(json!({"instance":result})))
+        let receipt = result.map_err(err)?;
+        let instance = serde_json::from_str::<StrategyInstance>(&receipt.result_ref)
+            .map_err(|_| "STRATEGY_RECEIPT_CORRUPT")?;
+        let mut reply = json!({"account":account_key,"instance":instance});
+        if instance.instance_id != "manual" {
+            let digest = instance.configuration_digest(&account_key).map_err(err)?;
+            reply["configuration_digest"] = json!(digest);
+            if receipt.kind == "STRATEGY_start" {
+                reply["activation_receipt"] = json!({
+                    "operation_id": receipt.operation_id,
+                    "committed_at": receipt.committed_at,
+                    "confirmed_revision": instance.policy_revision - 1,
+                    "configuration_digest": digest,
+                });
+            }
+        }
+        Ok(completed(reply))
     }
     pub async fn run(&self, shutdown: tokio::sync::watch::Receiver<bool>) {
         tokio::join!(

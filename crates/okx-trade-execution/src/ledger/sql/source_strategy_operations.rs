@@ -49,9 +49,13 @@ impl AccountStore {
         let partial = positions.len() > 50;
         positions.truncate(50);
         let initialized_at = Self::source_capture_state_sql(db, scope)?.initialized_at;
-        Ok(
-            serde_json::json!({"instance":instance,"definition":Self::strategy_definition_sql(db,scope,id)?,"positions":positions,"positions_partial":partial,"limits":{"allocated_budget_usd":instance.budget,"policy_revision":instance.policy_revision},"nav":Self::nav_summary_sql(db,scope,initialized_at,now,&[id.into()],&["USD".into()])?,"capital_scope":if id=="manual" {"account"} else {"strategy"},"risk":Self::financial_risk_sql(db,scope,now,if id=="manual" {None} else {Some(id)})?}),
-        )
+        let mut result = serde_json::json!({"instance":instance,"definition":Self::strategy_definition_sql(db,scope,id)?,"positions":positions,"positions_partial":partial,"limits":{"allocated_budget_usd":instance.budget,"policy_revision":instance.policy_revision},"nav":Self::nav_summary_sql(db,scope,initialized_at,now,&[id.into()],&["USD".into()])?,"capital_scope":if id=="manual" {"account"} else {"strategy"},"risk":Self::financial_risk_sql(db,scope,now,if id=="manual" {None} else {Some(id)})?});
+        if let Some((_, account)) = scope.filter(|_| id != "manual") {
+            result["account"] = serde_json::json!(account);
+            result["configuration_digest"] =
+                serde_json::json!(instance.configuration_digest(account)?);
+        }
+        Ok(result)
     }
     fn latest_strategy_claim_sql(
         db: &Connection,

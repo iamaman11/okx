@@ -128,6 +128,9 @@ impl AccountStore {
         if prior.as_ref().map(|i| i.policy_revision) != expected_revision {
             return Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"));
         }
+        if scope.is_some() && action == "update" && prior.as_ref().is_some_and(|i| i.enabled) {
+            return Err(StoreError::Invalid("STRATEGY_UPDATE_REQUIRES_STOPPED"));
+        }
         let next_revision = prior
             .as_ref()
             .map(|i| {

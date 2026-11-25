@@ -121,6 +121,8 @@ pub enum StrategyRequest {
     Start {
         idempotency_key: String,
         instance_id: String,
+        expected_revision: u64,
+        configuration_digest: String,
     },
     Stop {
         idempotency_key: String,
@@ -505,8 +507,18 @@ impl StrategyRequest {
             Self::Start {
                 idempotency_key,
                 instance_id,
+                expected_revision,
+                configuration_digest,
+            } => {
+                id(idempotency_key)
+                    && name(instance_id)
+                    && *expected_revision > 0
+                    && configuration_digest.len() == 64
+                    && configuration_digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             }
-            | Self::Stop {
+            Self::Stop {
                 idempotency_key,
                 instance_id,
             } => id(idempotency_key) && name(instance_id),

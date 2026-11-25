@@ -87,6 +87,11 @@ async fn risk_book_contract_native_public_strategies_crud_claim_no_trade_share_o
     let start = StrategyRequest::Start {
         idempotency_key: "native_strategy_start".into(),
         instance_id: INSTANCE.into(),
+        expected_revision: 1,
+        configuration_digest: initial_status["data"]["configuration_digest"]
+            .as_str()
+            .unwrap()
+            .into(),
     };
     let started = request(&fixture, &start)
         .await

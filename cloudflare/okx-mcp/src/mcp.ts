@@ -156,6 +156,9 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
  const scopedAction=typeof name==='string'&&name.startsWith('trade.')?name.slice(6):null;
  const nativeName=scopedAction===null?name:'trade';
  const nativeArgs=scopedAction===null?args:{...args,action:scopedAction};
+ if(name==='strategies'&&isObject(args)&&args.action==='start'&&
+    (!('expected_revision' in args)||!('configuration_digest' in args)))
+   return jsonRpcError(id,-32602,'strategy start requires expected_revision and configuration_digest from status');
  if(!published||!isObject(args)||(scopedAction!==null&&'action' in args)||
     !validTool(nativeName,nativeArgs))return jsonRpcError(id,-32602,'invalid tool action payload');
  try{

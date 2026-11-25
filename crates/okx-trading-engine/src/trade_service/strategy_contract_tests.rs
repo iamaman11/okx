@@ -157,8 +157,14 @@ async fn public_strategy_lifecycle_replays_cas_and_read_models_preserve_money() 
     let requests = fixture.feed.requests.lock().unwrap().clone();
     let posts = fixture.feed.outbound_posts.lock().unwrap().clone();
     let denied = fixture.feed.denied_routes.lock().unwrap().clone();
-    let created =
-        completed_data(fixture.request(create("create_contract")).await)["instance"].clone();
+    let initial = completed_data(fixture.request(create("create_contract")).await);
+    let created = initial["instance"].clone();
+    let mut start = StrategyRequest::Start {
+        idempotency_key: "start_contract".into(),
+        instance_id: INSTANCE.into(),
+        expected_revision: 1,
+        configuration_digest: initial["configuration_digest"].as_str().unwrap().into(),
+    };
     assert_eq!(created["policy_revision"], 1);
     assert_eq!(created["enabled"], false);
     assert_eq!(
@@ -181,8 +187,8 @@ async fn public_strategy_lifecycle_replays_cas_and_read_models_preserve_money() 
         *budget_usd = "3".into();
     }
     rejected(fixture.request(conflicting).await, "IDEMPOTENCY_CONFLICT");
-    let changed =
-        completed_data(fixture.request(update("update_contract", 1)).await)["instance"].clone();
+    let updated = completed_data(fixture.request(update("update_contract", 1)).await);
+    let changed = updated["instance"].clone();
     assert_eq!(changed["policy_revision"], 2);
     assert_ne!(changed["definition_version"], created["definition_version"]);
     assert_eq!(
@@ -218,16 +224,50 @@ async fn public_strategy_lifecycle_replays_cas_and_read_models_preserve_money() 
             .unwrap()
             .is_none()
     );
-    let start = StrategyRequest::Start {
-        idempotency_key: "start_contract".into(),
-        instance_id: INSTANCE.into(),
-    };
-    let started = completed_data(fixture.request(start.clone()).await)["instance"].clone();
+    rejected(
+        fixture.request(start.clone()).await,
+        "INSTANCE_REVISION_CONFLICT",
+    );
+    if let StrategyRequest::Start {
+        expected_revision, ..
+    } = &mut start
+    {
+        *expected_revision = 2;
+    }
+    rejected(
+        fixture.request(start.clone()).await,
+        "STRATEGY_CONFIGURATION_DIGEST_MISMATCH",
+    );
+    if let StrategyRequest::Start {
+        configuration_digest,
+        ..
+    } = &mut start
+    {
+        *configuration_digest = updated["configuration_digest"].as_str().unwrap().into();
+    }
+    let started_reply = completed_data(fixture.request(start.clone()).await);
+    let started = started_reply["instance"].clone();
     assert_eq!(started["enabled"], true);
     assert_eq!(started["policy_revision"], 3);
     assert_eq!(
-        completed_data(fixture.request(start).await)["instance"],
-        started
+        started_reply["activation_receipt"]["operation_id"],
+        "start_contract"
+    );
+    assert_eq!(started_reply["activation_receipt"]["confirmed_revision"], 2);
+    assert_eq!(
+        started_reply["activation_receipt"]["configuration_digest"],
+        updated["configuration_digest"]
+    );
+    assert!(
+        started_reply["activation_receipt"]["committed_at"]
+            .as_i64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(completed_data(fixture.request(start).await), started_reply);
+    rejected(
+        fixture.request(update("while_active", 3)).await,
+        "STRATEGY_UPDATE_REQUIRES_STOPPED",
     );
     let stop = StrategyRequest::Stop {
         idempotency_key: "stop_contract".into(),
@@ -285,7 +325,7 @@ async fn public_strategy_lifecycle_replays_cas_and_read_models_preserve_money() 
 async fn public_strategy_capital_uses_authenticated_flat_opening_and_paused_authority() {
     let fixture = Fixture::new().await;
     let capture = fixture.owner.recorded_capture_gate.write().await;
-    completed_data(fixture.request(create("capital_create")).await);
+    let created = completed_data(fixture.request(create("capital_create")).await);
     // initialize_flat received the real observer's identity-bound, stable flat
     // opening; do not insert a COMPLETE NAV point or set a test coverage flag.
     let capital_before = fixture
@@ -331,6 +371,8 @@ async fn public_strategy_capital_uses_authenticated_flat_opening_and_paused_auth
             .request(StrategyRequest::Start {
                 idempotency_key: "paused_start".into(),
                 instance_id: INSTANCE.into(),
+                expected_revision: 1,
+                configuration_digest: created["configuration_digest"].as_str().unwrap().into(),
             })
             .await,
         "ACCOUNT_NEW_RISK_PAUSED",

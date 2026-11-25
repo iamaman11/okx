@@ -305,8 +305,11 @@ for(const view of ['summary','trades','equity','variants'])
 fail(!validTool('research',{...researchResult,view:'unsupported'}),'research view strictly enumerated');
 console.log('live_strategy_v1_and_research_views PASS');
 const start=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='start')!.positive;
-fail(validTool('strategies',{...start,action:'stop'}),'strategy stop shares strict schema');
-fail(!validTool('strategies',{...start,action:'stop',raw_rpc:'forbidden'}),'strict stop rejects extra');
+const {expected_revision,configuration_digest,...stop}=start;
+fail(validTool('strategies',{...stop,action:'stop'}),'strategy stop uses instance identity');
+fail(!validTool('strategies',{...stop,action:'stop',raw_rpc:'forbidden'}),'strict stop rejects extra');
+fail(!validTool('strategies',{...stop,action:'start'}),'start requires revision and digest');
+fail(!validTool('strategies',{...start,configuration_digest:'bad'}),'start rejects malformed digest');
 const accountLimit=payloadFixtures.find(x=>x.tool==='accounts'&&x.action==='set_limits')!.positive;
 fail(validTool('accounts',{...accountLimit,limits:{...accountLimit.limits,max_entry_usd:'10'}}),'typed account USD entry cap via existing CAS management');
 fail(!validTool('accounts',{...accountLimit,limits:{...accountLimit.limits,max_entry_usd:'0'}}),'zero account entry cap rejected at tool boundary');
@@ -383,11 +386,21 @@ for(const tool of PUBLIC_TOOLS as any[]){
   fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
     'native protocol never accepts host-only link selector');
  }else{
-  fail(JSON.stringify(expanded)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
+  const variants=tool.name==='strategies'?expanded.oneOf.map((branch:any)=>({
+    properties:{action:branch.properties.action,account:expanded.properties.account,...branch.properties},
+    required:['action','account',...branch.required.filter((key:string)=>key!=='action')],
+    additionalProperties:false,
+  })):expanded.oneOf;
+  if(tool.name==='strategies')
+    fail(expanded.type==='object' && expanded.unevaluatedProperties===false
+      && expanded.required.length===1 && expanded.required[0]==='account',
+      'factored strategies schema stays strict at the root');
+  const comparable=tool.name==='strategies'?{oneOf:variants}:expanded;
+  fail(JSON.stringify(comparable)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
     `exact public schema factoring ${tool.name}`);
   for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))
    for(const input of [fixture.positive,...fixture.negative])
-    fail(matches(expanded,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),
+    fail(matches(comparable,input)===matches({oneOf:ACTION_SCHEMAS[tool.name]},input),
       `factored positive/negative semantics ${tool.name}.${fixture.action}`);
  }
 }

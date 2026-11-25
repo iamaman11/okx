@@ -403,11 +403,49 @@
       "action": "start",
       "account": "fixture",
       "idempotency_key": "command_0001",
-      "instance_id": "fixture"
+      "instance_id": "fixture",
+      "expected_revision": 1,
+      "configuration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     },
     "negative": [
       {
         "action": "start",
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 1,
+        "configuration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "raw_rpc": "forbidden"
+      },
+      {
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 1,
+        "configuration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "action": 12,
+        "account": "fixture",
+        "idempotency_key": "command_0001",
+        "instance_id": "fixture",
+        "expected_revision": 1,
+        "configuration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  {
+    "tool": "strategies",
+    "action": "stop",
+    "positive": {
+      "action": "stop",
+      "account": "fixture",
+      "idempotency_key": "command_0001",
+      "instance_id": "fixture"
+    },
+    "negative": [
+      {
+        "action": "stop",
         "account": "fixture",
         "idempotency_key": "command_0001",
         "instance_id": "fixture",
