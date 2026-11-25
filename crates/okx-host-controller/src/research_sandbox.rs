@@ -1554,7 +1554,9 @@ mod native {
                 &scope,
                 &host_scope,
                 &incarnation,
-                "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime",
+                // Loopback-only synthetic endpoint: this test must never
+                // contact production Edge or transmit its disposable bearer.
+                "wss://127.0.0.1:9/s2-disposable",
                 false,
             )
             .expect("real suspended LPAC CreateProcessW, token, ACL, Job and READY required");
