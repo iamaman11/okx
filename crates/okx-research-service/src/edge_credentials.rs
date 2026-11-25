@@ -146,6 +146,13 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
     }
     let read_error = unsafe { GetLastError() };
     if !denied_or_missing(read_error) {
+        // Disposable debug-only witness: the parent deliberately discards
+        // stderr and must still learn the exact unexpected Win32 error.
+        // A packed process exit is ALWAYS failure; no bearer/READY is sent.
+        #[cfg(all(feature = "s2-disposable-windows", debug_assertions))]
+        if read_error <= 0x00ff_ffff {
+            std::process::exit((0x5300_0000u32 | read_error) as i32);
+        }
         return Err("RESEARCH_SANDBOX_CREDMAN_READ_UNEXPECTED".into());
     }
 

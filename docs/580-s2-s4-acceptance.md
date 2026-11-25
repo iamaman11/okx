@@ -78,7 +78,7 @@ Ready/merge security PR или включать отдельный Research toke
 
 ### Наблюдаемый Windows-прогресс PR #596 (25.11.2026)
 
-Все четыре opt-in запуска `research-lpac-disposable-windows` завершились
+Все пять opt-in запусков `research-lpac-disposable-windows` завершились
 **FAIL**, не S2 PASS. В каждом выполнены **5/5** отдельных ACL-тестов с
 именованными witness lines, но шестой физический suspended-LPAC → Job → READY
 тест не прошёл:
@@ -89,10 +89,14 @@ Ready/merge security PR или включать отдельный Research toke
 | [45701532922](https://github.com/iamaman11/okx/actions/runs/45701532922), `1da1c6ff` | ACL **5/5**; диагностика показала `FILE_READ_EA=0x8`, ошибочно считавшийся mutable; настоящий `FILE_WRITE_ATTRIBUTES=0x100` остаётся write right | `FAIL`; после уточнения маски image gate требует повторного прогона |
 | [45702285358](https://github.com/iamaman11/okx/actions/runs/45702285358), `ef151fca` | После исправления read-EA image gate пройден; физический тест остановился на `ResearchSandboxDenied("worker_ready_pipe")`, ACL **5/5** | `FAIL`, READY не доказан |
 | [45703166591](https://github.com/iamaman11/okx/actions/runs/45703166591), `9b87029b` | ACL **5/5**; typed отказ `worker_startup_auth_or_sandbox_denied_before_ready` (код дочернего процесса **76**) | `FAIL`, ребёнок завершился до READY |
+| [45704093417](https://github.com/iamaman11/okx/actions/runs/45704093417), `7117fe84` | Draft owner-feedback **SUCCESS**; ACL **5/5**; LPAC дочерний процесс завершился с `worker_credman_read_probe_unexpected_before_ready` (код **83**) | `FAIL`, Win32 причина `CredReadW` требует числовой диагностики |
 
 В текущем кандидате добавлены отдельные typed child exit **75–87**
 для локализации первой отказавшей стадии. Их новый разбор пока **не проверен
-физическим прогоном**. Наличие ACL witness не доказывает успешный LPAC token/Job,
+полностью физическим прогоном**: код 83 достигнут, но ещё не классифицирован.
+Debug-only числовой канал `GetLastError()` при `CredReadW` также должен получить
+свой отдельный Windows witness; неизвестный код не является доказательством deny.
+Наличие ACL witness не доказывает успешный LPAC token/Job,
 READY/bearer, parent-positive/child-negative CredMan/finance canary,
 restart/rollback или установленный CONTROL. `S2 PHYSICAL_DENY=NOT_PROVEN`;
 отдельные 62 финансовых контракта / 107 свидетелей этим smoke не заменяются.

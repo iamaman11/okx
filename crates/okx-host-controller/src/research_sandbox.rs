@@ -1211,6 +1211,9 @@ mod native {
         // Exit codes are the only child diagnostic channel before READY:
         // stderr is deliberately NUL and never contains credentials/logs.
         // Do not infer a successful sandbox proof from any exit status.
+        if code & 0xff00_0000 == 0x5300_0000 {
+            return "worker_credman_read_probe_unexpected_before_ready";
+        }
         match code {
             75 => "worker_startup_credential_unavailable_before_ready",
             76 => "worker_startup_auth_or_sandbox_denied_before_ready",
@@ -1229,6 +1232,13 @@ mod native {
         }
     }
 
+    #[cfg(test)]
+    fn report_disposable_child_exit(code: u32) {
+        if code & 0xff00_0000 == 0x5300_0000 {
+            eprintln!("OKX_S2_CREDREAD_WIN32_ERROR={}", code & 0x00ff_ffff);
+        }
+    }
+
     fn receive_ready(pipe: &OwnedHandle, child: HANDLE, nonce: &str) -> HostControlResult<()> {
         let started = Instant::now();
         let mut data = Vec::new();
@@ -1240,6 +1250,8 @@ mod native {
                     if unsafe { GetExitCodeProcess(child, &mut code) } == 0 {
                         return Err(denied("worker_exit_code_unavailable"));
                     }
+                    #[cfg(test)]
+                    report_disposable_child_exit(code);
                     return Err(denied(readiness_exit_stage(code)));
                 }
                 _ => return Err(denied("worker_ready_wait_failed")),
@@ -1270,6 +1282,8 @@ mod native {
                     }
                     #[cfg(test)]
                     eprintln!("OKX_S2_CHILD_PRE_READY_EXIT_CODE={code}");
+                    #[cfg(test)]
+                    report_disposable_child_exit(code);
                     return Err(denied(readiness_exit_stage(code)));
                 }
                 return Err(denied("worker_ready_pipe"));
@@ -1764,6 +1778,10 @@ mod native {
             assert_eq!(
                 readiness_exit_stage(77),
                 "worker_resource_job_unavailable_before_ready"
+            );
+            assert_eq!(
+                readiness_exit_stage(0x5300_0057),
+                "worker_credman_read_probe_unexpected_before_ready"
             );
             for (code, stage) in [
                 (78, "worker_sandbox_attestation_invalid_before_ready"),
