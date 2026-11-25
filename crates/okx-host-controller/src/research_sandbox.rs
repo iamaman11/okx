@@ -2,6 +2,10 @@
 //! verified Research binary and a fresh kill-on-close Job before calling here.
 //! No Engine process, finance database, or installed ACL is modified.
 
+#[cfg(windows)]
+pub(crate) const RESEARCH_APP_CONTAINER_PROFILE_NAME: &str =
+    "iamaman11.okx.research.appcontainer.v1";
+
 #[cfg(any(windows, test))]
 use serde::{Deserialize, Serialize};
 #[cfg(any(windows, test))]
@@ -106,7 +110,7 @@ mod native {
             MapGenericMask, OWNER_SECURITY_INFORMATION, PRIVILEGE_SET, PSID, SE_DACL_PROTECTED,
             SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SecurityImpersonation,
             TOKEN_APPCONTAINER_INFORMATION, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL,
-            TOKEN_QUERY, TokenAppContainerSid, TokenCapabilities, TokenImpersonation,
+            TOKEN_QUERY, TokenAppContainerSid, TokenCapabilities, TokenGroups, TokenImpersonation,
             TokenIntegrityLevel, TokenIsAppContainer,
         },
         Storage::FileSystem::{
@@ -131,7 +135,6 @@ mod native {
     use super::{MAX_READY_BYTES, startup_frame, verify_ready};
     use crate::{HostControlError, HostControlResult, job::AgentJob};
 
-    const PROFILE_NAME: &str = "iamaman11.okx.research.appcontainer.v1";
     const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
     fn denied(stage: &'static str) -> HostControlError {
@@ -252,7 +255,7 @@ mod native {
     }
 
     fn profile_sid() -> HostControlResult<ProfileSid> {
-        let name = wide(OsStr::new(PROFILE_NAME));
+        let name = wide(OsStr::new(super::RESEARCH_APP_CONTAINER_PROFILE_NAME));
         let display = wide(OsStr::new("OKX isolated Research worker"));
         let mut sid = null_mut();
         let result = unsafe {
@@ -279,6 +282,13 @@ mod native {
             return Err(denied("appcontainer_sid"));
         }
         Ok(ProfileSid(sid))
+    }
+
+    pub(super) fn ensure_profile() -> HostControlResult<()> {
+        // Reuse the launcher's idempotent CreateAppContainerProfile/derive
+        // contract before an installer binds ACLs to the package SID.
+        let _package = profile_sid()?;
+        Ok(())
     }
 
     fn capability_sid() -> HostControlResult<LocalSid> {
@@ -385,7 +395,40 @@ mod native {
         {
             return Err(denied("token_internet_capability"));
         }
+        // LPAC must really opt out of the broad application-package groups.
+        // Merely setting the process creation policy does not attest the
+        // effective child token on this Windows host.
+        let ordinary = token_info(raw(&token), TokenGroups)?;
+        let ordinary_groups = unsafe { &*(ordinary.as_ptr().cast::<TOKEN_GROUPS>()) };
+        let ordinary_count = ordinary_groups.GroupCount as usize;
+        if ordinary_count == 0
+            || ordinary_count > 1024
+            || size_of::<TOKEN_GROUPS>()
+                .saturating_add(ordinary_count.saturating_sub(1) * size_of::<SID_AND_ATTRIBUTES>())
+                > ordinary.len() * size_of::<usize>()
+        {
+            return Err(denied("token_groups_layout"));
+        }
+        let broad_aap = sid_from_string("S-1-15-2-1")?;
+        if !token_groups_exclude_all_app_packages(
+            unsafe { std::slice::from_raw_parts(ordinary_groups.Groups.as_ptr(), ordinary_count) },
+            broad_aap.0,
+        ) {
+            return Err(denied("token_broad_application_packages"));
+        }
         Ok(token)
+    }
+
+    fn token_groups_exclude_all_app_packages(
+        groups: &[SID_AND_ATTRIBUTES],
+        broad_aap: PSID,
+    ) -> bool {
+        // ARAP (S-1-15-2-2) may legitimately participate in LPAC's restricted
+        // identity; the important opt-out is ordinary All Application Packages
+        // (AAP, S-1-15-2-1). Asset DACLs separately deny grants to *either*.
+        !groups
+            .iter()
+            .any(|group| group.Sid.is_null() || unsafe { EqualSid(group.Sid, broad_aap) } != 0)
     }
 
     fn can_access(token: HANDLE, path: &Path, mask: u32) -> HostControlResult<bool> {
@@ -1292,6 +1335,29 @@ mod native {
         }
 
         #[test]
+        fn broad_aap_token_group_is_rejected_but_arap_is_not_misidentified_as_aap() {
+            let aap = sid_from_string("S-1-15-2-1").unwrap();
+            let arap = sid_from_string("S-1-15-2-2").unwrap();
+            let ordinary = sid_from_string("S-1-5-21-1-2-3-1001").unwrap();
+            let group = |sid| SID_AND_ATTRIBUTES {
+                Sid: sid,
+                Attributes: 0x4,
+            };
+            assert!(token_groups_exclude_all_app_packages(
+                &[group(ordinary.0)],
+                aap.0,
+            ));
+            assert!(!token_groups_exclude_all_app_packages(
+                &[group(ordinary.0), group(aap.0)],
+                aap.0,
+            ));
+            assert!(token_groups_exclude_all_app_packages(
+                &[group(arap.0)],
+                aap.0,
+            ));
+        }
+
+        #[test]
         #[ignore = "runs only on an explicitly disposable Windows CI identity"]
         fn synthetic_finance_credential_and_file_canaries_have_parent_positive_controls() {
             assert_eq!(
@@ -1310,6 +1376,11 @@ mod native {
 
 #[cfg(windows)]
 pub use native::{ResearchChild, launch_research};
+
+#[cfg(windows)]
+pub(crate) fn ensure_appcontainer_profile() -> crate::HostControlResult<()> {
+    native::ensure_profile()
+}
 
 #[cfg(test)]
 mod tests {
