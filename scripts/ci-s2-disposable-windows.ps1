@@ -137,8 +137,11 @@ try {
                 $invokeError = "S2_DISPOSABLE_LOG_READ_OR_HASH_FAILED:$($_.Exception.Message)"
             }
         }
-        $namedExecuted = $log -cmatch ('(?m)^test ' + [regex]::Escape($testName) + ' \.\.\. (?:ok|FAILED)$')
-        $namedPass = $log -cmatch ('(?m)^test ' + [regex]::Escape($testName) + ' \.\.\. ok$')
+        # Cargo's Windows output is CRLF. In .NET multiline regex, `$` is
+        # before `\n` but not before a preceding `\r`; allow that one byte
+        # without weakening the exact anchored name/result requirement.
+        $namedExecuted = $log -cmatch ('(?m)^test ' + [regex]::Escape($testName) + ' \.\.\. (?:ok|FAILED)\r?$')
+        $namedPass = $log -cmatch ('(?m)^test ' + [regex]::Escape($testName) + ' \.\.\. ok\r?$')
         $onePassed = $log -cmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [1-9][0-9]* filtered out;'
         # Printed only after the assertions inside the respective Win32 test;
         # the Cargo result line by itself is not a physical-witness receipt.

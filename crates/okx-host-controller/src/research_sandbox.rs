@@ -1131,6 +1131,55 @@ mod native {
         Ok(result)
     }
 
+    fn safe_parent_windows_environment_directory(value: &str) -> bool {
+        // AppContainer needs these Windows path variables, but a custom
+        // environment is still mandatory: inherit neither PATH nor secrets.
+        // Explicitly reject UNC/device paths and drive-relative paths so a
+        // child cannot be redirected to a network or installed OKX root.
+        let bytes = value.as_bytes();
+        if bytes.len() < 4
+            || bytes.len() > 32767
+            || !bytes[0].is_ascii_alphabetic()
+            || bytes[1] != b':'
+            || !matches!(bytes[2], b'\\' | b'/')
+            || value.chars().any(|c| c.is_control() || c == '"')
+            || value[2..].contains(':')
+        {
+            return false;
+        }
+        let lower = value.to_ascii_lowercase().replace('/', "\\");
+        if lower == r"c:\okx" || lower.starts_with(r"c:\okx\") {
+            return false;
+        }
+        !Path::new(value)
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    }
+
+    fn checked_parent_windows_environment_directory(
+        name: &'static str,
+    ) -> HostControlResult<String> {
+        use windows_sys::Win32::Storage::FileSystem::{DRIVE_FIXED, GetDriveTypeW};
+
+        let value = std::env::var(name)
+            .map_err(|_| denied("startup_windows_directory_environment_missing"))?;
+        if !safe_parent_windows_environment_directory(&value)
+            || !fs::metadata(&value)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+        {
+            return Err(denied("startup_windows_directory_environment_invalid"));
+        }
+        // A drive-letter path can still be a mapped network drive. The
+        // explicit directory allowlist must resolve to local fixed storage.
+        let drive_root = wide(OsStr::new(&value[..3]));
+        if unsafe { GetDriveTypeW(drive_root.as_ptr()) } != DRIVE_FIXED {
+            return Err(denied("startup_windows_directory_drive_not_local"));
+        }
+        checked_regular_path(Path::new(&value))?;
+        Ok(value)
+    }
+
     fn quoted_path(path: &Path) -> HostControlResult<String> {
         let text = path
             .to_str()
@@ -1328,6 +1377,12 @@ mod native {
                 "SystemRoot",
                 std::env::var("SystemRoot").map_err(|_| denied("system_root"))?,
             ),
+            (
+                "LOCALAPPDATA",
+                checked_parent_windows_environment_directory("LOCALAPPDATA")?,
+            ),
+            ("TEMP", checked_parent_windows_environment_directory("TEMP")?),
+            ("TMP", checked_parent_windows_environment_directory("TMP")?),
             ("OKX_RESEARCH_EDGE_WSS_URL", edge_wss.to_owned()),
             ("OKX_RESEARCH_RUNTIME_ID", "windows-primary".to_owned()),
             ("OKX_RESEARCH_HOST_SCOPE", host_scope.to_owned()),
@@ -1664,15 +1719,46 @@ mod native {
             // parent secret. It must not appear in the child's environment.
             let environment = environment_block(&[
                 ("SystemRoot", r"C:\Windows".into()),
+                ("LOCALAPPDATA", r"C:\Users\disposable\AppData\Local".into()),
+                ("TEMP", r"C:\Users\disposable\AppData\Local\Temp".into()),
+                ("TMP", r"C:\Users\disposable\AppData\Local\Temp".into()),
                 ("OKX_RESEARCH_SANDBOX_NONCE", "a".repeat(32)),
             ])
             .unwrap();
             let visible = String::from_utf16_lossy(&environment);
+            assert!(visible.contains("LOCALAPPDATA="));
+            assert!(visible.contains("TEMP="));
+            assert!(visible.contains("TMP="));
             assert!(!visible.contains("FINANCE"));
             assert!(!visible.contains("GITHUB_TOKEN"));
             assert!(!visible.contains("CREDENTIAL"));
             assert!(visible.ends_with("\0\0"));
             assert!(environment_block(&[("TEST", "value\0secret".into())]).is_err());
+        }
+
+        #[test]
+        fn appcontainer_windows_path_allowlist_rejects_remote_relative_and_install_roots() {
+            assert!(safe_parent_windows_environment_directory(
+                r"C:\Users\disposable\AppData\Local\Temp"
+            ));
+            assert!(safe_parent_windows_environment_directory(r"D:\a\_temp"));
+            for forbidden in [
+                "",
+                r"TEMP\child",
+                r"C:relative\child",
+                r"\\server\share\temp",
+                r"\\?\C:\Users\disposable\Temp",
+                r"C:\okx",
+                r"C:\okx\financial\exchange",
+                r"C:\Users\disposable\..\Finance",
+                "C:\\Users\\disposable\\Temp\0suffix",
+                "C:\\Users\\disposable\\Temp\nGITHUB_TOKEN=secret",
+            ] {
+                assert!(
+                    !safe_parent_windows_environment_directory(forbidden),
+                    "unsafe appcontainer environment path was accepted"
+                );
+            }
         }
 
         #[test]

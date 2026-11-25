@@ -182,11 +182,15 @@ function validate(yaml, fileNames, runnerScript = disposableScript) {
   assert.match(runnerScript, /\$env:OKX_DISPOSABLE_RESEARCH_EXE = /);
   assert.match(runnerScript, /cargo test --locked -p okx-host-controller --lib \$testName -- --ignored --exact --show-output --test-threads 1/,
     'S2_CAPTURED_SUCCESS_STDOUT_MUST_KEEP_NAMED_RESULT_LINE_ATOMIC');
-  assert.match(runnerScript, /\$namedPass = \$log -cmatch/);
+  assert.match(runnerScript,
+    /\$namedPass = \$log -cmatch \('\(\?m\)\^test ' \+ \[regex\]::Escape\(\$testName\) \+ ' \\\.\\\.\\\. ok\\r\?\$'\)/,
+    'S2_EXACT_NAME_PASS_MUST_ACCEPT_WINDOWS_CRLF_ONLY');
   assert.match(runnerScript, /test result: ok\\\. 1 passed; 0 failed; 0 ignored; 0 measured; \[1-9\]\[0-9\]\* filtered out;/);
   assert.match(runnerScript, /\$hasWitness = \$log\.Contains\(\$witness\)/);
   assert.match(runnerScript, /\$testPassed = \$testExit -eq 0 -and \$null -eq \$invokeError -and\n\s+\$namedPass -and \$onePassed -and \$hasWitness/);
-  assert.match(runnerScript, /\$namedExecuted = \$log -cmatch.*\(\?:ok\|FAILED\)/);
+  assert.match(runnerScript,
+    /\$namedExecuted = \$log -cmatch \('\(\?m\)\^test ' \+ \[regex\]::Escape\(\$testName\) \+ ' \\\.\\\.\\\. \(\?:ok\|FAILED\)\\r\?\$'\)/,
+    'S2_EXACT_NAME_EXECUTION_MUST_ACCEPT_WINDOWS_CRLF_ONLY');
   assert.match(runnerScript, /\$receipt.attempted_exact_test_count \+= 1/);
   assert.match(runnerScript, /\$receipt.executed_exact_test_count \+= 1/);
   assert.match(runnerScript, /\$receipt.passed_exact_test_count \+= 1/);
@@ -1116,6 +1120,12 @@ for (const [before, after, reason] of [
   ['-- --ignored --exact --show-output --test-threads 1', '-- --ignored --exact --nocapture --test-threads 1',
     'S2_UNCAPTURED_STDOUT_MAY_INTERLEAVE_NAMED_PASS_LINE'],
   ['$namedPass = $log -cmatch', '$namedPass = $true #', 'S2_NAMED_PASS_REQUIRED'],
+  [String.raw` \.\.\. (?:ok|FAILED)\r?$`, String.raw` \.\.\. (?:ok|FAILED)$`,
+    'S2_WINDOWS_CRLF_FAILED_OR_SUCCESS_RESULT_MUST_BE_COUNTED'],
+  [String.raw` \.\.\. ok\r?$`, String.raw` \.\.\. ok$`,
+    'S2_WINDOWS_CRLF_SUCCESS_RESULT_MUST_BE_COUNTED'],
+  [String.raw` \.\.\. ok\r?$`, String.raw` .*\r?$`,
+    'S2_SUCCESS_NAME_MUST_STAY_EXACT_AFTER_CRLF_FIX'],
   ['$hasWitness = $log.Contains($witness)', '$hasWitness = $true #', 'S2_NATIVE_WITNESS_REQUIRED'],
   ['1 passed; 0 failed;', '0 passed; 0 failed;', 'S2_NONZERO_EXECUTED_CASE_REQUIRED'],
   ['$failedTests.Add($testName)', 'throw "ABORT_AFTER_FIRST_FAILED_PROBE"',

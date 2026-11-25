@@ -970,6 +970,47 @@ mod native {
             );
         }
 
+        fn normalize_elevated_control_fixture_owner(path: &Path, id: &Identity) {
+            // This fixture is created by the CI runner's *CONTROL* process,
+            // not the LPAC child. On an elevated Windows runner, NTFS may
+            // assign its default-owner group (BUILTIN\Administrators) instead
+            // of the token's ordinary user SID. That is orthogonal to the
+            // DACL/SACL inheritance under test, but verify_catalog_child
+            // correctly rejects it under the production owner contract.
+            //
+            // Only normalize this disposable fixture's owner. A different
+            // unexpected owner fails closed; this is not a claim that an LPAC
+            // child created the fixture or can change ownership itself.
+            let actual = snapshot_acl(path, false).owner;
+            if actual == id.user {
+                return;
+            }
+            assert_eq!(
+                actual, "S-1-5-32-544",
+                "unexpected CONTROL fixture owner; LPAC child owner remains NOT_PROVEN"
+            );
+            let template = descriptor(id, Kind::Catalog).unwrap();
+            let (owner, _, _) = descriptor_parts(template.0).unwrap();
+            let handle = open(path, false, true).unwrap();
+            assert_eq!(
+                unsafe {
+                    SetSecurityInfo(
+                        handle.raw,
+                        SE_FILE_OBJECT,
+                        OWNER_SECURITY_INFORMATION,
+                        owner,
+                        null_mut(),
+                        null_mut(),
+                        null_mut(),
+                    )
+                },
+                0,
+                "CONTROL-only synthetic fixture owner normalization failed"
+            );
+            drop(handle);
+            assert_eq!(snapshot_acl(path, false).owner, id.user);
+        }
+
         struct DisposableRoot(std::path::PathBuf);
 
         impl DisposableRoot {
@@ -1168,6 +1209,11 @@ mod native {
                 output.write_all(b"\nappend/delete canary").unwrap();
                 output.sync_all().unwrap();
                 drop(output);
+                // Preserve the inherited DACL/SACL as the real on-disk
+                // witness. Only correct the elevated CONTROL fixture's
+                // default owner so the production child verifier can also
+                // enforce its independent owner=user requirement below.
+                normalize_elevated_control_fixture_owner(&file, &id);
                 let handle = open(&file, false, false).unwrap();
                 verify_catalog_child(&handle, &id, false).unwrap();
                 drop(handle);
