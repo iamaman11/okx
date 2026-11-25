@@ -795,6 +795,11 @@ mod native {
         ] {
             for right in [0x2, 0x4, 0x8, 0x10, 0x40, 0x10000, 0x40000, 0x80000] {
                 if can_access(token, path, right)? {
+                    #[cfg(test)]
+                    eprintln!(
+                        "OKX_S2_IMAGE_MUTABLE_ACCESS={}:0x{right:08x}",
+                        if path == executable { "FILE" } else { "DIRECTORY" }
+                    );
                     return Err(denied("research_installed_image_mutable"));
                 }
             }
