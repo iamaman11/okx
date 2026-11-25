@@ -15,6 +15,12 @@ on:
         # Manual CI dispatch exists to seed the trusted main cache. The old
         # false default produced a green run with both prime jobs skipped.
         default: true
+      cache_profile:
+        description: 'Select which trusted main Windows Cargo cache to warm'
+        required: true
+        type: choice
+        options: [tests, release, both]
+        default: both
 
 concurrency:
   # The release step is part of this main CI run. A later main commit must not
@@ -345,7 +351,7 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   draft-component-tests:
-    name: draft-component-tests
+    name: draft-owner-feedback
     needs: component_impact
     if: github.event_name == 'pull_request' && github.event.pull_request.draft
     runs-on: ubuntu-latest
@@ -567,7 +573,7 @@ jobs:
   required_linux:
     # Legacy required-check name is kept until branch protection is migrated.
     name: linux-core
-    needs: [component_impact, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, research_service_tests_windows]
+    needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, research_service_tests_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -576,6 +582,12 @@ jobs:
         run: |
           set -euo pipefail
           test "${{ needs.component_impact.result }}" = "success"
+          # Dependency policy is mandatory for every Ready/main Rust scope,
+          # including a main merge reusing the exact successful PR tree.
+          case "${{ needs.component_impact.outputs.component_scope }}" in
+            docs|cloudflare) test "${{ needs['dependency-audit'].result }}" = "skipped" ;;
+            *) test "${{ needs['dependency-audit'].result }}" = "success" ;;
+          esac
           if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
             echo "REUSED_SUCCESSFUL_PR_CI=true"
             exit 0
@@ -952,15 +964,15 @@ jobs:
           retention-days: 14
 
   trading_engine_regressions_windows:
-    # The Windows aggregate requires every suite in this matrix. A slow
-    # compiler or an isolated SQLite fixture occupies only its own runner.
+    # The Windows aggregate requires every suite in this matrix. Clippy runs
+    # after Host tests on its existing runner, without extra Engine jobs.
     name: trading-engine-regressions-windows (${{ matrix.suite }})
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     strategy:
       fail-fast: false
       matrix:
-        suite: [engine, host, execution, research, clippy]
+        suite: [engine, host, execution, research]
     runs-on: windows-latest
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -972,7 +984,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         with:
           toolchain: 1.100.0
-          components: ${{ matrix.suite == 'clippy' && 'clippy' || '' }}
+          components: ${{ matrix.suite == 'host' && 'clippy' || '' }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # Separate runners restore the same accepted-main compiler cache.
@@ -981,13 +993,6 @@ jobs:
           shared-key: trading-engine-tests-windows
           cache-workspace-crates: true
           save-if: false
-
-      - name: Clippy native Windows crates
-        if: matrix.suite == 'clippy'
-        shell: pwsh
-        run: |
-          cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Strategy Core and Research owner regressions on full Windows
         if: matrix.suite == 'research'
@@ -1092,6 +1097,13 @@ jobs:
               }
             }
           }
+
+      - name: Clippy native Windows crates
+        if: matrix.suite == 'host'
+        shell: pwsh
+        run: |
+          cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Serial native account catalog and writer-termination regressions
         if: matrix.suite == 'engine'
@@ -1676,7 +1688,7 @@ jobs:
   # Optional manual cache seed only. An accepted PR merge on main reuses its
   # Ready evidence and must not compile/link Engine again merely to warm cache.
   trusted_main_cache_prime:
-    name: trusted-main-windows-cache-prime (${{ matrix.profile }})
+    name: warm-windows-cargo-cache (${{ matrix.profile }})
     needs: component_impact
     if: >-
       ${{
@@ -1689,7 +1701,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [tests, release]
+        # Job-level `if` is evaluated before matrix expansion. Select actual
+        # runners here so a single profile does not launch the other runner.
+        # An invalid dispatcher value must fail matrix expansion, not launch
+        # both expensive Windows profiles as an accidental fallback.
+        profile: ${{ fromJSON(inputs.cache_profile == 'tests' && '["tests"]' || inputs.cache_profile == 'release' && '["release"]' || inputs.cache_profile == 'both' && '["tests","release"]' || '[]') }}
     runs-on: windows-latest
     env:
       # Cargo rejects an empty profile debug value, even during `--release`.
@@ -1827,7 +1843,7 @@ jobs:
                      "cloudflare-mcp-contracts", "rust-tests-linux",
                      "trading-engine-acceptance-windows", "trading-engine-regressions-windows (engine)",
                      "trading-engine-regressions-windows (host)", "trading-engine-regressions-windows (execution)",
-                     "trading-engine-regressions-windows (research)", "trading-engine-regressions-windows (clippy)",
+                     "trading-engine-regressions-windows (research)",
                      "trading-engine-build-windows", "linux-core", "windows-native"][];
                     . as $name | $ok | index($name) != null))
             ' <<<"$jobs" >/dev/null; then
