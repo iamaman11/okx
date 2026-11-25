@@ -613,6 +613,17 @@ fn rollback_research_with_supervisor(
     }
     verify_staged_research(root, &current)?;
     verify_staged_research(root, &previous)?;
+    #[cfg(windows)]
+    {
+        crate::research_acl::verify_version_image(
+            &research_binary_path(root, &current.worker_sha256)?,
+            &current.worker_sha256,
+        )?;
+        crate::research_acl::verify_version_image(
+            &research_binary_path(root, &previous.worker_sha256)?,
+            &previous.worker_sha256,
+        )?;
+    }
     let verified = Instant::now();
     let expected_generation = supervisor.process_generation();
     let status = supervisor.transition_image(
@@ -831,6 +842,8 @@ fn verify_staged_research(root: &Path, record: &InstalledResearch) -> HostContro
         Err(e) => return Err(e.into()),
     };
     let metadata = fs::symlink_metadata(&binary)?;
+    #[cfg(windows)]
+    crate::research_acl::preflight_image(&binary)?;
     if !metadata.is_file()
         || is_reparse(&metadata)
         || metadata.len() == 0
@@ -840,6 +853,29 @@ fn verify_staged_research(root: &Path, record: &InstalledResearch) -> HostContro
         return Err(HostControlError::ArtifactHashMismatch);
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn research_binary_path(root: &Path, sha: &str) -> HostControlResult<PathBuf> {
+    let version = root.join("research/versions").join(sha);
+    for name in ["okx-research-service.exe", "okx-research-worker.exe"] {
+        let candidate = version.join(name);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.is_file() && !is_reparse(&metadata) => {
+                return Ok(candidate);
+            }
+            Ok(_) => {
+                return Err(HostControlError::ArtifactVerification(
+                    "research version contains non-file image",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(HostControlError::ArtifactVerification(
+        "research version image missing",
+    ))
 }
 
 /// Read the controller-installed pointer with the same size, reparse-point,
@@ -927,10 +963,15 @@ fn prepare_research_transition(
     let versions = research.join("versions");
     plain_directory(&versions)?;
     let version = versions.join(&record.worker_sha256);
+    #[cfg(windows)]
+    crate::research_acl::prepare_version_directory(&version)?;
+    #[cfg(not(windows))]
     plain_directory(&version)?;
     let binary = version.join("okx-research-service.exe");
     match fs::symlink_metadata(&binary) {
         Ok(m) if m.is_file() && !is_reparse(&m) => {
+            #[cfg(windows)]
+            crate::research_acl::preflight_image(&binary)?;
             if sha256_hex(&fs::read(&binary)?) != record.worker_sha256 {
                 return Err(HostControlError::ArtifactHashMismatch);
             }
@@ -942,6 +983,9 @@ fn prepare_research_transition(
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Interrupted writes leave only an unpublished unique staging file.
+            #[cfg(windows)]
+            let temp = crate::research_acl::write_staged_image_file(&version, bytes)?;
+            #[cfg(not(windows))]
             let temp = write_stage_file(&version, bytes)?;
             if let Err(error) = fs::rename(&temp, &binary) {
                 let _ = fs::remove_file(&temp);
@@ -953,10 +997,17 @@ fn prepare_research_transition(
         }
         Err(e) => return Err(e.into()),
     }
+    #[cfg(windows)]
+    crate::research_acl::verify_version_image(&binary, &record.worker_sha256)?;
     let current = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?;
     let rollback = read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)?;
     if let Some(old) = &current {
         verify_staged_research(root, old)?;
+        #[cfg(windows)]
+        crate::research_acl::verify_version_image(
+            &research_binary_path(root, &old.worker_sha256)?,
+            &old.worker_sha256,
+        )?;
         if old.worker_sha256 == record.worker_sha256 && old != record {
             return Err(HostControlError::ArtifactVerification(
                 "same research bytes with different provenance",
@@ -969,6 +1020,11 @@ fn prepare_research_transition(
     }
     if let Some(saved) = &rollback {
         verify_staged_research(root, saved)?;
+        #[cfg(windows)]
+        crate::research_acl::verify_version_image(
+            &research_binary_path(root, &saved.worker_sha256)?,
+            &saved.worker_sha256,
+        )?;
     }
     Ok(StagedResearchTransition {
         target: record.clone(),
