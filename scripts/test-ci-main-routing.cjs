@@ -11,6 +11,8 @@ const root = path.join(__dirname, '..', '.github', 'workflows');
 const workflows = fs.readdirSync(root).filter(x => /\.ya?ml$/.test(x));
 const source = fs.readFileSync(path.join(root, 'ci.yml'), 'utf8').replaceAll('\r\n', '\n');
 const researchRelease = fs.readFileSync(path.join(root, '..', '..', 'scripts', 'prepare-research-release.ps1'), 'utf8').replaceAll('\r\n', '\n');
+const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
+  'okx-research-service', 'tests', 'ipc_process.rs'), 'utf8').replaceAll('\r\n', '\n');
 const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
 const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}";
 const regressionSuites = ['engine', 'host', 'execution', 'research', 'clippy'];
@@ -20,6 +22,7 @@ const releaseGates = ['trading-engine-acceptance-windows',
 // GitHub REST currently returns the bare workflow path; some GitHub response
 // forms append @ref. Both are canonical, but another workflow is never one.
 const acceptedWorkflowPath = String.raw`test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")`;
+const windowsIpcSummary = String.raw`test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`;
 const nativeCacheJobs = [
   ['trading_engine_acceptance_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
@@ -123,10 +126,13 @@ function validate(yaml, fileNames) {
   assert.match(research, /edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture --test-threads 1/);
   assert.match(research, /RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED/);
   // Research-only changes must not resurrect the four real-child IPC timeouts
-  // previously observed when nine Windows processes started in parallel. The
-  // dedicated harness retains the original 10s receive deadline.
+  // previously observed when the Windows processes started in parallel. The
+  // dedicated harness retains the original 10s receive deadline. One test is
+  // #[cfg(windows)]; Windows must execute all ten, Linux discovers nine.
   assert.match(research, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
-  assert.match(research, /WORKER_IPC_TESTS_MISSING|RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED/);
+  assert.ok(research.includes(windowsIpcSummary), 'RESEARCH_WINDOWS_IPC_EXACT_TEN_ZERO_IGNORED_REQUIRED');
+  assert.match(research, /RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED/);
+  assert.doesNotMatch(research, /RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED|test result: ok\\\. 9 passed/);
   assert.doesNotMatch(research, /cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis\s/,
     'SCOPED_RESEARCH_MUST_NOT_RUN_UNBOUNDED_WORKER_INTEGRATIONS');
   assert.doesNotMatch(classify, /native_required=false[^\n]*CARGO/);
@@ -400,6 +406,11 @@ function validate(yaml, fileNames) {
 }
 
 validate(source, workflows);
+assert.equal((ipcProcess.match(/^#\[tokio::test\]$/gm) || []).length, 10,
+  'WINDOWS_RESEARCH_IPC_SOURCE_MUST_DECLARE_EXACT_TEN_TESTS');
+assert.equal((ipcProcess.match(/^#\[cfg\(windows\)\]\n#\[tokio::test\]$/gm) || []).length, 1,
+  'LINUX_HAS_NINE_RESEARCH_IPC_TESTS_AND_WINDOWS_HAS_TEN');
+assert.doesNotMatch(ipcProcess, /^#\[ignore\]$/m, 'RESEARCH_IPC_CANNOT_CLAIM_IGNORED_TESTS');
 // Exercise the actual path expression extracted independently from each job.
 // In particular, the live 2026-11-25 Actions REST `/actions/runs` response
 // for 45641162031 has path `.github/workflows/ci.yml` (without @ref).
@@ -579,6 +590,18 @@ for (const [id, prefix, , save] of nativeCacheJobs) {
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
   'ipc_process -- --nocapture --test-threads 1',
   'ipc_process -- --nocapture --test-threads 8'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  windowsIpcSummary, String.raw`test result: ok\. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`), workflows),
+  'WINDOWS_RESEARCH_IPC_STALE_NINE_MUST_FAIL');
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  windowsIpcSummary, String.raw`test result: ok\. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`), workflows),
+  'WINDOWS_RESEARCH_IPC_INVENTED_ELEVEN_MUST_FAIL');
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  windowsIpcSummary, String.raw`test result: ok\. 10 passed; 0 failed;`), workflows),
+  'WINDOWS_RESEARCH_IPC_IGNORED_OR_FILTERED_NOT_ACCEPTED');
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  'RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED', 'RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED'), workflows),
+  'WINDOWS_RESEARCH_IPC_FAILURE_CODE_CANNOT_DRIFT');
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
   'cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis',
   'cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis'), workflows));

@@ -1254,8 +1254,8 @@ jobs:
           $code = $LASTEXITCODE
           $ipcOutput | Tee-Object -FilePath $ownerLog -Append
           if ($code -ne 0) { exit $code }
-          if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 9 passed; 0 failed;') {
-            throw 'RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED'
+          if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+            throw 'RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED'
           }
           cargo test --locked -p okx-research-service --doc 2>&1 |
             Tee-Object -FilePath $ownerLog -Append
