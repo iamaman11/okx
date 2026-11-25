@@ -77,7 +77,8 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(select("M", "crates/okx-strategy-core/src/time_series.rs"),
                          {"strategy", "research", "worker", "analysis"})
         self.assertEqual(select("M", "crates/okx-strategy-core/src/operators.rs"), {"strategy", "research", "worker", "analysis"})
-        self.assertEqual(select("M", "crates/okx-domain-core/src/strategy_contract.rs"), {"expanded"})
+        self.assertEqual(select("M", "crates/okx-research-protocol/src/strategy_contract.rs"),
+                         {"wire", "ipc", "worker", "mcp", "strategy", "research", "analysis"})
         self.assertEqual(select("M", "crates/okx-research-service/src/analytics/jobs.rs"), {"worker"})
         self.assertEqual(select("M", "crates/okx-research-protocol/src/research_ipc.rs"), {"wire", "worker", "ipc", "mcp"})
         self.assertFalse(select("M", "docs/testing.md"))

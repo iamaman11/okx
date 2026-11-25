@@ -1459,7 +1459,6 @@ dependencies = [
  "jiff",
  "okx-analysis",
  "okx-domain-core",
- "okx-ipc-contracts",
  "okx-research",
  "okx-research-protocol",
  "okx-strategy-core",
@@ -1469,6 +1468,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -1482,7 +1482,7 @@ dependencies = [
 name = "okx-strategy-core"
 version = "0.1.0"
 dependencies = [
- "okx-domain-core",
+ "okx-research-protocol",
  "serde",
  "serde_json",
 ]

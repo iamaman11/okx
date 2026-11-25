@@ -2,7 +2,7 @@
 use crate::operators::{Operator, registry};
 use crate::stream::{MonotoneWindow, RollingMean, scalar_value};
 use crate::time_series::ClosedRange;
-pub use okx_domain_core::strategy_contract::{CompositionRequest, SeriesOp, SeriesStep};
+pub use okx_research_protocol::strategy_contract::{CompositionRequest, SeriesOp, SeriesStep};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 

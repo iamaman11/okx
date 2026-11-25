@@ -1,5 +1,5 @@
 //! Stable, serializable strategy requests; no operator implementation belongs here.
-//! Agent and Engine may decode the legacy contract without linking Research math.
+//! Research owns this schema and its parameter validation.
 use serde::{Deserialize, Serialize};
 
 pub const BREAKOUT_STRATEGY_ID: &str = "close_breakout_v1";

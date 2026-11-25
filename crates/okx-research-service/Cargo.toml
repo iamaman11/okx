@@ -20,7 +20,6 @@ getrandom = "0.4"
 okx-analysis = { path = "../okx-analysis" }
 okx-domain-core = { path = "../okx-domain-core" }
 okx-strategy-core = { path = "../okx-strategy-core" }
-okx-ipc-contracts = { path = "../okx-ipc-contracts" }
 okx-research-protocol = { path = "../okx-research-protocol" }
 okx-research = { path = "../okx-research" }
 rusqlite = { version = "=0.43.0", features = ["bundled"] }
@@ -44,3 +43,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+tempfile = "3"

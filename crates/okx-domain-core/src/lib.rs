@@ -5,4 +5,3 @@
 pub mod fee_model;
 pub mod numeric;
 pub mod observation_model;
-pub mod strategy_contract;

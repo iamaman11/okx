@@ -7,18 +7,19 @@ const {analyze, changedFiles, markdown} = require('./ci-component-impact.cjs');
 const cwd = process.cwd();
 const names = [
   'okx-trading-engine', 'okx-trade-execution', 'okx-domain-core',
-  'okx-ipc-contracts', 'okx-research-service', 'okx-strategy-core',
+  'okx-ipc-contracts', 'okx-research-service', 'okx-research-protocol', 'okx-strategy-core',
   'okx-research', 'okx-analysis', 'okx-host-controller', 'okx-host-launcher', 'okx-api',
   'okx-host-protocol', 'okx-bridge-mcp',
 ];
 const e = (pkg, kind = null) => ({pkg, dep_kinds: [{kind, target: null}]});
 const edges = {
   'okx-trading-engine': [e('okx-trade-execution'), e('okx-ipc-contracts'), e('okx-api')],
-  'okx-ipc-contracts': [e('okx-domain-core')],
-  'okx-research-service': [e('okx-research'), e('okx-strategy-core'), e('okx-ipc-contracts'), e('okx-api', 'dev')],
+  'okx-ipc-contracts': [e('okx-domain-core'), e('okx-research-protocol')],
+  'okx-research-service': [e('okx-research'), e('okx-strategy-core'), e('okx-research-protocol'), e('okx-api', 'dev')],
   'okx-research': [e('okx-analysis')],
   'okx-analysis': [e('okx-strategy-core')],
-  'okx-strategy-core': [e('okx-domain-core')],
+  'okx-strategy-core': [e('okx-research-protocol')],
+  'okx-research-protocol': [e('okx-domain-core')],
   'okx-host-controller': [e('okx-host-launcher'), e('okx-host-protocol'), e('okx-ipc-contracts')],
   'okx-host-protocol': [e('okx-ipc-contracts')],
   'okx-bridge-mcp': [e('okx-host-protocol'), e('okx-ipc-contracts')],
@@ -56,6 +57,8 @@ assert.deepEqual(binaries(analyze(metadata, files('crates/okx-trade-execution/sr
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-domain-core/src/fee_model.rs'))),
   ['okx-agent.exe', 'okx-host-control.exe', 'okx-research-service.exe']);
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-ipc-contracts/src/lib.rs'))),
+  ['okx-agent.exe', 'okx-host-control.exe']);
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-research-protocol/src/strategy_contract.rs'))),
   ['okx-agent.exe', 'okx-host-control.exe', 'okx-research-service.exe']);
 // A dev-only Research dependency must not be attributed to its release EXE.
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-api/src/lib.rs'))), ['okx-agent.exe']);

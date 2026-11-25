@@ -80,6 +80,8 @@ def select(status, path):
                 or path.startswith("crates/okx-research-service/src/ipc/")):
             return {"ipc", "worker"}
         return {"worker"}
+    if path == "crates/okx-research-protocol/src/strategy_contract.rs":
+        return {"wire", "ipc", "worker", "mcp", "strategy", "research", "analysis"}
     if path.startswith(("crates/okx-ipc-contracts/src/", "crates/okx-research-protocol/src/")) and path.endswith(".rs"):
         return {"wire", "ipc", "worker", "mcp"}
     if path.startswith(("cloudflare/okx-mcp/src/", "cloudflare/okx-mcp/contracts/")):

@@ -14,7 +14,7 @@ ALLOWED = {
     "okx-observation": {"okx-api", "okx-domain-core"},
     "okx-market-runtime": {"okx-api", "okx-observation", "okx-ipc-contracts", "okx-ws"},
     "okx-domain-core": set(),
-    "okx-strategy-core": {"okx-domain-core"},
+    "okx-strategy-core": {"okx-research-protocol"},
     "okx-analysis": {"okx-domain-core", "okx-strategy-core"},
     "okx-research": {"okx-analysis"},
     "okx-trade-execution": set(),
@@ -27,7 +27,7 @@ ALLOWED = {
     "okx-host-protocol": {"okx-ipc-contracts"},
     "okx-host-controller": {"okx-github", "okx-host-launcher", "okx-host-protocol", "okx-ipc-contracts"},
     "okx-bridge-mcp": {"okx-github", "okx-host-protocol", "okx-ipc-contracts"},
-    "okx-research-service": {"okx-analysis", "okx-domain-core", "okx-ipc-contracts", "okx-research-protocol", "okx-research", "okx-strategy-core"},
+    "okx-research-service": {"okx-analysis", "okx-domain-core", "okx-research-protocol", "okx-research", "okx-strategy-core"},
     "okx-trading-engine": {
         "okx-api",
         "okx-trade-execution",
@@ -163,7 +163,7 @@ def pure_dependency_violations(
 
 BOUNDARY_FORBIDDEN = {
     "okx-trading-engine": {"okx-research", "okx-research-service", "okx-strategy-core", "okx-analysis"},
-    "okx-research-service": {"okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-host-controller", "okx-bridge-mcp"},
+    "okx-research-service": {"okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-host-controller", "okx-bridge-mcp", "okx-ipc-contracts"},
     # Host lifecycle processes cannot acquire financial/market capabilities
     # through a direct or transitive production dependency. CONTROL may use
     # the Launcher and versioned protocol; neither may import Engine/SQL.
@@ -303,11 +303,15 @@ def self_test() -> int:
         {"id": "api-id", "deps": []},
     ])
 
-    metadata["workspace_members"].append("worker-id")
-    metadata["packages"].append({"id": "worker-id", "name": "okx-research-service"})
-    metadata["resolve"]["nodes"].append({
-        "id": "worker-id", "deps": [{"pkg": "ipc-id", "dep_kinds": [{"kind": None}]}],
-    })
+    metadata["workspace_members"].extend(["worker-id", "research-protocol-id"])
+    metadata["packages"].extend([
+        {"id": "worker-id", "name": "okx-research-service"},
+        {"id": "research-protocol-id", "name": "okx-research-protocol"},
+    ])
+    metadata["resolve"]["nodes"].extend([
+        {"id": "worker-id", "deps": [{"pkg": "research-protocol-id", "dep_kinds": [{"kind": None}]}]},
+        {"id": "research-protocol-id", "deps": []},
+    ])
 
     if component_scope_dependency_violations(metadata):
         print("self-test failed: clean Engine scoped-owner closure rejected", file=sys.stderr)
@@ -320,14 +324,15 @@ def self_test() -> int:
         if not any("okx-trading-engine -> okx-research" in error for error in component_scope_dependency_violations(dirty_scope)):
             print(f"self-test failed: Engine {kind} Research dependency accepted", file=sys.stderr)
             return 1
-        reverse_scope = json.loads(json.dumps(metadata))
-        next(node for node in reverse_scope["resolve"]["nodes"] if node["id"] == "ipc-id")["deps"].append({
-            "pkg": "api-id", "dep_kinds": [{"kind": kind}],
-        })
-        if not any("okx-research-service -> okx-ipc-contracts -> okx-api" in error
-                   for error in component_scope_dependency_violations(reverse_scope)):
-            print(f"self-test failed: transitive Research {kind} Engine API dependency accepted", file=sys.stderr)
-            return 1
+        for forbidden_id, forbidden_name in (("api-id", "okx-api"), ("ipc-id", "okx-ipc-contracts")):
+            reverse_scope = json.loads(json.dumps(metadata))
+            next(node for node in reverse_scope["resolve"]["nodes"] if node["id"] == "research-protocol-id")["deps"].append({
+                "pkg": forbidden_id, "dep_kinds": [{"kind": kind}],
+            })
+            if not any(f"okx-research-service -> okx-research-protocol -> {forbidden_name}" in error
+                       for error in component_scope_dependency_violations(reverse_scope)):
+                print(f"self-test failed: transitive Research {kind} {forbidden_name} dependency accepted", file=sys.stderr)
+                return 1
     host_scope = json.loads(json.dumps(metadata))
     for package in host_scope["packages"]:
         if package["id"] == "research-id":
@@ -458,7 +463,7 @@ def self_test() -> int:
     if must_find not in violations:
         print("self-test failed: K10 transitive adapter leak passed", file=sys.stderr)
         return 1
-    clean = {"okx-domain-core": {"serde"}, "okx-research-protocol": {"okx-domain-core"}, "okx-strategy-core": {"okx-domain-core"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
+    clean = {"okx-domain-core": {"serde"}, "okx-research-protocol": {"okx-domain-core"}, "okx-strategy-core": {"okx-research-protocol"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
     if pure_dependency_violations(clean):
         print("self-test failed: clean K10 pure graph rejected", file=sys.stderr)
         return 1
