@@ -394,6 +394,27 @@ function validate(yaml, fileNames) {
   assert.match(researchPublish, /test "sha256:\$digest" = '\$\{\{ steps.select.outputs.digest \}\}'/);
   assert.match(researchPublish, /verify_research_component_release\.py "\$zip" "\$digest"/);
   assert.match(researchPublish, /tag="research-component-\$ACCEPTED_MAIN"/);
+  assert.match(researchPublish, /if ! gh release create "\$tag" --draft/,
+    'RESEARCH_RELEASE_ASSETS_MUST_BE_VERIFIED_BEFORE_PUBLISHING');
+  assert.match(researchPublish, /RESEARCH_DRAFT_CREATE_AMBIGUOUS_VERIFY_ORIGIN/);
+  assert.match(researchPublish, /if jq -e '\.draft == true' <<<"\$release"/);
+  assert.match(researchPublish, /gh release upload "\$tag" "\$RUNNER_TEMP\/\$name"/);
+  assert.match(researchPublish, /test "\$present" = "\$expected"/,
+    'RESEARCH_DUPLICATE_UPLOAD_MUST_PROVE_EXACT_EXISTING_SHA');
+  assert.match(researchPublish, /RESEARCH_ASSET_UPLOAD_AMBIGUOUS_VERIFY_SHA:/);
+  assert.match(researchPublish, /if ! gh release edit "\$tag" --draft=false/);
+  assert.match(researchPublish, /RESEARCH_DRAFT_PUBLISH_AMBIGUOUS_VERIFY_RELEASE/);
+  assert.match(researchPublish, /\(\[\.assets\[\]\.name\] \| sort\) ==/,
+    'RESEARCH_DRAFT_MUST_CONTAIN_EXACT_THREE_ASSETS');
+  const shaReadback = researchPublish.indexOf('test "$present" = "$expected"');
+  const completeDraft = researchPublish.indexOf('jq -e \'([.assets[].name] | sort) ==');
+  const publishDraft = researchPublish.indexOf('gh release edit "$tag" --draft=false');
+  assert.ok(shaReadback > 0 && completeDraft > shaReadback && publishDraft > completeDraft,
+    'RESEARCH_ASSET_SHA_AND_EXACT_SET_REQUIRED_BEFORE_PUBLICATION');
+  assert.match(researchPublish, /\.tag_name == \$tag and \.target_commitish == \$main and \.prerelease == false and/);
+  assert.match(researchPublish, /\(\[\.assets\[\]\.name\] \| unique \| length\)/);
+  assert.doesNotMatch(researchPublish, /^\s+(?:if ! )?gh release upload[^\n]*(?:--clobber|--force)/m,
+    'RESEARCH_EXISTING_ASSET_MUST_NEVER_BE_DELETED_OR_REPLACED');
   assert.match(researchPublish, /RESEARCH_COMPONENT_RELEASE=VERIFIED_APPEND_ONLY/);
   assert.match(researchPublish, /RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED/);
   assert.doesNotMatch(researchPublish, /cargo build|native-base-|gh release delete|--cleanup-tag|actions\/attest/);
@@ -551,6 +572,32 @@ assert.throws(() => validate(source.replace('test "sha256:$digest" = \'${{ steps
   'true'), workflows));
 assert.throws(() => validate(source.replace('RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED',
   'gh release delete "$old" --cleanup-tag --yes'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'if ! gh release create "$tag" --draft', 'if ! gh release create "$tag"'), workflows),
+  'RESEARCH_RELEASE_MUST_STAGE_DRAFT_FIRST');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'test "$present" = "$expected"', 'true'), workflows),
+  'RESEARCH_UPLOAD_422_MUST_NOT_BYPASS_DIGEST');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'gh release upload "$tag" "$RUNNER_TEMP/$name"',
+  'gh release upload "$tag" "$RUNNER_TEMP/$name" --clobber'), workflows),
+  'RESEARCH_RELEASE_NEVER_CLOBBERS_EXISTING_ASSET');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'if ! gh release edit "$tag" --draft=false', 'if ! echo published'), workflows),
+  'RESEARCH_RELEASE_ONLY_PUBLISHED_AFTER_COMPLETE_PROOF');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'RESEARCH_DRAFT_CREATE_AMBIGUOUS_VERIFY_ORIGIN', 'DRAFT_CREATE_ERROR_IGNORED'), workflows),
+  'AMBIGUOUS_RELEASE_CREATE_MUST_TRIGGER_PROVENANCE_READBACK');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'RESEARCH_DRAFT_PUBLISH_AMBIGUOUS_VERIFY_RELEASE', 'DRAFT_PUBLISH_ERROR_IGNORED'), workflows),
+  'AMBIGUOUS_DRAFT_PUBLISH_MUST_TRIGGER_FINAL_READBACK');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'jq -e \'([.assets[].name] | sort) ==', 'jq -e \'true =='), workflows),
+  'RESEARCH_RELEASE_MUST_NOT_PUBLISH_INCOMPLETE_DRAFT');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'if jq -e \'.draft == true\' <<<"$release"; then',
+  'if true; then'), workflows),
+  'PUBLISHED_RESEARCH_RELEASE_MUST_NOT_ACCEPT_NEW_ASSETS');
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
   '.workflow_run.head_repository_id == 1388071566 and', 'true and'), workflows));
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',

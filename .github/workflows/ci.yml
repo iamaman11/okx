@@ -2087,13 +2087,49 @@ jobs:
           set -euo pipefail
           test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
           tag="research-component-$ACCEPTED_MAIN"
+          # GitHub can accept one asset and then return 422/500 for another
+          # during a multi-file `gh release create`. Stage an unpublished draft
+          # first and upload each immutable file separately; on an ambiguous
+          # upload error, read back the exact SHA instead of overwriting it.
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" \
-              '${{ steps.verify.outputs.zip }}' \
-              "$RUNNER_TEMP/published-research-origin.json" \
-              "$RUNNER_TEMP/SHA256SUMS.txt" \
+            if ! gh release create "$tag" --draft \
               --target "$ACCEPTED_MAIN" --title "OKX accepted standalone Research $ACCEPTED_MAIN" \
-              --notes 'Exact Research-only PR CI bytes and provenance. No Engine/CONTROL binaries; no automatic Windows installation or financial actions.'
+              --notes 'Exact Research-only PR CI bytes and provenance. No Engine/CONTROL binaries; no automatic Windows installation or financial actions.'; then
+              echo 'RESEARCH_DRAFT_CREATE_AMBIGUOUS_VERIFY_ORIGIN' >&2
+            fi
+          fi
+          release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+          jq -e --arg tag "$tag" --arg main "$ACCEPTED_MAIN" '
+            .tag_name == $tag and .target_commitish == $main and .prerelease == false and
+            ([.assets[].name] | length) == ([.assets[].name] | unique | length) and
+            all(.assets[].name; . as $n |
+              ["SHA256SUMS.txt", "okx-research-component.zip", "published-research-origin.json"] |
+              index($n) != null)
+          ' <<<"$release" >/dev/null
+          if jq -e '.draft == true' <<<"$release" >/dev/null; then
+            for name in okx-research-component.zip published-research-origin.json SHA256SUMS.txt; do
+              expected="sha256:$(sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)"
+              present="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")"
+              if [[ -z "$present" ]]; then
+                # Never --clobber: a duplicate 422 or uncertain upload result
+                # is accepted only after the server returns the SAME bytes.
+                if ! gh release upload "$tag" "$RUNNER_TEMP/$name"; then
+                  echo "RESEARCH_ASSET_UPLOAD_AMBIGUOUS_VERIFY_SHA:$name" >&2
+                fi
+                release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+                present="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")"
+              fi
+              test "$present" = "$expected"
+            done
+            # No partial draft becomes an installable release; the complete
+            # origin set is read back before the single publish transition.
+            release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+            jq -e '([.assets[].name] | sort) ==
+              ["SHA256SUMS.txt", "okx-research-component.zip", "published-research-origin.json"]' <<<"$release" >/dev/null
+            test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
+            if ! gh release edit "$tag" --draft=false; then
+              echo 'RESEARCH_DRAFT_PUBLISH_AMBIGUOUS_VERIFY_RELEASE' >&2
+            fi
           fi
           release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
           jq -e --arg tag "$tag" --arg main "$ACCEPTED_MAIN" '
