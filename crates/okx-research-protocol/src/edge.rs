@@ -34,7 +34,7 @@ pub enum IncomingFrame {
         schema: String,
         session_id: String,
         connection_generation: u64,
-        request: ResearchRequestEnvelope,
+        request: Box<ResearchRequestEnvelope>,
         operator_governance: Option<Value>,
     },
 }

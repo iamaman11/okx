@@ -93,7 +93,7 @@ async fn request(
     else {
         panic!("expected Research request")
     };
-    dispatch(service, public, ResearchCommand::try_from(request)?).await
+    dispatch(service, public, ResearchCommand::try_from(*request)?).await
 }
 
 #[tokio::test]

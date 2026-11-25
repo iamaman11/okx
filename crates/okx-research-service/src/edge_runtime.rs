@@ -318,7 +318,7 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
                         let command = if operator_governance.is_some() {
                             Err("RESEARCH_OPERATION_FORBIDDEN")
                         } else {
-                            ResearchCommand::try_from(request)
+                            ResearchCommand::try_from(*request)
                         };
                         let command = match command {
                             Ok(command) => command,

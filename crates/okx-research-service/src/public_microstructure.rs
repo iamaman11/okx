@@ -41,13 +41,12 @@ fn validate_request(instrument: &str, size: Option<&str>) -> Result<(), String> 
     {
         return Err("INSTRUMENT_INVALID".into());
     }
-    if let Some(size) = size {
-        if size.len() > 64
+    if size.is_some_and(|size| {
+        size.len() > 64
             || !Decimal::from_str_exact(size)
                 .is_ok_and(|n| n > Decimal::ZERO && n <= Decimal::from(1_000_000))
-        {
-            return Err("SIZE_INVALID".into());
-        }
+    }) {
+        return Err("SIZE_INVALID".into());
     }
     Ok(())
 }
@@ -75,10 +74,10 @@ fn side(
         if price <= Decimal::ZERO || size <= Decimal::ZERO {
             return Err("BOOK_LEVEL_INVALID".into());
         }
-        if let Some((prev, _, _)) = out.last() {
-            if (ascending && price <= *prev) || (!ascending && price >= *prev) {
-                return Err("BOOK_LEVEL_INVALID".into());
-            }
+        if out.last().is_some_and(|(prev, _, _)| {
+            (ascending && price <= *prev) || (!ascending && price >= *prev)
+        }) {
+            return Err("BOOK_LEVEL_INVALID".into());
         }
         let count = row[3].parse::<u64>().map_err(|_| "BOOK_LEVEL_INVALID")?;
         if count == 0 || row[2] != "0" {
