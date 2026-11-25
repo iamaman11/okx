@@ -40,6 +40,9 @@ function credentialFingerprint(value: unknown): string | null {
 }
 
 type RuntimeOwner = "engine" | "research";
+function ownerOfflineReason(owner: RuntimeOwner): string {
+  return owner === "research" ? "RESEARCH_RUNTIME_OFFLINE" : "RUNTIME_OFFLINE";
+}
 type ReadWaiter = {
   resolve: (admitted: boolean) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -383,14 +386,14 @@ export class RuntimeSession {
   async webSocketClose(ws: any): Promise<void> {
     const attachment = ws.deserializeAttachment() as SocketAttachment | null;
     if (attachment?.generation) {
-      this.rejectGeneration(attachment.generation, "RUNTIME_OFFLINE");
+      this.rejectGeneration(attachment.generation, ownerOfflineReason(socketOwner(attachment) ?? "engine"));
     }
   }
 
   async webSocketError(ws: any): Promise<void> {
     const attachment = ws.deserializeAttachment() as SocketAttachment | null;
     if (attachment?.generation) {
-      this.rejectGeneration(attachment.generation, "RUNTIME_OFFLINE");
+      this.rejectGeneration(attachment.generation, ownerOfflineReason(socketOwner(attachment) ?? "engine"));
     }
   }
 
@@ -423,7 +426,8 @@ export class RuntimeSession {
         nonce,
       }));
     } catch {
-      this.rejectGeneration(active.attachment.generation,"RUNTIME_OFFLINE");
+      this.rejectGeneration(active.attachment.generation,
+        ownerOfflineReason(socketOwner(active.attachment) ?? "engine"));
     }
     await wait;
     return nonce;
@@ -473,7 +477,7 @@ export class RuntimeSession {
     if (owner !== "engine" && !researchOnlyPermits(request))
       return transportFailure("RESEARCH_OPERATION_FORBIDDEN", false);
     const active = this.activeSocket(owner);
-    if (!active) return transportFailure(owner === "research" ? "RESEARCH_RUNTIME_OFFLINE" : "RUNTIME_OFFLINE");
+    if (!active) return transportFailure(ownerOfflineReason(owner));
     // OAuth/profile only authorizes delivery of a narrowly typed action.
     // The native Engine alone evaluates current account admission and
     // owns the actual exchange POST admission under the same ledger.
@@ -519,7 +523,7 @@ export class RuntimeSession {
       const current=this.activeSocket(owner);
       if(!current||current.attachment.generation!==active.attachment.generation||
          current.attachment.sessionId!==active.attachment.sessionId)
-        return transportFailure("RUNTIME_OFFLINE");
+        return transportFailure(ownerOfflineReason(owner));
       const deliveryChallenge = await this.proveFresh(active);
 
       // Production writes and exact-intent terminal status both need the
@@ -571,14 +575,21 @@ export class RuntimeSession {
       // the original dispatch request while the response remains in flight.
       const nativeRequest = {...request};
       delete nativeRequest.target_owner;
-      active.ws.send(JSON.stringify({
-        type: "request",
-        schema: FRAME_SCHEMA,
-        session_id: active.attachment.sessionId,
-        connection_generation: active.attachment.generation,
-        request: nativeRequest,
-        ...(operator_governance === undefined ? {} : { operator_governance }),
-      }));
+      try {
+        active.ws.send(JSON.stringify({
+          type: "request",
+          schema: FRAME_SCHEMA,
+          session_id: active.attachment.sessionId,
+          connection_generation: active.attachment.generation,
+          request: nativeRequest,
+          ...(operator_governance === undefined ? {} : { operator_governance }),
+        }));
+      } catch {
+        // A synchronous WSS send failure is owner-specific. Settle both
+        // delivery stages with the same typed reason as a close/error event.
+        this.rejectGeneration(active.attachment.generation, ownerOfflineReason(owner));
+        throw new Error(ownerOfflineReason(owner));
+      }
       const [,reply]=await completion;
       return reply as Json;
     } catch (error) {

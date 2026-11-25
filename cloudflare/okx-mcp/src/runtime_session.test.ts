@@ -1,5 +1,6 @@
 import {RuntimeSession} from "./runtime_session.js";
 import {FRAME_SCHEMA,MAX_BODY_BYTES} from "./shared.js";
+import {mcpApi} from "./mcp.js";
 import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,label:string){if(!v)throw Error(label);}
 const generation=4;
@@ -99,6 +100,135 @@ for(const action of ["backtest","grid","benchmark","cancel","record_decision"]){
   check(sent.includes("request")&&owner.admissions.research.inflight===0&&owner.pending.size===0,
     "Research interrupted request cleans generation and admission");
  }
+}
+
+// A lost Research session is not an Engine outage. Both close and error
+// events must settle in-flight public reads with the Research-specific code;
+// after a delivered durable job, the separate Research UNKNOWN result above
+// still takes precedence. Neither event may dispatch to a financial owner.
+for(const event of ["close","error"] as const){
+ for(const stage of ["ping","before_ack","after_ack","ping_send","request_send"] as const){
+  const researchGeneration=77;
+  const researchAttachment={...attachment,sessionMode:"research_only" as const,
+   runtimeProfile:"research" as const,credentialOwner:"research" as const,
+   generation:researchGeneration,sessionId:"research_public_disconnected_77"};
+  let owner:any;
+  let requests=0;
+  const ws={deserializeAttachment:()=>({...researchAttachment}),close:()=>{},send:(text:string)=>{
+   const frame=JSON.parse(text);
+   if(stage==="ping_send"&&frame.type==="ping")throw Error("closed socket");
+   if(stage==="request_send"&&frame.type==="request"){
+    requests++;
+    throw Error("closed socket");
+   }
+   if(frame.type==="ping")queueMicrotask(()=>{
+    if(stage==="ping")void (event==="close"?owner.webSocketClose(ws):owner.webSocketError(ws));
+    else owner.resolvePending(`pong:${frame.nonce}`,researchGeneration,{});
+   });
+   if(frame.type==="request"){
+    requests++;
+    queueMicrotask(()=>{
+     if(stage==="after_ack")owner.resolvePending(`ack:${frame.request.request_id}`,researchGeneration,{});
+     void (event==="close"?owner.webSocketClose(ws):owner.webSocketError(ws));
+    });
+   }
+  }};
+  owner=new RuntimeSession({storage:{get:async()=>{throw Error("Research read governance");}},
+   getWebSockets:()=>[ws]} as any,{} as any);
+  const result:any=await owner.dispatch({schema:"okx.agent.request/v1",
+   request_id:`research_public_${event}_${stage}`,target_owner:"research",
+   operation:{type:"market_capabilities"}});
+  check(result.status==="FAILED"&&result.reason==="RESEARCH_RUNTIME_OFFLINE"&&
+    owner.admissions.research.inflight===0&&owner.pending.size===0,
+   `${event} during ${stage}: Research read fails with owner-specific transport code`);
+  check(requests===(stage==="ping"||stage==="ping_send"?0:1),
+   "Research loss cannot replay a public request");
+ }
+}
+
+// Actual MCP routing -> DO /dispatch -> native WSS frame, with no Engine
+// socket, no venue access and no OAuth bypass in the production entrypoint.
+// The simulated Research responder provides bounded public-only products.
+{
+ const researchGeneration=88;
+ const researchAttachment={...attachment,sessionMode:"research_only" as const,
+  runtimeProfile:"research" as const,credentialOwner:"research" as const,
+  generation:researchGeneration,sessionId:"research_public_only_88"};
+ const sent:any[]=[];
+ let owner:any;
+ let connected=true;
+ const ws={deserializeAttachment:()=>({...researchAttachment}),close:()=>{},send:(text:string)=>{
+  const frame=JSON.parse(text);
+  if(frame.type==="ping")queueMicrotask(()=>owner.resolvePending(`pong:${frame.nonce}`,researchGeneration,{}));
+  if(frame.type==="request"){
+   sent.push(frame);
+   queueMicrotask(()=>{
+    const id=frame.request.request_id;
+    owner.resolvePending(`ack:${id}`,researchGeneration,{});
+    owner.resolvePending(`response:${id}`,researchGeneration,{
+     schema:"okx.agent.response/v1",request_id:id,status:"completed",quality:"FRESH",warnings:[],
+     result:{source:"independent-public-fixture",operation:frame.request.operation.type},
+    });
+   });
+  }
+ }};
+ owner=new RuntimeSession({storage:{get:async()=>{throw Error("Research loaded financial governance");}},
+  getWebSockets:()=>connected?[ws]:[]} as any,{} as any);
+ const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:(url:string,init?:RequestInit)=>owner.fetch(new Request(url,init))})}};
+ const cases:[string,any,string][]=[
+  ["instruments",{asset:"BTC",settle_currency:"USDT"},"find_instruments"],
+  ["snapshot",{instrument:"BTC-USDT-SWAP"},"market_overview"],
+  ["microstructure",{instrument:"BTC-USDT-SWAP",size_contracts:"1"},"market_microstructure"],
+  ["capabilities",{},"market_capabilities"],
+ ];
+ const call=async(action:string,values:any):Promise<any>=>{
+  const response=await mcpApi.fetch(new Request("https://fixture/mcp",{method:"POST",
+   body:JSON.stringify({jsonrpc:"2.0",id:88,method:"tools/call",
+    params:{name:"market",arguments:{action,...values}}})}),env,{auth:{scope:["mcp:use"]}});
+  const body:any=await response.json();
+  check(!body.error,`public market.${action} must pass MCP schema: ${JSON.stringify(body.error)}`);
+  return body.result.structuredContent;
+ };
+ for(const [action,values,type] of cases){
+  const result=await call(action,values);
+  check(result.status==="completed"&&result.data.source==="independent-public-fixture"&&
+    result.data.operation===type,`market.${action} delivered through Research-only WSS`);
+ }
+ check(sent.length===4&&sent.every(f=>f.type==="request"&&
+   !('operator_governance' in f)&&!('target_owner' in f.request)&&
+   !('account' in f.request)&&Object.keys(f.request).sort().join(",")==="operation,request_id,schema"),
+  "all four native frames omit Engine credentials, account and owner metadata");
+ check(sent.map(f=>f.request.operation.type).join(",")===cases.map(c=>c[2]).join(","),
+  "four market operations have exact public Research route order");
+ // Defend the DO even when a caller bypasses the public MCP schema. No
+ // financial account selector or forged owner hint may reach Research WSS.
+ for(const [, ,type] of cases){
+  const operation={type};
+  for(const invalid of [
+   {target_owner:"engine"},
+   {target_owner:"research",account:"finance_account"},
+  ]){
+   const result:any=await owner.dispatch({schema:"okx.agent.request/v1",
+    request_id:`forbidden_${type}_${"account" in invalid?"account":"engine"}`,
+    ...invalid,operation});
+   check(result.status==="FAILED"&&result.reason===
+    ("account" in invalid?"RESEARCH_OPERATION_FORBIDDEN":"RESEARCH_OWNER_REQUIRED"),
+    `${type}: account and forged Engine owner are forbidden at DO boundary`);
+  }
+ }
+ check(sent.length===4,"forged owner/account selection cannot reach WSS");
+ const researchStatus:any=await(await owner.fetch(new Request("https://runtime.internal/status?probe=1&owner=research"))).json();
+ const engineStatus:any=await(await owner.fetch(new Request("https://runtime.internal/status?probe=1"))).json();
+ check(researchStatus.status==="PASS"&&researchStatus.owner==="research"&&
+  engineStatus.status==="OFFLINE"&&engineStatus.connected===false,
+  "public Research works while the Engine remains stopped");
+ connected=false;
+ for(const [action,values] of cases){
+  const result=await call(action,values);
+  check(result.status==="failed"&&result.reason_code==="RESEARCH_RUNTIME_OFFLINE"&&
+   result.retryable===true,`market.${action} offline must fail closed without Engine fallback`);
+ }
+ check(sent.length===4,"offline public calls must not dispatch to a stale Research socket");
 }
 
 // Windows CONTROL is the sole owner of native binary installation evidence.
