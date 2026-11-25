@@ -18,13 +18,32 @@ const manifest = () => ({
 const valid = manifest();
 assert.equal(validateManifest(valid, lock, worker, head, tree).research_component_sha256,
   sha256(worker));
+for (const version of [2, 3]) {
+  const named = manifest();
+  named.schema = `okx.windows.research-component/v${version}`;
+  named.ci_status_policy = `okx.github.actions.research-ready/v${version}`;
+  const proof = validateManifest(named, lock, worker, head, tree);
+  assert.equal(proof.ci_status_policy, named.ci_status_policy);
+  for (const altered of [
+    {...named, ci_status_policy: 'okx.github.actions.research-ready/v1'},
+    {...named, ci_status_policy: `okx.github.actions.research-ready/v${5 - version}`},
+    {...named, unexpected_engine: true},
+    {...named, schema: 'okx.windows.research-component/v1'},
+  ]) {
+    assert.throws(() => validateManifest(altered, lock, worker, head, tree));
+  }
+  const missing = structuredClone(named);
+  delete missing.ci_status_policy;
+  assert.throws(() => validateManifest(missing, lock, worker, head, tree), /MANIFEST_FIELDS/);
+}
 
 const invalid = (modify, error) => {
   const candidate = structuredClone(valid);
   modify(candidate);
   assert.throws(() => validateManifest(candidate, lock, worker, head, tree), error);
 };
-invalid(x => { x.schema = 'okx.windows.bundle/v2'; }, /SOURCE_OR_LOCK/);
+invalid(x => { x.schema = 'okx.windows.bundle/v2'; }, /SCHEMA_UNSUPPORTED/);
+invalid(x => { x.ci_status_policy = 'okx.github.actions.research-ready/v3'; }, /MANIFEST_FIELDS/);
 invalid(x => { x.repository_id = 1; }, /SOURCE_OR_LOCK/);
 invalid(x => { x.source_head_sha = '0'.repeat(40); }, /SOURCE_OR_LOCK/);
 invalid(x => { x.source_tree = '0'.repeat(40); }, /SOURCE_OR_LOCK/);

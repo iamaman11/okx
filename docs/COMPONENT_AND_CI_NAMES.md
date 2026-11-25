@@ -286,14 +286,15 @@ human-facing CI description:
 | --- | --- | --- |
 | `okx.windows.research-component/v1` | Existing exact seven displayed names (implicit legacy v1 contract) | **Active** producer, publisher and installed CONTROL verifier; no unknown manifest fields |
 | `okx.windows.research-component/v2` | Explicit `ci_status_policy: okx.github.actions.research-ready/v2`, with the same seven names initially | **Reserved**, not emitted by this CI; requires compatible producer, artifact validator, publisher, installed CONTROL and negative tests before activation |
+| `okx.windows.research-component/v3` | Explicit `ci_status_policy: okx.github.actions.research-ready/v3`; exact `select-checks`, `architecture-contracts`, `dependency-audit`, `cloudflare-mcp`, `research-windows`, `ci` successes | **Consumer/verifiers prepared only**; not emitted or published until a compatible CONTROL version is physically accepted and #599 switches the CI job roster |
 
-The v1 ZIP has exactly `manifest.json`, `Cargo.lock` and
-`okx-research-service.exe`. A future v2 keeps this three-file structure, but
-its explicit policy field must never be appended to a v1 manifest: v1 rejects
-unknown fields. A later change to any displayed Ready name needs another
-explicit policy version and coordinated branch-protection/CONTROL rollout.
-Neither a second successful alias job nor a successful workflow conclusion
-substitutes for the seven independently verified first-attempt statuses.
+All versions keep exactly `manifest.json`, `Cargo.lock` and
+`okx-research-service.exe`. The explicit policy field of v2/v3 must never be
+appended to a v1 manifest: v1 rejects unknown fields. Versioned producer and
+consumer policies cannot be mixed. Until #599's installed-CONTROL rollout,
+the real producer continues to emit v1 and the exact legacy Ready roster.
+Neither a synthetic green alias nor a successful workflow conclusion
+substitutes for each version's independently verified first-attempt statuses.
 
 CI classifies the diff for the exact commits in the GitHub event. Docs-only
 changes use the protected classification and aggregate checks. Edge changes
