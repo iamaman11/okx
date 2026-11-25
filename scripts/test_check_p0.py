@@ -144,6 +144,14 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(plan["draft_checks"], "expanded")
             self.assertEqual(plan["diff_verified"], "false")
 
+    def test_complete_research_diff_over_one_page_stays_scoped(self):
+        entries = [{"filename": f"crates/okx-research-service/src/change_{i}.rs", "status": "modified"}
+                   for i in range(197)]
+        plan = github_plan([entries[:100], entries[100:]], allow_dependency_candidate=True)
+        self.assertEqual(plan["scope"], "research")
+        self.assertEqual(plan["draft_checks"], "worker")
+        self.assertEqual(plan["diff_verified"], "true")
+
     def test_manifest_narrowing_requires_the_separate_ready_cargo_proof(self):
         pages = [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "modified"}]]
         draft = github_plan(pages, allow_dependency_candidate=False)

@@ -175,7 +175,8 @@ jobs:
           CHECKED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          files='null'
+          files="$RUNNER_TEMP/ci-files.json"
+          comparison=unavailable
           plan_args=()
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base="$PR_BASE"
@@ -198,10 +199,14 @@ jobs:
                  and (.commits | length) == .total_commits and .commits[-1].sha == $head
                  and (.files | type == "array" and length > 0 and length < 300)
                ' "$RUNNER_TEMP/ci-compare.json" >/dev/null; then
-            jq -c '[.files]' "$RUNNER_TEMP/ci-compare.json" > "$RUNNER_TEMP/ci-files.json"
-            files="$(cat "$RUNNER_TEMP/ci-files.json")"
+            jq -c '.files as $paths | [range(0; ($paths | length); 100) as $start |
+              $paths[$start:$start + 100]]' "$RUNNER_TEMP/ci-compare.json" > "$files"
+            comparison=complete
+          else
+            printf 'null\n' > "$files"
           fi
-          python3 -B scripts/check_ci_native_scope.py --github-plan "${plan_args[@]}" <<<"$files"
+          echo "comparison=$comparison" >> "$GITHUB_OUTPUT"
+          python3 -B scripts/check_ci_native_scope.py --github-plan "${plan_args[@]}" < "$files"
       # Only a narrow manifest+optional lock candidate incurs an extra Cargo
       # resolver check. Every other Ready PR keeps its existing fast selector.
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
@@ -367,7 +372,8 @@ jobs:
         run: |
           {
             echo '### CI plan'
-            echo 'Verified event diff: ${{ steps.file_scope.outputs.diff_verified }}'
+            echo 'Immutable comparison: ${{ steps.file_scope.outputs.comparison }}'
+            echo 'Changed-file list accepted: ${{ steps.file_scope.outputs.diff_verified }}'
             echo 'Component scope: ${{ steps.proven_scope.outputs.scope }}'
             echo 'Cargo closure candidate: ${{ steps.file_scope.outputs.manifest_candidate }}'
             echo 'Reason: ${{ steps.classify.outputs.reason }}'
