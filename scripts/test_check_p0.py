@@ -231,10 +231,12 @@ class FeedbackTests(unittest.TestCase):
             self.assertNotIn("okx-trading-engine", packages)
             self.assertNotIn("okx-trade-execution", packages)
 
-    def test_finance_and_dependency_changes_keep_full_native(self):
+    def test_engine_owner_changes_keep_finance_while_shared_deps_remain_full(self):
         for path in ("crates/okx-trading-engine/src/trade_service/execute.rs",
-                     "crates/okx-trade-execution/src/lib.rs",
-                     "crates/okx-strategy-core/Cargo.toml", "Cargo.lock"):
+                     "crates/okx-trade-execution/src/lib.rs"):
+            self.assertEqual(ready_classify([[{"filename": path, "status": "modified"}]]), "engine")
+            self.assertEqual(select_draft("modified", path), {"expanded"})
+        for path in ("crates/okx-strategy-core/Cargo.toml", "Cargo.lock"):
             self.assertEqual(ready_classify([[{"filename": path, "status": "modified"}]]), "full")
             self.assertEqual(select_draft("modified", path), {"expanded"})
 

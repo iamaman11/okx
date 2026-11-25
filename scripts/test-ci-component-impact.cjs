@@ -32,6 +32,7 @@ const metadata = {
 };
 const files = (...paths) => [[...paths.map(filename => ({filename, status: 'modified'}))]];
 const binaries = report => report.potentially_affected_windows_binaries.map(x => x.binary).sort();
+const testRoots = report => report.potentially_affected_windows_test_roots.map(x => x.root).sort();
 const all = ['okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe'].sort();
 
 const research = analyze(metadata, files('crates/okx-strategy-core/src/operators.rs'));
@@ -62,8 +63,21 @@ assert.deepEqual(binaries(analyze(metadata, files('crates/okx-ipc-contracts/src/
   ['okx-agent.exe', 'okx-host-control.exe']);
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-research-protocol/src/strategy_contract.rs'))),
   ['okx-agent.exe', 'okx-host-control.exe', 'okx-research-service.exe']);
+assert.deepEqual(testRoots(analyze(metadata, files('crates/okx-research-protocol/src/strategy_contract.rs'))),
+  ['okx-host-controller', 'okx-research-service', 'okx-trading-engine']);
 // A dev-only Research dependency must not be attributed to its release EXE.
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-api/src/lib.rs'))), ['okx-agent.exe']);
+
+// After the Engine production split, a retained dev-only T06–T10 Research
+// fixture still requires Engine test execution for Research protocol edits.
+// The diagnostics must distinguish this from shipping-EXE compilation.
+const devResearch = structuredClone(metadata);
+devResearch.resolve.nodes.find(n => n.id === 'okx-ipc-contracts').deps = [e('okx-engine-domain')];
+devResearch.resolve.nodes.find(n => n.id === 'okx-trading-engine').deps.push(e('okx-research-protocol', 'dev'));
+const protocol = analyze(devResearch, files('crates/okx-research-protocol/src/strategy_contract.rs'));
+assert.deepEqual(binaries(protocol), ['okx-research-service.exe']);
+assert.deepEqual(testRoots(protocol), ['okx-research-service', 'okx-trading-engine']);
+assert.match(markdown(protocol), /Normal\/build\/dev dependency paths/);
 
 const cloudflare = analyze(metadata, files('cloudflare/okx-mcp/src/mcp.ts', 'docs/a.md'));
 assert.deepEqual(binaries(cloudflare), []);

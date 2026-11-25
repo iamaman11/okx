@@ -9,14 +9,21 @@ See [the implemented clean Engine contract](ARCHITECTURE_CONTRACT_V1.md), [#398]
 
 ## Finding an operation's owner
 
-`okx-ipc-contracts::AgentOperation` is the public command model. `query::dispatch`
-validates it and routes to the existing account, trade, analytics or portfolio
-owner. Background recovery uses those same operations. The executable mapping
-and exact direct-test commands are in [testing.md](testing.md).
+`okx-ipc-contracts::AgentOperation` describes the legacy Engine-facing wire.
+`okx-trading-engine::query::dispatch` validates this envelope and owns **only
+Engine/account/trade** operations. Research backtests, public-market analysis,
+instrument search and hypothetical portfolio scenarios are handled directly by
+Research's own typed `edge_runtime` endpoint. The Engine dispatcher rejects
+an incorrectly delivered Research operation with `RESEARCH_OWNER_REQUIRED`;
+it does not spawn Research or silently proxy it. The executable mapping and
+direct-test commands are in [testing.md](testing.md) and
+[the current owner map](580-component-baseline.md).
 
-Trade decisions remain beside their operation in `trade_service`. Account
-SQLite mutations belong to `AccountStoreHandle`; exchange sends belong to the
-existing execution adapter; shared risk belongs to Worker RiskBook. A diagnostic
+Live strategy decisions are calculated from installed, versioned rules inside
+Engine's `trade_service`; optimizing those rules on historical data belongs to
+Research. Account SQLite mutations belong to `AccountStoreHandle`; exchange
+sends belong to the existing execution adapter; RiskBook belongs to
+`okx-trade-execution`, inside Engine. A diagnostic
 projection cannot grant permission, settle money or release risk.
 
 ## Read-only explanations

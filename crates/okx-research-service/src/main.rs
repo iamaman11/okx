@@ -20,15 +20,29 @@ async fn main() {
         Ok(()) => std::process::exit(0),
         Err(error) => {
             eprintln!("OKX Research Service: {error}");
-            let code = match error.as_str() {
-                "RESEARCH_CATALOG_MISSING" => 70,
-                "RESEARCH_SCOPE_MISMATCH" => 71,
-                "RESEARCH_CATALOG_SCOPE_UNBOUND" => 72,
-                "RESEARCH_ROOT_LOCKED" => 73,
-                _ => 1,
-            };
-            std::process::exit(code);
+            std::process::exit(exit_code(&error));
         }
+    }
+}
+
+/// Startup failures are observable by CONTROL without reading stderr or
+/// sharing Research credentials. A live WSS authentication failure does not
+/// exit this process and must not be misreported as a local credential error.
+fn exit_code(error: &str) -> i32 {
+    match error {
+        "RESEARCH_CATALOG_MISSING" => 70,
+        "RESEARCH_SCOPE_MISMATCH" => 71,
+        "RESEARCH_CATALOG_SCOPE_UNBOUND" => 72,
+        "RESEARCH_ROOT_LOCKED" => 73,
+        "RESEARCH_WORKER_ALREADY_ACTIVE" => 74,
+        "RESEARCH_EDGE_CREDENTIAL_NOT_FOUND"
+        | "RESEARCH_EDGE_CREDENTIAL_READ_FAILED"
+        | "RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE" => 75,
+        "RESEARCH_EDGE_ORIGIN_UNTRUSTED"
+        | "INVALID_RESEARCH_EDGE_WSS_URL"
+        | "INVALID_RESEARCH_BEARER"
+        | "RESEARCH_EDGE_TOKEN_INVALID" => 76,
+        _ => 1,
     }
 }
 async fn run() -> Result<(), String> {
@@ -140,6 +154,10 @@ fn provision_research_edge_token() -> Result<(), String> {
     } else if token.ends_with(b"\n") {
         token.pop();
     }
+    // CONTROL normally denies rotation while Research is running. The native
+    // provisioner enforces the same rule even when invoked directly, without
+    // requiring the financial Engine or opening the Research catalog.
+    let _exclusive = okx_research_service::process_memory::ResearchInstanceLease::acquire()?;
     okx_research_service::edge_credentials::store(&token)
 }
 
@@ -196,4 +214,33 @@ async fn run_public_candles(args: &[std::ffi::OsString]) -> Result<(), String> {
         serde_json::to_string(&capture).map_err(|_| "PUBLIC_CANDLES_SERIALIZATION_FAILED")?;
     println!("{encoded}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_code;
+
+    #[test]
+    fn supervisor_startup_exit_codes_are_typed_and_credential_safe() {
+        for (reason, expected) in [
+            ("RESEARCH_CATALOG_MISSING", 70),
+            ("RESEARCH_SCOPE_MISMATCH", 71),
+            ("RESEARCH_CATALOG_SCOPE_UNBOUND", 72),
+            ("RESEARCH_ROOT_LOCKED", 73),
+            ("RESEARCH_WORKER_ALREADY_ACTIVE", 74),
+            ("RESEARCH_EDGE_CREDENTIAL_NOT_FOUND", 75),
+            ("RESEARCH_EDGE_CREDENTIAL_READ_FAILED", 75),
+            ("RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE", 75),
+            ("RESEARCH_EDGE_ORIGIN_UNTRUSTED", 76),
+            ("INVALID_RESEARCH_EDGE_WSS_URL", 76),
+            ("INVALID_RESEARCH_BEARER", 76),
+            ("RESEARCH_EDGE_TOKEN_INVALID", 76),
+        ] {
+            assert_eq!(exit_code(reason), expected, "{reason}");
+        }
+        // Remote Edge errors are retried and cannot be inferred from a
+        // credential-only exit code. Unknown failure remains generic.
+        assert_eq!(exit_code("RESEARCH_HELLO_ACK_REQUIRED"), 1);
+        assert_eq!(exit_code("RESEARCH_PUBLIC_TRANSPORT_FAILED"), 1);
+    }
 }

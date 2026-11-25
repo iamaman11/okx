@@ -19,7 +19,14 @@ import sys
 _PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 # The core is linked only by Research/Analysis; the architecture DAG gate
 # rejects any transitive Native Agent dependency before this fast path is used.
-_RESEARCH_DIRS = ("crates/okx-research/", "crates/okx-research-service/", "crates/okx-strategy-core/", "crates/okx-analysis/")
+_RESEARCH_DIRS = (
+    "crates/okx-research/", "crates/okx-research-service/",
+    "crates/okx-strategy-core/", "crates/okx-analysis/",
+)
+_RESEARCH_PROTECTED_SOURCES = (
+    "crates/okx-research-protocol/", "crates/okx-research-domain/",
+)
+_ENGINE_DIRS = ("crates/okx-trading-engine/", "crates/okx-trade-execution/")
 _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
 _HOST_CONTROL_SRC = "crates/okx-host-controller/src/"
 _HOST_LAUNCHER_SRC = "crates/okx-host-launcher/src/"
@@ -32,6 +39,8 @@ _RESEARCH_MANIFESTS = {
     "crates/okx-analysis/Cargo.toml",
     "crates/okx-research-service/Cargo.toml",
     "crates/okx-strategy-core/Cargo.toml",
+    "crates/okx-research-protocol/Cargo.toml",
+    "crates/okx-research-domain/Cargo.toml",
 }
 _HOST_MANIFESTS = {
     "crates/okx-host-controller/Cargo.toml",
@@ -83,6 +92,17 @@ def category(path):
     # affect the installed product; they must not bypass the Native gate.
     if _research_source(path):
         return "research"
+    # These new Research crates are still included by an Engine dev-only
+    # compatibility test. They become Research-only *only after* the exact
+    # before/after Windows test closure proves the dependency removed.
+    if _research_protected_source(path):
+        return "full"
+    # Engine/Execution are both owned by the single financial writer. Their
+    # source-only changes still require every financial property; only the
+    # *shipping* executable may be narrowed after accepted-base proof.
+    if path.endswith(".rs") and any(path.startswith(root + owner)
+                                   for root in _ENGINE_DIRS for owner in ("src/", "tests/")):
+        return "engine"
     return "full"
 
 
@@ -126,6 +146,8 @@ def classify(pages):
 def _scope(categories):
     if "full" in categories:
         return "full"
+    if "engine" in categories:
+        return "engine" if categories <= {"engine", "docs", "cloudflare"} else "full"
     if "research" in categories:
         if categories & {"host-controller", "host-launcher"}:
             return "research-host"
@@ -142,6 +164,13 @@ def _scope(categories):
 def _research_source(path):
     return path.endswith(".rs") and any(
         path.startswith(root + owner) for root in _RESEARCH_DIRS
+        for owner in ("src/", "tests/")
+    )
+
+
+def _research_protected_source(path):
+    return path.endswith(".rs") and any(
+        path.startswith(root + owner) for root in _RESEARCH_PROTECTED_SOURCES
         for owner in ("src/", "tests/")
     )
 
@@ -167,6 +196,10 @@ def draft_checks(path, kind):
             return {"worker", "worker-ipc"}
         if path.startswith("crates/okx-research-service/src/"):
             return {"worker"}
+        if path.startswith(("crates/okx-research-protocol/", "crates/okx-research-domain/")):
+            return {"wire", "strategy", "research", "worker"}
+    if kind == "engine":
+        return {"expanded"}
     if path == "crates/okx-research-service/src/main.rs":
         return {"ipc", "worker"}
     if path == "crates/okx-research-service/src/process_memory.rs":
@@ -222,15 +255,20 @@ def dependency_candidate(pages):
         return "none"
     manifests = [entry["filename"] for entry in files
                  if entry["filename"] in _RESEARCH_MANIFESTS | _HOST_MANIFESTS]
-    if not manifests or any(entry["status"] != "modified" for entry in files
-                            if entry["filename"] in _RESEARCH_MANIFESTS | _HOST_MANIFESTS | {"Cargo.lock"}):
+    protected_sources = [entry["filename"] for entry in files
+                         if _research_protected_source(entry["filename"])]
+    if (not manifests and not protected_sources) or any(
+        entry["status"] != "modified" for entry in files
+        if entry["filename"] in _RESEARCH_MANIFESTS | _HOST_MANIFESTS | {"Cargo.lock"}
+        or _research_protected_source(entry["filename"])
+    ):
         return "none"
     kinds = set()
     for entry in files:
         path = entry["filename"]
         if path == "Cargo.lock":
             continue
-        if path in _RESEARCH_MANIFESTS or category(path) == "research":
+        if path in _RESEARCH_MANIFESTS or category(path) == "research" or _research_protected_source(path):
             kinds.add("research")
         elif path in _HOST_MANIFESTS or category(path) in {"host-controller", "host-launcher"}:
             kinds.add("host")
@@ -291,7 +329,7 @@ def _self_test() -> None:
     # The Actions shell guard must accept exactly the names produced by this
     # classifier. A stale host-control spelling once rejected host-controller
     # source changes before their dedicated short Windows job could start.
-    expected_scopes = {"docs", "cloudflare", "research", "research-host", "host-controller", "host-launcher", "full"}
+    expected_scopes = {"docs", "cloudflare", "engine", "research", "research-host", "host-controller", "host-launcher", "full"}
     scope_guards = re.findall(r'case "\$scope" in ([a-z|-]+)\)', workflow)
     assert len(scope_guards) == 1, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
     assert set(scope_guards[0].split("|")) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
@@ -343,6 +381,7 @@ def _self_test() -> None:
         "docs": [files("docs/acceptance/518/t01-t15-evidence-matrix.md"), files("README.md", "docs/arch.md")],
         "cloudflare": [files("cloudflare/okx-mcp/src/runtime_session.ts"), files("cloudflare/okx-mcp/src/mcp.test.ts", "docs/okx.md")],
         "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/time_series.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md"), files("crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-research-service/tests/edge_wss.rs")],
+        "engine": [files("crates/okx-trading-engine/src/query.rs"), files("crates/okx-trade-execution/src/risk/mod.rs", "README.md"), files("crates/okx-trading-engine/src/trade_service/strategies.rs", "cloudflare/okx-mcp/src/mcp.ts")],
         "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-protocol/src/lib.rs"), files("crates/okx-host-controller/src/research_supervisor.rs"), files("crates/okx-host-protocol/src/research.rs"), files("crates/okx-host-controller/tests/research_supervisor.rs"), files("crates/okx-host-protocol/tests/research_wire.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md"), files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-host-protocol/src/lib.rs", "cloudflare/okx-mcp/src/mcp.ts")],
         "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/tests/launcher_process.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
         "research-host": [files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs"), files("crates/okx-host-controller/src/lifecycle.rs", "crates/okx-research-service/tests/edge_wss.rs"), files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-host-protocol/src/research.rs", "crates/okx-research-service/src/edge_credentials.rs")],
@@ -356,7 +395,10 @@ def _self_test() -> None:
     assert not edge_changed(files("crates/okx-host-controller/src/main.rs", "README.md"))
     unsafe = [
         [], [[]], [[{}]],
-        files("crates/okx-research-domain/src/lib.rs"),
+        files("crates/okx-trading-engine/src/query.rs", "crates/okx-research-protocol/src/analytics.rs"),
+        files("crates/okx-research-protocol/src/analytics.rs"),
+        files("crates/okx-research-domain/src/numeric.rs"),
+        files("crates/okx-trade-execution/src/risk/mod.rs", "crates/okx-host-controller/src/research_supervisor.rs"),
         files("crates/okx-research-service/src/process_memory.rs"),
         files("crates/okx-research-service/src/main.rs"),
         files("crates/okx-research-service/src/process_memory.rs", "crates/okx-host-controller/src/research_supervisor.rs"),
@@ -364,8 +406,6 @@ def _self_test() -> None:
         files("crates/okx-host-controller/src/lifecycle_executor.rs"),
         files("crates/okx-host-controller/src/lifecycle_executor.rs", "crates/okx-research-service/src/edge_runtime.rs"),
         files("crates/okx-ipc-contracts/src/lib.rs"),
-        files("crates/okx-trading-engine/src/trade_service/execute.rs"),
-        files("crates/okx-trade-execution/src/lib.rs"),
         files("crates/okx-host-controller/Cargo.toml"),
         files("crates/okx-host-protocol/Cargo.toml"),
         files("crates/okx-host-launcher/Cargo.toml"),
@@ -394,7 +434,7 @@ def _self_test() -> None:
         files("docs/a.yml"), files("crates/okx-trading-engine/src/readme.md"),
         files("docs/../crates/okx-trading-engine/README.md"), files("docs//a.md"),
         files("cloudflare/okx-mcp/../okx-trading-engine/src/a.ts"),
-        files("docs/a.md", "crates/okx-research-domain/src/lib.rs"),
+        files("docs/a.md", "crates/okx-trading-engine/build.rs"),
         files("cloudflare/okx-mcp/src/mcp.ts", ".github/workflows/ci.yml"),
         [[{"filename": "docs/a.md", "status": "renamed", "previous_filename": "crates/okx-trading-engine/a.md"}]],
         [[{"filename": "docs/a.md", "status": "modified"}] * 2],
@@ -406,6 +446,11 @@ def _self_test() -> None:
     assert all(classify(pages) == "full" for pages in unsafe)
     for wanted, selection in (
         ("research", files("crates/okx-research-service/Cargo.toml", "Cargo.lock")),
+        ("research", files("crates/okx-research-domain/Cargo.toml", "Cargo.lock")),
+        ("research", files("crates/okx-research-protocol/Cargo.toml", "Cargo.lock")),
+        ("research", files("crates/okx-research-protocol/src/analytics.rs")),
+        ("research", files("crates/okx-research-domain/src/numeric.rs")),
+        ("research", files("crates/okx-research-domain/src/numeric.rs", "crates/okx-research-service/src/analytics/market.rs")),
         ("research", files("crates/okx-analysis/Cargo.toml", "Cargo.lock")),
         ("research", files("crates/okx-strategy-core/Cargo.toml", "crates/okx-research/src/lib.rs")),
         ("host-controller", files("crates/okx-host-controller/Cargo.toml", "Cargo.lock")),

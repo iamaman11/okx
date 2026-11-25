@@ -7,7 +7,7 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 
 | Responsibility | Production entrypoint / owner |
 |---|---|
-| Authenticated product command | `okx-trading-engine::query::dispatch_with_governance` |
+| Authenticated trading/account command | `okx-trading-engine::query::dispatch_with_governance`; Research commands are rejected as `RESEARCH_OWNER_REQUIRED` |
 | Available or unavailable finance | `okx-trading-engine::finance_dispatch::FinanceDispatch` |
 | Existing finance startup and exact rejection cause | `okx-trading-engine::finance_startup::select` |
 | Live execution, protection, reconciliation | `okx-trading-engine::trade_service::TradeService` |
@@ -17,7 +17,7 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 | Engine delivery and financial observations | `okx-trading-engine::cloudflare_transport` |
 | Research delivery and typed public-source requests | `okx-research-service::edge_runtime` |
 | Research command handler | `okx-research-service::analytics::AnalyticsService` |
-| Research jobs, identity, cancellation, root lease | Worker `analytics::jobs::Jobs` |
+| Research jobs, identity, cancellation, root lease | Research `analytics::jobs::Jobs` |
 | Pure calculations | Existing `okx-analysis` and `okx-research` libraries |
 | Verified component staging | CONTROL `artifact::research_component` |
 | Standalone Research process, Windows Job and desired state | CONTROL `research_supervisor::ResearchSupervisor` |
@@ -33,8 +33,10 @@ It does not import Engine's Cloudflare transport, private account credentials,
 financial storage or exchange order-sending capability. This mode uses the
 already implemented `IndependentOkxPublicSource` rather than Engine's public
 market callback, and bounds frame size and concurrent work. The existing
-legacy IPC runners remain available to the acceptance tests while their
-independent-process witnesses are migrated.
+legacy IPC runners remain available for historical acceptance tests while
+their independent-process witnesses are migrated. This **does not** mean the
+two launch modes satisfy S2: only CONTROL may own the eventual installed
+Research lifecycle.
 
 Research owns market queries with explicit instruments or a public universe,
 market capabilities, instrument search, overview, microstructure, portfolio
@@ -108,42 +110,38 @@ Separate Credential Manager targets and distinct crates are a code-level
 least-authority measure, **not** an OS security boundary when both processes
 run as the same Windows user.
 
-Agent has no production dependency on the research implementation or worker.
-Worker has no production dependency on Agent, execution, API credentials, or
-financial storage. Its test-only HTTP fixtures do not authorize those edges.
-`scripts/check_architecture.py` checks both direct and transitive dependencies.
+Engine no longer has a normal/build dependency on the Research implementation,
+but an older Engine-test-only `ResearchClient` requires temporary migration
+coverage. The historic `okx-ipc-contracts → okx-research-protocol` import was
+also a separate **build** coupling even without the Research runtime crate;
+its removal must be proven against normal/build Cargo closures. Research's
+standalone Edge runtime uses its own public source, protocols and catalog;
+it does not import Engine, account SQL or exchange-order capabilities.
+`scripts/check_architecture.py` validates resolved normal/build boundaries,
+records any temporary test-only exception as **S1 DEV DEBT**, and exposes a
+strict dev-closure guard for final S1 acceptance.
 
-Research requests currently receive public observations through the Engine's
-host source owner (`ResearchClient::installed` delegates to
-`MarketBootstrapper::research_source`). They cannot issue arbitrary HTTP,
-access an account, reserve money, or place orders. **This is an existing
-runtime dependency, not the desired independent Research boundary.**
-
-The Research executable can also serve the existing framed commands with
+The Research executable still supports legacy framed commands with
 `--independent-source --root <research-dir> --scope <scope>`. Its local
 provider reads public OKX candles, recent and historical trades, SWAP
 reference data, tickers, historical funding and open interest. It rejects parent source replies
 in that mode. Use `--market-request --root <research-dir> --scope <scope>`
 to read one JSON `MarketRequest` from stdin and print the result. Explicit
 instruments are required. These requests use the same analytics, coverage
-and artifact code as hosted requests. Engine still resolves instrument
-universe queries on its existing hosted route.
+and artifact code as Research Edge commands. Live user-facing Research
+requests must be routed to the Research owner; Engine's authenticated product
+dispatcher returns `RESEARCH_OWNER_REQUIRED`, not a fallback result.
 
 The live strategy turn in `okx-trading-engine/src/trade_service/strategies.rs`
-captures closed prices from Engine's public source. With a compatible worker
-it stages the captured input in Research and checks for a committed proposal
-on a later strategy turn. Research evaluates the signal in the background
-and commits it to its SQLite outbox before returning it. A worker restart
-keeps committed proposals until expiry and drops pending computations.
-Workers with the previous protocol continue to use `EvaluateSignal`.
-
-Engine checks the proposal against its installed strategy, its own digest
-of the exact input, the policy revision and current time. The existing
-financial SQLite ledger serializes duplicate claims. RiskBook and Engine
-retain all admission and venue mutation authority. Manual trade commands
-and reconciliation continue independently of the strategy lane. A fully
-autonomous Research scheduler would also need to receive strategy
-configuration and capture its own input independently of Engine.
+captures verified closed bars from Engine's source, **evaluates the installed
+rule locally**, verifies freshness and seals the deterministic decision key
+inside the account-scoped financial SQLite owner. Stop and automatic-send
+claim are serialized against the same strategy activation revision. Research
+does not calculate, approve or publish a live trading signal for Engine.
+Manual trade, risk-reducing exits and reconciliation use the same financial
+authority. Old `ResearchCommand::ProposeStrategySignal` and its Research SQLite
+outbox are legacy code to remove after mandatory witnesses migrate; they are
+not part of the desired production contract.
 
 ## Identity and recovery
 
@@ -172,37 +170,22 @@ stored-job access do not perform that fetch.
 
 ## Installation versus activation
 
-`HostControlOperation::DeployResearch` dispatches through `okx-host-controller::runtime`
-to `artifact::research_component::deploy_research`. CONTROL verifies the source,
-component origins, compatibility and installed non-Research components, stages a
-verified content-addressed worker and publishes
-`installed-research.json`. This does not replace the running child. Agent detects
-the candidate, drains admissions, waits for old jobs, commands, and public-source
-handlers, then closes the old process before starting a verified replacement.
-Active and installed versions are separate observations. Invalid staging never
-authorizes a new executable or restarts the financial Engine.
-If CONTROL changes or damages the candidate after the old child has entered
-Drain, the Engine must not return that permanently drained connection as healthy.
-It revalidates the previous content-addressed Research image and restarts that
-previous child; if even that image is invalid, Research fails closed while the
-financial Engine continues. An aborted handoff can change the Research PID.
+`HostControlOperation::DeployResearch` stages the verified, content-addressed
+Research image and publishes `installed-research.json`; installation is not
+activation. In the new architecture only CONTROL's `StartResearch` and
+`StopResearch` own the process. Verify installed and running SHA, process
+generation, Windows Job, authenticated Research Edge session and existing-job
+readback separately. A failed activation preserves the existing Engine PID,
+financial SQLite and trading authority; it never authorizes a new image by
+inference. `StatusResearch` is read-only process evidence, not proof of a
+network handshake. Installed update/rollback and shared-load measurements
+remain acceptance prerequisites under #580 S3.
 
-Call `diagnostics.explain` with `view: "research"` and `reference: "deployment"` to read
-the Engine PID and its cached deployment observation. The Research PID, active
-SHA-256 and handshake time describe the child that passed the IPC handshake.
-`observed_at_ms` is the Engine clock at which this cached observation was read,
-not the time the child was activated. Both timestamps are needed to prove that
-before/after readbacks bracket a CONTROL change.
-The installed SHA describes the candidate observed during the last connection
-check. It can differ from the active SHA while the old child drains. To drive
-an on-demand activation, call `research.capabilities`, then read the deployment
-observation again. Check the returned active SHA and PID after both update and
-rollback. When routed through the updated MCP Worker, the same response includes
-the Edge version and release tree alongside the correlated Engine response.
-Use CONTROL for executable and Launcher verification on Windows.
-
-Supplying a job `reference` to the same view reads that job. Neither diagnostic
-starts a child, refreshes sources, enqueues research, or recovers finance.
+The historical Engine-hosted handoff/recovery procedure and its
+`diagnostics.explain(view="research",reference="deployment")` observation
+describe only an **older installed mode**. They are useful for verifying a
+safe transition, but must not be represented as the final CONTROL-owned
+runtime, a live Research-only user route or a completed physical cutover.
 
 Account diagnostics read NAV completeness, raw coverage, source time and checked
 time from one scoped financial snapshot, with a 250ms read deadline. They report

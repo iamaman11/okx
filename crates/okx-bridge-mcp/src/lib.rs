@@ -341,7 +341,7 @@ pub fn mcp_tools() -> Value {
         {
             "name": "find_instruments",
             "title": "Find OKX instruments",
-            "description": "Find current OKX derivative instruments through the encrypted Windows DATA channel. Returns bounded typed data only; transport internals stay hidden.",
+            "description": "Legacy Engine-owned market read through the encrypted Windows DATA channel. Requires Engine online; standalone Research market reads use the Cloudflare MCP route.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -357,7 +357,7 @@ pub fn mcp_tools() -> Value {
         {
             "name": "market_overview",
             "title": "Read OKX market overview",
-            "description": "Read current rules, prices and market state for one exact OKX derivative instrument through the encrypted Windows DATA channel.",
+            "description": "Legacy Engine-owned market overview through the encrypted Windows DATA channel. Requires Engine online; standalone Research market reads use the Cloudflare MCP route.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -547,6 +547,27 @@ mod tests {
                 .and_then(Value::as_bool)
                 == Some(true)
         }));
+        // Do not misrepresent these two existing DATA-mailbox reads as an
+        // independent Research route until the new user entry is installed.
+        for name in ["find_instruments", "market_overview"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .expect(name);
+            let description = tool["description"].as_str().expect("description");
+            assert!(description.contains("Legacy Engine-owned"));
+            assert!(description.contains("Requires Engine online"));
+        }
+        let research_status = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("research_status"))
+            .unwrap();
+        assert!(
+            research_status["description"]
+                .as_str()
+                .unwrap()
+                .contains("CONTROL")
+        );
     }
 
     #[test]

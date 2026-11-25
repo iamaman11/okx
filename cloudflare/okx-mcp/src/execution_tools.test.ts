@@ -380,6 +380,12 @@ function resolvePublicSchema(node:any,defs:Record<string,any>):any{
   return Object.fromEntries(Object.entries(node).filter(([key])=>key!=='$defs').map(([key,value])=>[key,resolvePublicSchema(value,defs)]));
  }return node;
 }
+function canonicalSchema(node:any):string{
+ if(Array.isArray(node))return '['+node.map(canonicalSchema).join(',')+']';
+ if(node&&typeof node==='object')return '{'+Object.keys(node).sort()
+   .map(key=>JSON.stringify(key)+':'+canonicalSchema(node[key])).join(',')+'}';
+ return JSON.stringify(node);
+}
 for(const tool of PUBLIC_TOOLS as any[]){
  if(tool.name.startsWith('trade.'))continue;
  const expanded=resolvePublicSchema(tool.inputSchema,tool.inputSchema.$defs??{});
@@ -404,13 +410,15 @@ for(const tool of PUBLIC_TOOLS as any[]){
     properties:{action:branch.properties.action,account:expanded.properties.account,...branch.properties},
     required:['action','account',...branch.required.filter((key:string)=>key!=='action')],
     additionalProperties:false,
-  })):expanded.oneOf;
+  })):expanded.oneOf.map((branch:any)=>({...branch,additionalProperties:false}));
   if(tool.name==='strategies')
     fail(expanded.type==='object' && expanded.unevaluatedProperties===false
       && expanded.required.length===1 && expanded.required[0]==='account',
       'factored strategies schema stays strict at the root');
-  const comparable=tool.name==='strategies'?{oneOf:variants}:expanded;
-  fail(JSON.stringify(comparable)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
+  else fail(expanded.unevaluatedProperties===false && expanded.oneOf.every((branch:any)=>
+    !('additionalProperties' in branch)),`strict root closure ${tool.name}`);
+  const comparable={oneOf:variants};
+  fail(canonicalSchema(comparable)===canonicalSchema({oneOf:ACTION_SCHEMAS[tool.name]}),
     `exact public schema factoring ${tool.name}`);
   for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))
    for(const input of [fixture.positive,...fixture.negative])

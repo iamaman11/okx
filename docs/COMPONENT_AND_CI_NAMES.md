@@ -6,22 +6,27 @@ and a CI job is evidence. They are not interchangeable.
 
 ## Four application owners
 
-The workspace has four logical owners across 19 Cargo packages. Shared
+The workspace has four logical owners across 21 Cargo packages in PR #581. Shared
 libraries are compile-time dependencies. The source paths describe ownership
 in the workspace. Runtime boundaries are tracked separately.
 
 | Owner | Code and durable state | Exclusive effect | Must not own |
 | --- | --- | --- | --- |
 | **Engine** | `okx-trading-engine`, `okx-trade-execution`; one financial SQLite/WAL, RiskBook, private account keys | Financial admission, durable intent, at-most-once venue send, reconciliation, protection | Research algorithms, hypothesis jobs, Research's dataset/catalog storage |
-| **Research** | `okx-research-service`, `okx-strategy-core`, `okx-analysis`, `okx-research`; own research jobs/data | Public-source ingestion, causal computation, replay, typed proposed signal | Private credentials, account risk, finance SQLite, exchange POST |
+| **Research** | `okx-research-service`, `okx-research-domain`, `okx-research-protocol`, `okx-strategy-core`, `okx-analysis`, `okx-research`; own research jobs/data | Public-source ingestion, causal computation, replay, analysis and immutable artifacts | Private credentials, account risk, live strategy decisions, finance SQLite, exchange POST |
 | **Control** | `okx-host-controller` and `okx-host-launcher`; installed component manifests and lifecycle evidence | Authorized start/stop/install/rollback/doctor | Trading decisions, finance ledger, research computations |
 | **Edge** | `cloudflare/okx-mcp`, `okx-bridge-mcp`; transport/session/identity state | Authenticated MCP/API delivery to the matching owner | Financial or research source-of-truth state, venue mutation |
 
 `okx-engine-domain` owns Engine facts and fee rules. `okx-research-domain`
 owns analytical inputs and public market facts for Research.
-`okx-ipc-contracts` carries Engine and Host commands. Its existing Research
-route imports `okx-research-protocol` until the standalone cutover. Host-control
-mailbox messages live in `okx-host-protocol`.
+`okx-ipc-contracts` carries the Engine-facing wire. Its historical import of
+`okx-research-protocol` is an S1 build-coupling defect, not an accepted
+cross-owner dependency: the target Engine normal/build closure must contain
+**no Research protocol or domain**. The temporary `legacy-research-test`
+feature is a **dev-only debt**, not a waiver for final S1: normal/build/dev
+must all be clean after T06–T10 witnesses move to an independent test harness.
+Research owns its separate authenticated Edge request types. Host-control mailbox messages live
+in `okx-host-protocol`.
 `okx-api`, `okx-market-runtime`, `okx-observation`, `okx-ws` and
 `okx-github` contain current adapters/support code; their current broad
 dependency fan-out is **not** a reason to grant another owner financial
@@ -33,10 +38,11 @@ Cargo dependencies and the CI acceptance checks.
 ### Ownership is a runtime contract, not a crate count
 
 `Research` being compiled as separate crates does **not** on its own mean it
-can restart independently. There are currently **two distinct Research
-runtime modes**. In the existing installed Engine-hosted mode, the Engine's
-`ResearchClient` starts the child, provides the public market source callback,
-and observes activation. A separate, opt-in CONTROL-owned mode has its own
+can restart independently. The **previously installed** Engine-hosted mode
+started a Research child through `ResearchClient` and provided the public
+market source callback. This path is no longer the intended production
+execution architecture; the remaining child IPC and Engine test fixtures are
+explicit S2 deletion work. The new, opt-in CONTROL-owned mode has its own
 desired-state file, content-verified Research image, PID/process generation,
 Windows Job, restart policy, host-scoped SQLite catalog and Research-specific
 Cloudflare credential. CONTROL's `StatusResearch` reports only observed process
@@ -74,25 +80,28 @@ Edge authenticated-session health has been observed. Both processes currently
 run under the **same Windows user identity**: separate Credential Manager
 targets and Cargo graphs reduce accidental coupling but are **not** an OS
 sandbox or malicious-code isolation. That requires distinct restricted Windows
-identities and filesystem ACLs. The Engine's narrow trusted strategy signal
-admission remains in Trading, even after public research queries move to
-Research.
+identities and filesystem ACLs. The Engine independently calculates live
+strategy decisions from installed rules and controls their financial SQL claim;
+Research's analysis/results do not constitute trading authority.
 
-Virtual portfolio stress scenarios run in Research through
-`okx-analysis::portfolio_scenario`, with the same public Engine command
-and response schema. The active Research Service advertises this command
-before Engine sends it. Account portfolio and NAV remain financial reads.
+Virtual portfolio stress scenarios run directly in Research through
+`okx-analysis::portfolio_scenario`, using Research's typed Edge command.
+Engine does not forward those requests. Actual account portfolio and NAV
+remain Engine-owned financial reads.
 
 ### Confirmed remaining coupling and release rules
 
-The Engine does **not** compile the Research crate, but
-`trade_service/strategies.rs::strategy_turn` currently awaits Research's
-`evaluate_signal` after loading candles. `research_client.rs` also proxies
-public-source requests through Engine's `MarketBootstrapper`, and the Edge
-MCP transport currently routes research commands through Agent dispatch.
-These are real runtime couplings. A diagram showing four boxes is insufficient
-evidence of independence; [the live source and transition map](research-boundaries.md)
-records the actual code-level boundary.
+At PR #581, Engine's `trade_service/strategies.rs::strategy_turn` evaluates
+its installed rules locally against verified closed bars, then submits the
+decision to its own SQL/RiskBook authority. The Engine query dispatcher rejects
+Research operations with `RESEARCH_OWNER_REQUIRED`; Edge routes those to
+Research's separate socket. However, `research_client.rs` and historical
+child-process acceptance fixtures still compile under `#[cfg(test)]`, and
+the Research executable retains a legacy framed-IPC entrypoint. In addition,
+the old shared `okx-ipc-contracts → okx-research-protocol` dependency must be
+disabled for production, with a visibly unresolved dev-only exception until
+witness migration. The exact transition is tracked
+in [the source and transition map](research-boundaries.md).
 
 An independent Research change is accepted only when it can compile/test,
 run public-source requests and produce reproducible replay results while
@@ -113,9 +122,10 @@ checks and usable artifact, and is not yet proved for Engine changes.
 
 The classifier follows **runtime effects as well as Cargo imports**. Research
 analytics and its own Edge adapter can use the Research-only Windows route;
-`research_supervisor.rs` can use Host owner tests. But the legacy Engine still
-starts the Research executable, so changes to the Worker's `main.rs` or
-`process_memory.rs` must run the full Engine/Finance acceptance. Likewise,
+`research_supervisor.rs` can use Host owner tests. While the old Engine-child
+mode still exists and its process tests remain mandatory, changes to Research's
+`main.rs` or `process_memory.rs` conservatively require full Engine/Finance
+acceptance. Likewise,
 Host `job.rs` and `lifecycle_executor.rs` own the Engine process and its
 Windows Job as well as Research: changing either must run the full native
 matrix. Shared IPC, Cargo lockfiles and CI build inputs remain full-scope.
@@ -139,7 +149,7 @@ a green classifier unit test alone does not prove a 1–2 minute owner-only run.
 | `okx-native-finance-check` | Engine's `native_finance_acceptance` example | CI-only executable that runs the financial witness binaries and verifies exact-tree receipts |
 | `okx-engine-domain` | `okx-domain-core` | Engine facts, fee rules and exact numeric inputs |
 | `okx-research-domain` | `okx-domain-core` | Public market facts, analytical inputs and numeric validation owned by Research |
-| `okx-ipc-contracts` | `okx-protocol` | Engine and Host wire contracts, including the existing Research route |
+| `okx-ipc-contracts` | `okx-protocol` | Engine wire and migration-era compatibility; Research-protocol linkage must be removed for final S1 |
 | `okx-research-protocol` | part of `okx-ipc-contracts` | Research commands, Edge frames and source data contracts |
 | `okx-host-protocol` | new | Host installation/control command and result protocol for CONTROL and MCP bridge; no trading ownership |
 | `okx-market-runtime` | `okx-runtime` | Runtime market sources, venue API, WebSocket and observation integration |
@@ -233,11 +243,14 @@ rebuilding the Engine. A Research release verifies and fetches the accepted Nati
 base once, in the job that assembles the artifact.
 
 On the Windows production dependency graph, `okx-analysis` and
-`okx-strategy-core` are outside Trading Engine. Research builds independently
-of `okx-engine-domain` and the venue execution adapters. The existing
-Engine-side Research route still consumes `okx-research-protocol` and its
-Research domain inputs through `okx-ipc-contracts`. The full route also covers changes
-to CI policy or inputs whose impact the classifier cannot verify.
+`okx-strategy-core` are outside Trading Engine, and Research builds
+independently of `okx-engine-domain` and the venue execution adapters. The
+remaining shared Engine IPC import of `okx-research-protocol` is explicitly
+**not** accepted for production S1: the architecture guard must reject Research
+protocol/domain in Engine's normal/build Cargo closure and record
+`legacy-research-test` as open dev debt. The full CI route
+also covers changes to CI policy or inputs whose impact the classifier cannot
+verify.
 
 The financial collector runs the seven wall-clock scenarios in an isolated
 two-thread test group. Each test that expects a fresh public-time response

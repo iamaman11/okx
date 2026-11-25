@@ -19,6 +19,7 @@ use zeroize::Zeroize;
 use crate::{
     HostControlError, HostControlResult,
     account_catalog::AccountCatalogStore,
+    artifact,
     auth::load_native_github_token,
     autostart,
     background_process::hidden_command,
@@ -309,6 +310,38 @@ impl HostExecutor {
         }
     }
 
+    /// The accepted archive and live Research process are one CONTROL-owned
+    /// transition. Do not publish an installed pointer behind a running
+    /// Research Job, or route activation back through the Trading Engine.
+    pub async fn deploy_research(
+        &mut self,
+        github: &okx_github::GitHubClient,
+        run_id: u64,
+        artifact_id: u64,
+        expected_source_tree: &str,
+    ) -> HostControlResult<Value> {
+        artifact::deploy_research(
+            github,
+            &mut self.research,
+            run_id,
+            artifact_id,
+            expected_source_tree,
+        )
+        .await
+    }
+
+    pub fn rollback_research(
+        &mut self,
+        expected_current_worker_sha256: &str,
+        expected_rollback_worker_sha256: &str,
+    ) -> HostControlResult<Value> {
+        artifact::rollback_research(
+            &mut self.research,
+            expected_current_worker_sha256,
+            expected_rollback_worker_sha256,
+        )
+    }
+
     /// Single common gate for both ordinary CONTROL dispatch and privileged
     /// runtime operations (release install, launcher and controller handoff).
     /// A corrupt file is not an absent file: its read returns an error.
@@ -319,6 +352,8 @@ impl HostExecutor {
                 | HostControlOperation::StatusResearch {}
                 | HostControlOperation::StartResearch { .. }
                 | HostControlOperation::StopResearch { .. }
+                | HostControlOperation::DeployResearch { .. }
+                | HostControlOperation::RollbackResearch { .. }
                 | HostControlOperation::ProvisionResearchRuntimeToken {}
                 | HostControlOperation::AccountCatalog
                 | HostControlOperation::TransportStatus
@@ -2043,6 +2078,52 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_release_gate_never_requires_a_valid_engine_desired_state() {
+        let root = std::env::temp_dir().join(format!(
+            "research-independent-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let control = root.join("control");
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&control).unwrap();
+        fs::write(control.join("engine-state.pb"), b"corrupt Engine state").unwrap();
+        let mut owner = HostExecutor::with_lifecycle(
+            runtime.clone(),
+            DesiredStateStore::at(control.join("engine-state.pb")),
+            ResearchSupervisor::at(control, runtime).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            owner
+                .lifecycle_gate(&HostControlOperation::DeployResearch {
+                    run_id: 1,
+                    artifact_id: 2,
+                    expected_source_tree: "a".repeat(40),
+                })
+                .is_ok()
+        );
+        assert!(
+            owner
+                .lifecycle_gate(&HostControlOperation::RollbackResearch {
+                    expected_current_worker_sha256: "b".repeat(64),
+                    expected_rollback_worker_sha256: "c".repeat(64),
+                })
+                .is_ok()
+        );
+        assert!(
+            owner
+                .lifecycle_gate(&HostControlOperation::StartAgent)
+                .is_err()
+        );
+        owner.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn independent_engine_runtime_receipt_is_strict() {

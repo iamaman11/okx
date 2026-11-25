@@ -106,6 +106,12 @@ pub enum HostControlError {
     #[error("independent Research process generation overflow")]
     ResearchGenerationExhausted,
 
+    #[error("Research image activation failed and the previous image was restored")]
+    ResearchActivationRolledBack,
+
+    #[error("Research image transition could not prove restoration of the previous image")]
+    ResearchRollbackUnconfirmed,
+
     #[error("the verified Engine image must expose the independent Engine runtime contract")]
     IndependentEngineRequired,
 
@@ -210,6 +216,8 @@ impl HostControlError {
             Self::ResearchStateCorrupt => "RESEARCH_STATE_CORRUPT",
             Self::ResearchIdentityMismatch => "RESEARCH_IDENTITY_MISMATCH",
             Self::ResearchGenerationExhausted => "RESEARCH_GENERATION_EXHAUSTED",
+            Self::ResearchActivationRolledBack => "RESEARCH_ACTIVATION_ROLLED_BACK",
+            Self::ResearchRollbackUnconfirmed => "RESEARCH_ROLLBACK_UNCONFIRMED",
             Self::IndependentEngineRequired => "INDEPENDENT_ENGINE_REQUIRED",
             Self::ResearchCatalogScopeRequired => "RESEARCH_CATALOG_SCOPE_REQUIRED",
             Self::ResearchCatalogMissing => "RESEARCH_CATALOG_MISSING",

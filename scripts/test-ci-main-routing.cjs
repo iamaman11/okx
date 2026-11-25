@@ -116,6 +116,13 @@ function validate(yaml, fileNames) {
   assert.match(researchRelease, /git worktree add --detach \$baselineDir \$mergeSha/);
   assert.match(researchRelease, /cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc/);
   assert.match(researchRelease, /node scripts\/research-release-scope.cjs @scopeArgs/);
+  assert.match(researchRelease, /\$candidate\.tag_name\.Substring\('native-base-'\.Length\)/);
+  assert.match(researchRelease, /compare\/\$candidateSha\.\.\.\$baseSha/);
+  assert.match(researchRelease, /\$relation\.status -cin @\('ahead', 'identical'\)/);
+  assert.match(researchRelease, /Sort-Object distance/);
+  assert.match(researchRelease, /AMBIGUOUS_NEAREST_NATIVE_BASE/);
+  assert.match(researchRelease, /\$scopeArgs \+= '--engine-only'/);
+  assert.doesNotMatch(researchRelease, /gh release delete|--cleanup-tag/);
   const host = job('host_controller_launcher_checks');
   assert.match(host, /cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
   assert.match(host, /cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
@@ -229,7 +236,16 @@ function validate(yaml, fileNames) {
   assert.match(build, /cargo build --locked --release/);
   assert.match(build, /PACKAGED_ENGINE_RUNTIME_CONTRACT_INVALID/);
   assert.match(build, /name: okx-windows-bundle-\$\{\{ github.event.pull_request.head.sha \}\}/);
-  assert.match(build, /if: github.event_name == 'pull_request'\n        uses: actions\/upload-artifact/);
+  assert.match(build, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope != 'engine'\n        uses: actions\/upload-artifact/);
+  assert.match(build, /Build only Engine against verified unchanged Windows owners/);
+  assert.match(build, /prepare-research-release\.ps1 -VerifyOnly -EngineOnly/);
+  assert.match(build, /cargo build --locked --release -p okx-trading-engine/);
+  assert.match(build, /okx.windows.engine-component\/v1/);
+  assert.match(build, /reused_verified_components = \$reused/);
+  assert.match(build, /release_is_complete = \$false/);
+  assert.match(build, /ENGINE_COMPONENT_RUNTIME_CONTRACT_INVALID/);
+  assert.match(build, /MAIN_NATIVE_REQUIRES_EXACT_ACCEPTED_READY_ARTIFACT/);
+  assert.match(build, /name: okx-engine-component-\$\{\{ github.event.pull_request.head.sha \}\}/);
   assert.match(build, /source_head_sha = \$sourceHead/);
   assert.doesNotMatch(build, /gh release|cargo run|cargo test --locked .* -- --nocapture/);
   const prime = job('trusted_main_cache_prime');
@@ -265,6 +281,8 @@ function validate(yaml, fileNames) {
   assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
   assert.match(windows, /test "\$\{\{ needs\.component_impact\.outputs\.native_proof \}\}" = "RESEARCH_OWNER_ONLY"/);
   assert.match(windows, /test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "success"/);
+  assert.match(windows, /native_proof \}\}" = "ENGINE_OWNER_ONLY"/);
+  assert.match(windows, /WINDOWS_NATIVE_PROOF=FRESH_ENGINE_AND_FULL_FINANCIAL_SUCCESS/);
   assert.equal((windows.match(/test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "skipped"/g) || []).length, 5,
     'REGRESSION_JOB_MUST_BE_SKIPPED_ON_EVERY_NON_FINANCE_PATH');
   const mixed = windows.slice(windows.indexOf('= "RESEARCH_HOST_OWNER_CHECKS"'),
@@ -292,6 +310,8 @@ function validate(yaml, fileNames) {
   assert.match(publish, /group: native-base-publication/);
   assert.match(publish, /ACCEPTED_MAIN: \$\{\{ github\.sha \}\}/);
   assert.doesNotMatch(publish, /github\.event\.workflow_run/);
+  assert.doesNotMatch(publish, /gh release delete|--cleanup-tag/, 'ACCEPTED_ROLLBACK_BASES_MUST_NOT_BE_PRUNED_BLINDLY');
+  assert.match(publish, /NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS/);
   assert.ok(publish.includes(JSON.stringify(releaseGates)), 'PUBLICATION_REQUIRES_EACH_WINDOWS_SUITE');
 
   for (const [id, block] of map) {
@@ -335,6 +355,8 @@ assert.throws(() => validate(source.replace('      - name: Test portable crates'
 assert.throws(() => validate(source.replace('        default: true', '        default: false'), workflows));
 assert.throws(() => validate(source.replace('BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED',
   'WE_DID_NOT_VERIFY_THE_TWO_TESTS'), workflows));
+assert.throws(() => validate(source.replace('NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS',
+  'gh release delete "$old" --cleanup-tag --yes'), workflows));
 assert.throws(() => validate(source.replace('NATIVE_ACCOUNT_CATALOG_ALL_SIX_TESTS_REQUIRED',
   'WE_DID_NOT_VERIFY_THE_SIX_TESTS'), workflows));
 assert.throws(() => validate(source.replace("$testArgs += @('--skip','accounts::native_connect_contracts::')",
@@ -346,8 +368,8 @@ assert.throws(() => validate(source.replace('always() &&\n        github.event_n
 assert.throws(() => validate(source.replace("inputs.prime_windows_cargo_cache == true", "true"), workflows));
 assert.throws(() => validate(source.replace("github.event_name == 'workflow_dispatch' && inputs.prime_windows_cargo_cache == true", "github.event_name == 'pull_request'"), workflows));
 assert.throws(() => validate(source.replace("github.event_name == 'push' && needs.component_impact.outputs.component_scope == 'full'", "github.event_name == 'push'"), workflows));
-assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_build_windows.result }}" = "success"', 'true'), workflows));
-assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "success"', 'true'), workflows));
+assert.throws(() => validate(source.replaceAll('test "${{ needs.trading_engine_build_windows.result }}" = "success"', 'true'), workflows));
+assert.throws(() => validate(source.replaceAll('test "${{ needs.trading_engine_regressions_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"', 'true'), workflows));
 assert.throws(() => validate(source.replace('"research_only=true" >> "$GITHUB_OUTPUT"', 'true'), workflows));
 assert.throws(() => validate(source.replace('RESEARCH_BASE_PROOF_REQUIRED', 'BYPASS'), workflows));

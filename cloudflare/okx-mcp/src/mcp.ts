@@ -293,8 +293,17 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
       typeof observed.connected!=='boolean'||typeof observed.session_fresh!=='boolean'||
       !['PASS','STALE','OFFLINE'].includes(String(observed.status)))
      return jsonRpc(id,toolResult({status:'failed',data:null,quality:'not_ready',reason_code:'INVALID_RUNTIME_STATUS'}));
+   const edgeFresh=observed.status==='PASS'&&observed.connected===true&&observed.session_fresh===true;
+   // These fields are authenticated Edge session observations. A PID and SHA
+   // carried in a hello frame are claims from that process, not independent
+   // installed-image evidence. Only Windows CONTROL can establish that proof.
    return jsonRpc(id,toolResult({status:'partial',quality:'partial',warnings:['CONTROL_EVIDENCE_UNAVAILABLE'],
-     data:{schema:'okx.research.deployment-edge/v1',edge:{worker_version:MCP_SERVER_VERSION,
+     data:{schema:'okx.research.deployment-edge/v1',owner:'research',
+       verification:{edge_authenticated_session:edgeFresh?'PASS':'UNVERIFIED',
+         control_process_proof:'NOT_PERFORMED',
+         first_unproven_stage:edgeFresh?'CONTROL_PID_SHA_GENERATION':'EDGE_AUTHENTICATED_SESSION',
+         next_action:edgeFresh?'inspect_control_research_status':'inspect_research_connection'},
+       edge:{worker_version:MCP_SERVER_VERSION,
        release_source_tree:workerReleaseSourceTree(env),research_transport:{
          schema:'okx.direct-transport.status/v1',owner:'research',status:stringField(observed,'status')??'OFFLINE',
          connected:observed.connected,session_fresh:observed.session_fresh,
@@ -302,7 +311,8 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
          agent_reported_pid:numericField(observed,'agent_pid')??null,
          agent_reported_binary_sha256:stringField(observed,'agent_binary_sha256')??null,
          agent_reported_incarnation:stringField(observed,'agent_incarnation')??null}},
-       control:{status:'unavailable',reason_code:'CONTROL_EVIDENCE_UNAVAILABLE'}}}));
+       control:{status:'unavailable',evidence:'NOT_PERFORMED',reason_code:'CONTROL_EVIDENCE_UNAVAILABLE',
+         pid:null,active_worker_sha256:null,installed_worker_sha256:null,process_generation:null}}}));
  }
  if(name==='market'&&args.action==='instruments'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),

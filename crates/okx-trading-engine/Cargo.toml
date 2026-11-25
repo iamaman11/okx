@@ -41,6 +41,11 @@ bytes = "1"
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 reqwest = { version = "0.13", default-features = false }
 tokio = { version = "1", features = ["process", "io-util", "test-util"] }
+# Explicit, temporary pre-cutover cross-owner test debt (T06–T10). These
+# features do not participate in `cargo build -p okx-trading-engine --release`.
+okx-ipc-contracts = { path = "../okx-ipc-contracts", features = ["legacy-research-test"] }
+okx-market-runtime = { path = "../okx-market-runtime", features = ["legacy-research-test"] }
+okx-research-protocol = { path = "../okx-research-protocol" }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { package = "keyring-core", version = "1" }

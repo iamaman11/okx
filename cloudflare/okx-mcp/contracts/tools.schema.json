@@ -770,7 +770,6 @@
               "end_ms",
               "limit"
             ],
-            "additionalProperties": false,
             "allOf": [
               {
                 "oneOf": [
@@ -817,8 +816,7 @@
             "required": [
               "action",
               "asset"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -832,8 +830,7 @@
             "required": [
               "action",
               "instrument"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -852,8 +849,7 @@
             "required": [
               "action",
               "instrument"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -863,10 +859,10 @@
             },
             "required": [
               "action"
-            ],
-            "additionalProperties": false
+            ]
           }
         ],
+        "unevaluatedProperties": false,
         "$defs": {
           "s": {
             "type": "string",
@@ -953,8 +949,7 @@
               "hypothesis",
               "status",
               "reason"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -971,8 +966,7 @@
             "required": [
               "action",
               "job_id"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -1039,7 +1033,6 @@
               "costs",
               "data_mode"
             ],
-            "additionalProperties": false,
             "allOf": [
               {
                 "oneOf": [
@@ -1097,8 +1090,7 @@
             "required": [
               "action",
               "idempotency_key"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -1112,8 +1104,7 @@
             "required": [
               "action",
               "job_id"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -1131,8 +1122,7 @@
               "action",
               "job_id",
               "idempotency_key"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -1166,8 +1156,7 @@
               "action",
               "job_id",
               "limit"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -1177,8 +1166,7 @@
             },
             "required": [
               "action"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -1263,8 +1251,7 @@
               "action",
               "cases",
               "data_mode"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -1314,10 +1301,10 @@
               "parameters",
               "costs",
               "data_mode"
-            ],
-            "additionalProperties": false
+            ]
           }
         ],
+        "unevaluatedProperties": false,
         "$defs": {
           "d": {
             "type": "string",
@@ -1530,8 +1517,7 @@
               "start_ms",
               "end_ms",
               "limit"
-            ],
-            "additionalProperties": false
+            ]
           },
           {
             "properties": {
@@ -1630,10 +1616,10 @@
               "equity_usd",
               "positions",
               "correlations"
-            ],
-            "additionalProperties": false
+            ]
           }
         ],
+        "unevaluatedProperties": false,
         "$defs": {
           "d": {
             "type": "string",
@@ -1696,7 +1682,6 @@
             "required": [
               "action"
             ],
-            "additionalProperties": false,
             "allOf": [
               {
                 "anyOf": [
@@ -1722,10 +1707,10 @@
             },
             "required": [
               "action"
-            ],
-            "additionalProperties": false
+            ]
           }
         ],
+        "unevaluatedProperties": false,
         "$defs": {
           "t": {
             "type": "string",
@@ -2131,7 +2116,6 @@
     },
     {
       "name": "trade.status",
-      "description": "Status.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2247,7 +2231,6 @@
     },
     {
       "name": "trade.capabilities",
-      "description": "Rights.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2270,7 +2253,6 @@
     },
     {
       "name": "trade.preflight",
-      "description": "Readiness.",
       "inputSchema": {
         "properties": {
           "account": {

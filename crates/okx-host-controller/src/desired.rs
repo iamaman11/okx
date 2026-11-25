@@ -39,7 +39,7 @@ impl DesiredStateStore {
             path: PathBuf::from(okx_host_launcher::CONTROL_ROOT).join("engine-state.pb"),
         }
     }
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub(crate) fn at(path: PathBuf) -> Self {
         Self { path }
     }

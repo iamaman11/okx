@@ -366,20 +366,16 @@ async fn process_control_batch(
                     artifact_id,
                     expected_source_tree,
                 } => (
-                    crate::artifact::deploy_research(
-                        github,
-                        *run_id,
-                        *artifact_id,
-                        expected_source_tree,
-                    )
-                    .await,
+                    executor
+                        .deploy_research(github, *run_id, *artifact_id, expected_source_tree)
+                        .await,
                     ProcessTransition::None,
                 ),
                 HostControlOperation::RollbackResearch {
                     expected_current_worker_sha256,
                     expected_rollback_worker_sha256,
                 } => (
-                    crate::artifact::rollback_research(
+                    executor.rollback_research(
                         expected_current_worker_sha256,
                         expected_rollback_worker_sha256,
                     ),

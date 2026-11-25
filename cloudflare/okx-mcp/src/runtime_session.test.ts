@@ -49,6 +49,39 @@ check((await fixture("duplicate")).status==="completed","duplicate request canno
 
 check((await fixture("paused_complete")).status==="completed","pause_allows_native_verified_close_delivery");
 
+// Every durable Research mutation has its own recovery owner. Losing either
+// acknowledgement or response cannot become a retryable source read and must
+// never suggest reconciling an exchange order. No Engine socket is installed.
+for(const action of ["backtest","grid","benchmark","cancel","record_decision"]){
+ for(const acknowledged of [false,true]){
+  const researchGeneration=41;
+  const researchAttachment={...attachment,sessionMode:"research_only" as const,
+    runtimeProfile:"research" as const,credentialOwner:"research" as const,
+    generation:researchGeneration,sessionId:"research_ack_lost_41"};
+  let owner:any;
+  const sent:string[]=[];
+  const ws={deserializeAttachment:()=>({...researchAttachment}),close:()=>{},
+   send:(text:string)=>{
+    const frame=JSON.parse(text);sent.push(frame.type);
+    if(frame.type==="ping")queueMicrotask(()=>owner.resolvePending(`pong:${frame.nonce}`,researchGeneration,{}));
+    if(frame.type==="request")queueMicrotask(()=>{
+     if(acknowledged)owner.resolvePending(`ack:${frame.request.request_id}`,researchGeneration,{});
+     void owner.webSocketClose(ws);
+    });
+   }};
+  owner=new RuntimeSession({storage:{get:async()=>{throw Error("Research read financial governance");}},
+    getWebSockets:()=>[ws]} as any,{} as any);
+  const result:any=await owner.dispatch({schema:"okx.agent.request/v1",request_id:`research_${action}_${acknowledged}`,
+    operation:{type:"research",request:{action,idempotency_key:"research_retry_receipt_001"}}});
+  check(result.status==="UNKNOWN"&&result.retryable===false&&result.scope==="research"&&
+    result.reason==="RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB"&&
+    result.next_action==="inspect_research_job_or_idempotency_receipt",
+    `Research ${action} lost ${acknowledged?"response":"ACK"} must reconcile job only`);
+  check(sent.includes("request")&&owner.admissions.research.inflight===0&&owner.pending.size===0,
+    "Research interrupted request cleans generation and admission");
+ }
+}
+
 // Windows CONTROL is the sole owner of native binary installation evidence.
 // Runtime status reports authenticated liveness, not independent file proof.
 const now=Date.now();
@@ -255,4 +288,13 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  check((await owner.dispatch(unmarked("configured_top_account",{type:"research",request:{action:"capabilities"}},"finance_account"))).reason==="RESEARCH_OPERATION_FORBIDDEN",
    "top-level finance account in Research operation fails closed before socket delivery");
  check(countSent()===sentBeforeForged,"forged account selector never reaches either owner");
+ // Research cancellation needs priority even while ordinary job admissions
+ // saturate; protecting it must never make an Engine command cross owners.
+ owner.admissions.research.normalInflight=10;
+ const cancelBefore=countSent();
+ check((await owner.dispatch(unmarked("research_priority_cancel",{type:"research",request:{action:"cancel",job_id:"a".repeat(64)}}))).owner==="research",
+   "Research cancellation remains deliverable above normal Research saturation");
+ check(countSent()===cancelBefore+1&&nativeRequests().at(-1)?.owner==="research",
+   "priority cancellation cannot route through financial Engine");
+ owner.admissions.research.normalInflight=0;
 }

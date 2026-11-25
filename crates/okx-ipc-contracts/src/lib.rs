@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod crypto;
 pub mod host_state_proto;
 pub use okx_engine_domain::numeric;
+#[cfg(feature = "legacy-research-test")]
 pub use okx_research_protocol::{analytics, research_ipc};
 pub mod risk_authority;
 pub mod trading;
@@ -231,6 +232,7 @@ pub enum AgentOperation {
         operation_id: String,
         request_digest: String,
     },
+    #[cfg(feature = "legacy-research-test")]
     Market {
         request: analytics::MarketRequest,
     },
@@ -239,6 +241,7 @@ pub enum AgentOperation {
         instrument: String,
         size_contracts: Option<String>,
     },
+    #[cfg(feature = "legacy-research-test")]
     Research {
         request: analytics::ResearchRequest,
     },
@@ -251,6 +254,7 @@ pub enum AgentOperation {
     Portfolio {
         request: trading::PortfolioRequest,
     },
+    #[cfg(feature = "legacy-research-test")]
     PortfolioScenario {
         request: analytics::PortfolioScenarioRequest,
     },
@@ -284,11 +288,30 @@ impl AgentOperation {
             Self::Trade {
                 request: T::Cancel { .. },
             } => C::Maintenance,
+            Self::Trade {
+                request: T::Capabilities {} | T::Preflight {} | T::Preview { .. } | T::Status { .. },
+            } => C::Read,
             Self::Strategies {
-                request: S::Create { .. } | S::Update { .. } | S::Start { .. } | S::Stop { .. },
+                request: S::List {} | S::Status { .. },
+            } => C::Read,
+            // Treat every other strategy command as a mutation by default.
+            // A new strategy action must never silently gain mailbox/Once
+            // read-only authority when its enum variant is introduced.
+            Self::Strategies { .. } | Self::ConnectAccount { .. } => C::Maintenance,
+            Self::MarketCapabilities
+            | Self::MarketMicrostructure { .. }
+            | Self::Portfolio { .. }
+            | Self::Diagnostics { .. }
+            | Self::FindInstruments { .. }
+            | Self::MarketOverview { .. }
+            | Self::AccountSummary
+            | Self::MailboxTelemetry => C::Read,
+            // The pre-cutover IPC creates durable Research jobs and must not
+            // be granted generic read-only mailbox authority, even in tests.
+            #[cfg(feature = "legacy-research-test")]
+            Self::Market { .. } | Self::Research { .. } | Self::PortfolioScenario { .. } => {
+                C::Maintenance
             }
-            | Self::ConnectAccount { .. } => C::Maintenance,
-            _ => C::Read,
         }
     }
     pub fn requires_account(&self) -> bool {
@@ -316,6 +339,7 @@ impl AgentOperation {
                         .bytes()
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             }
+            #[cfg(feature = "legacy-research-test")]
             Self::Market { request } => request.valid(),
             Self::MarketCapabilities => true,
             Self::MarketMicrostructure {
@@ -328,10 +352,12 @@ impl AgentOperation {
                             .is_ok_and(|n| n.is_finite() && n > 0.0 && n <= 1_000_000.0)
                     })
             }
+            #[cfg(feature = "legacy-research-test")]
             Self::Research { request } => request.valid(),
             Self::Trade { request } => request.valid(),
             Self::Strategies { request } => request.valid(),
             Self::Portfolio { request } => request.valid(),
+            #[cfg(feature = "legacy-research-test")]
             Self::PortfolioScenario { request } => request.valid(),
             Self::Diagnostics { request } => request.valid(),
             Self::FindInstruments {
@@ -894,6 +920,7 @@ mod product_contract_tests {
             assert!(serde_json::from_value::<AgentOperation>(value).is_err());
         }
     }
+    #[cfg(feature = "legacy-research-test")]
     #[test]
     fn worker_universe_only_request_decodes_through_native_agent_envelope() {
         let body = serde_json::json!({
@@ -957,6 +984,132 @@ mod product_contract_tests {
             request_digest: "a".repeat(64),
         };
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn every_strategy_mutation_is_denied_to_read_only_mailbox_transport() {
+        use trading::{CapitalDirection, StrategyRequest as S};
+        for request in [
+            S::CapitalAssign {
+                idempotency_key: "capital_12345678".into(),
+                instance_id: "strategy_12345678".into(),
+                direction: CapitalDirection::Assign,
+                amount_usd: "2".into(),
+                expected_authority_revision: 2,
+            },
+            S::CapitalAssign {
+                idempotency_key: "release_12345678".into(),
+                instance_id: "strategy_12345678".into(),
+                direction: CapitalDirection::Release,
+                amount_usd: "2".into(),
+                expected_authority_revision: 2,
+            },
+            S::Create {
+                idempotency_key: "create_12345678".into(),
+                instance_id: "strategy_12345678".into(),
+                definition_id: "no_trade".into(),
+                version: 1,
+                parameters: serde_json::json!({"fast": 1, "slow": 3}),
+                instruments: vec!["BTC-USDT-SWAP".into()],
+                timeframe_ms: 60_000,
+                budget_usd: "2".into(),
+            },
+            S::Update {
+                idempotency_key: "update_12345678".into(),
+                instance_id: "strategy_12345678".into(),
+                expected_revision: 2,
+                parameters: serde_json::json!({"fast": 1, "slow": 3}),
+                budget_usd: "2".into(),
+                instruments: None,
+                timeframe_ms: None,
+            },
+            S::RestoreConfiguration {
+                idempotency_key: "restore_12345678".into(),
+                instance_id: "strategy_12345678".into(),
+                expected_revision: 4,
+                source_revision: 1,
+            },
+            S::Start {
+                idempotency_key: "start_12345678".into(),
+                instance_id: "strategy_12345678".into(),
+                expected_revision: 3,
+                configuration_digest: "a".repeat(64),
+            },
+            S::Stop {
+                idempotency_key: "stop_12345678".into(),
+                instance_id: "strategy_12345678".into(),
+            },
+        ] {
+            let operation = AgentOperation::Strategies { request };
+            assert_eq!(operation.action_class(), trading::ActionClass::Maintenance);
+            assert!(!operation.direct_transport_read_only());
+        }
+        for request in [
+            S::List {},
+            S::Status {
+                instance_id: "strategy_12345678".into(),
+            },
+        ] {
+            let operation = AgentOperation::Strategies { request };
+            assert_eq!(operation.action_class(), trading::ActionClass::Read);
+            assert!(operation.direct_transport_read_only());
+        }
+    }
+
+    #[test]
+    fn trade_risk_classes_remain_explicit_and_fail_closed() {
+        use trading::{
+            ActionClass as C, OrderConstraints, PositionSide, Sizing, TradeOperation as O,
+            TradeRequest as T,
+        };
+        for (operation, expected) in [
+            (O::Open, C::IncreaseRisk),
+            (O::Add, C::IncreaseRisk),
+            (O::Replace, C::IncreaseRisk),
+            (O::Reduce, C::ReduceRisk),
+            (O::Close, C::ReduceRisk),
+        ] {
+            let command = AgentOperation::Trade {
+                request: T::Execute {
+                    idempotency_key: "trade_12345678".into(),
+                    operation,
+                    strategy_instance: "manual".into(),
+                    instrument: "BTC-USDT-SWAP".into(),
+                    side: PositionSide::Long,
+                    sizing: Sizing::Contracts {
+                        contracts: "1".into(),
+                    },
+                    order: OrderConstraints {
+                        order_type: "fok".into(),
+                        limit_price: None,
+                        reference: None,
+                        max_entry_usd: None,
+                        max_slippage_bps: 5,
+                    },
+                    protection: None,
+                    expires_in_ms: 10_000,
+                },
+            };
+            assert_eq!(command.action_class(), expected);
+            assert!(!command.direct_transport_read_only());
+        }
+        let cancel = AgentOperation::Trade {
+            request: T::Cancel {
+                idempotency_key: "cancel_12345678".into(),
+                reference: "intent_12345678".into(),
+            },
+        };
+        assert_eq!(cancel.action_class(), C::Maintenance);
+        assert!(!cancel.direct_transport_read_only());
+        let close = AgentOperation::Trade {
+            request: T::Close {
+                idempotency_key: "close_12345678".into(),
+                reference: "intent_12345678".into(),
+                expires_in_ms: 10_000,
+            },
+        };
+        assert_eq!(close.action_class(), C::ReduceRisk);
+        assert!(!close.direct_transport_read_only());
     }
 
     /// Validates exact policy_snapshot frames emitted by the real Durable

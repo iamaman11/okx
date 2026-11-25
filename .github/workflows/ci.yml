@@ -207,8 +207,9 @@ jobs:
           fi
           echo "comparison=$comparison" >> "$GITHUB_OUTPUT"
           python3 -B scripts/check_ci_native_scope.py --github-plan "${plan_args[@]}" < "$files"
-      # Only a narrow manifest+optional lock candidate incurs an extra Cargo
-      # resolver check. Every other Ready PR keeps its existing fast selector.
+      # Only manifest changes and formerly shared Research protocol/domain
+      # sources incur the Windows resolver proof. Their Engine dev-only legacy
+      # consumers must keep the full matrix until those edges are removed.
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'
         with:
@@ -270,7 +271,7 @@ jobs:
             test "$scope" = full
             scope='${{ steps.cargo_closure.outputs.scope }}'
           fi
-          case "$scope" in docs|cloudflare|research|research-host|host-controller|host-launcher|full) ;; *) exit 1;; esac
+          case "$scope" in docs|cloudflare|engine|research|research-host|host-controller|host-launcher|full) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "COMPONENT_SCOPE=$scope"
       - name: Decide whether compilation is required
@@ -293,7 +294,7 @@ jobs:
           scope="${{ steps.proven_scope.outputs.scope }}"
           case "$scope" in
             docs) edge_required=false ;;
-            research-host|host-controller|host-launcher) edge_required="${{ steps.file_scope.outputs.edge_changed }}" ;;
+            engine|research-host|host-controller|host-launcher) edge_required="${{ steps.file_scope.outputs.edge_changed }}" ;;
             *) edge_required=true ;;
           esac
           echo "edge_required=$edge_required" >> "$GITHUB_OUTPUT"
@@ -345,6 +346,11 @@ jobs:
 
           echo "build_required=true" >> "$GITHUB_OUTPUT"
           case "$scope" in
+            engine)
+              echo "native_required=true" >> "$GITHUB_OUTPUT"
+              echo "native_proof=ENGINE_OWNER_ONLY" >> "$GITHUB_OUTPUT"
+              echo "reason=Engine/Execution source; all financial witnesses required, only Engine executable needs fresh build" >> "$GITHUB_OUTPUT"
+              ;;
             research)
               echo "research_only=true" >> "$GITHUB_OUTPUT"
               echo "native_required=false" >> "$GITHUB_OUTPUT"
@@ -1467,6 +1473,13 @@ jobs:
             test "${{ needs.research_service_tests_windows.result }}" = "skipped"
             echo "WINDOWS_NATIVE_PROOF=COMPONENT_${scope}_NO_NATIVE_SOURCE_CHANGED"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
+          elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "engine" ]]; then
+            test "${{ needs.component_impact.outputs.native_proof }}" = "ENGINE_OWNER_ONLY"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
+            test "${{ needs.trading_engine_regressions_windows.result }}" = "success"
+            test "${{ needs.trading_engine_build_windows.result }}" = "success"
+            echo "WINDOWS_NATIVE_PROOF=FRESH_ENGINE_AND_FULL_FINANCIAL_SUCCESS"
+            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
           else
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "success"
@@ -1506,8 +1519,73 @@ jobs:
           cache-workspace-crates: true
           save-if: false
           cache-on-failure: false
+      - name: Reject an unreviewed main build without an accepted PR artifact
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: throw 'MAIN_NATIVE_REQUIRES_EXACT_ACCEPTED_READY_ARTIFACT'
+      - name: Build only Engine against verified unchanged Windows owners
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope == 'engine'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Verify all actual installed-base bytes, not a path-only estimate.
+          # The exact changed-source set since that accepted base must be
+          # Engine-owned. Otherwise fail closed and require the full bundle.
+          & ./scripts/prepare-research-release.ps1 -VerifyOnly -EngineOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $base = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') -Raw | ConvertFrom-Json
+          if ($base.scope.scope -cne 'engine' -or $base.scope.other_windows_cargo_closures_identical -ne $true -or
+              $base.current_head_sha -cne (git rev-parse HEAD).Trim()) { throw 'ENGINE_ONLY_BASE_NOT_PROVEN' }
+          $log = Join-Path $env:RUNNER_TEMP 'engine-only-build.log'
+          cargo build --locked --release -p okx-trading-engine 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dist = Join-Path $env:RUNNER_TEMP 'okx-engine-component'
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+          $binary = Join-Path $dist 'okx-agent.exe'
+          Copy-Item -LiteralPath 'target/release/okx-agent.exe' -Destination $binary
+          $contract = & $binary runtime-contract
+          if ($LASTEXITCODE -ne 0 -or ($contract -join "`n") -cne '{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false}') {
+            throw 'ENGINE_COMPONENT_RUNTIME_CONTRACT_INVALID'
+          }
+          $reused = [ordered]@{}
+          foreach ($name in @('okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe')) {
+            $item = $base.components.PSObject.Properties[$name].Value
+            if ($null -eq $item -or $item.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $item.source_head_sha -cnotmatch '^[0-9a-f]{40}$') { throw "UNVERIFIED_REUSED_COMPONENT_$name" }
+            $reused[$name] = $item
+          }
+          [ordered]@{
+            schema = 'okx.windows.engine-component/v1'
+            repository_id = 1388071566
+            source_head_sha = (git rev-parse HEAD).Trim()
+            source_tree = (git rev-parse 'HEAD^{tree}').Trim()
+            release_is_complete = $false
+            installed_state_unchanged = $true
+            fresh_component = [ordered]@{
+              name = 'okx-agent.exe'
+              sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
+              size = (Get-Item -LiteralPath $binary).Length
+            }
+            reused_accepted_native_base_sha = $base.base_merge_sha
+            reused_verified_components = $reused
+          } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $dist 'engine-component-proof.json') -Encoding utf8NoBOM
+
+      - name: Retain tested Engine-only bytes and exact unchanged component origins
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope == 'engine'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: okx-engine-component-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/okx-engine-component/okx-agent.exe
+            ${{ runner.temp }}/okx-engine-component/engine-component-proof.json
+            ${{ runner.temp }}/engine-only-build.log
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
       - name: Build deployable Windows binaries
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope != 'engine'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1585,7 +1663,7 @@ jobs:
             Set-Content -LiteralPath (Join-Path $dist 'manifest.json') -Encoding utf8NoBOM
 
       - name: Upload deployable Windows bundle
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope != 'engine'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
@@ -1801,13 +1879,14 @@ jobs:
           } > "$RUNNER_TEMP/SHA256SUMS.txt"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
 
-      - name: Publish current base and prune only superseded Native bases
+      - name: Publish current base and preserve verified rollback releases
         if: steps.select.outputs.publish == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          # Each tag has immutable commit identity; only one *native-base-*
-          # release remains after a new complete release was verified.
+          # Every accepted tag retains its exact immutable commit identity.
+          # Prior accepted native-base releases are intentionally retained;
+          # installed and rollback SHA provenance is not known to this job.
           tag="native-base-$ACCEPTED_MAIN"
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" \
@@ -1829,10 +1908,7 @@ jobs:
           done
           current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
           test "$current" = "$ACCEPTED_MAIN"
-          gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | [.tag_name,.immutable] | @tsv' |
-          while IFS=$'\t' read -r old immutable; do
-            if [[ "$old" =~ ^native-base-[0-9a-f]{40}$ && "$old" != "$tag" ]]; then
-              test "$immutable" = "false"
-              gh release delete "$old" --cleanup-tag --yes
-            fi
-          done
+          # Installed/rollback provenance is not available to CI. Retain
+          # accepted Native bases until CONTROL proves which previous images
+          # are no longer installed or eligible for recovery (S3 acceptance).
+          echo "NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS" >> "$GITHUB_STEP_SUMMARY"

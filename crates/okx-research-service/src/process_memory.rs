@@ -2,14 +2,17 @@
 //! concurrent jobs; the Windows Job Object independently fences Research memory
 //! and CPU so one expensive Worker cannot monopolize the host's cores.
 //! A commit fence is NOT a sampled RSS measurement or a per-job reservation.
-//! Multiple Research Workers get separate CPU quotas: this is not a global
-//! aggregate cap across legacy Engine-owned and standalone CONTROL-owned Jobs.
+//! A Windows named kernel mutex excludes concurrent legacy Engine-owned and
+//! standalone CONTROL-owned Research Workers before either gets a CPU quota.
 
 pub const RESEARCH_MEMORY_LIMIT_MIB: u32 = 4096;
 /// Windows Job CPU rates are units of 1/10,000 of the host's processor cycles.
 /// A single Research process tree receives at most half, leaving capacity
-/// for Engine, CONTROL and the OS. Multiple Workers do not share this quota.
+/// for Engine, CONTROL and the OS. A singleton forbids multiple Research quotas.
 pub const RESEARCH_CPU_RATE_BASIS_POINTS: u32 = 5_000;
+
+#[cfg(windows)]
+const RESEARCH_SINGLETON_MUTEX: &str = r"Global\iamaman11-okx-research-single-worker-v1";
 
 pub fn limit_bytes() -> u64 {
     u64::from(RESEARCH_MEMORY_LIMIT_MIB) * 1024 * 1024
@@ -18,12 +21,60 @@ pub fn limit_bytes() -> u64 {
 #[cfg(windows)]
 pub struct JobMemoryGuard {
     handle: windows_sys::Win32::Foundation::HANDLE,
+    _single_worker: ResearchInstanceLease,
+}
+
+#[cfg(windows)]
+pub struct ResearchInstanceLease {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl ResearchInstanceLease {
+    /// Both a running Worker and credential provisioning must be exclusive.
+    /// This prevents rotating the Research bearer behind the active process.
+    pub fn acquire() -> Result<Self, String> {
+        Self::acquire_named(RESEARCH_SINGLETON_MUTEX)
+    }
+
+    fn acquire_named(name: &str) -> Result<Self, String> {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError},
+            System::Threading::CreateMutexW,
+        };
+
+        let name = name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(format!(
+                "RESEARCH_SINGLE_WORKER_MUTEX_CREATE: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // CreateMutex is atomic across unrelated processes. If an installed
+        // legacy Worker already owns the name, this process must not obtain a
+        // second independent 50% CPU allowance under another catalog root.
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle) };
+            return Err("RESEARCH_WORKER_ALREADY_ACTIVE".into());
+        }
+        Ok(Self { handle })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ResearchInstanceLease {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+        }
+    }
 }
 
 #[cfg(windows)]
 impl JobMemoryGuard {
-    /// Establish a nested Research-only Job Object before serving IPC. Failure
-    /// is fatal: the Worker must never continue without both resource fences.
+    /// Establish one Research Worker and its nested resource Job before serving
+    /// IPC. Failure is fatal: Research cannot bypass the singleton or quotas.
     pub fn enforce() -> Result<Self, String> {
         use std::{ffi::c_void, mem::size_of};
         use windows_sys::Win32::System::JobObjects::{
@@ -35,6 +86,7 @@ impl JobMemoryGuard {
         };
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
+        let single_worker = ResearchInstanceLease::acquire()?;
         let bytes = usize::try_from(limit_bytes())
             .map_err(|_| "RESEARCH_MEMORY_LIMIT_UNSUPPORTED_ARCH".to_owned())?;
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -44,7 +96,10 @@ impl JobMemoryGuard {
                 std::io::Error::last_os_error()
             ));
         }
-        let guard = Self { handle };
+        let guard = Self {
+            handle,
+            _single_worker: single_worker,
+        };
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY;
         info.JobMemoryLimit = bytes;
@@ -140,6 +195,16 @@ impl Drop for JobMemoryGuard {
 pub struct JobMemoryGuard;
 
 #[cfg(not(windows))]
+pub struct ResearchInstanceLease;
+
+#[cfg(not(windows))]
+impl ResearchInstanceLease {
+    pub fn acquire() -> Result<Self, String> {
+        Ok(Self)
+    }
+}
+
+#[cfg(not(windows))]
 impl JobMemoryGuard {
     /// Linux test builds are not Windows installed-Worker acceptance evidence.
     pub fn enforce() -> Result<Self, String> {
@@ -165,5 +230,22 @@ mod tests {
     fn research_cpu_budget_reserves_half_of_windows_processor_cycles_for_other_owners() {
         assert_eq!(RESEARCH_CPU_RATE_BASIS_POINTS, 5_000);
         assert!((1..10_000).contains(&RESEARCH_CPU_RATE_BASIS_POINTS));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn research_singleton_is_atomic_and_released_after_owner_exits() {
+        let name = format!(
+            r"Local\iamaman11-okx-research-single-worker-test-{}",
+            std::process::id()
+        );
+        let first = ResearchInstanceLease::acquire_named(&name).unwrap();
+        assert_eq!(
+            ResearchInstanceLease::acquire_named(&name).err().as_deref(),
+            Some("RESEARCH_WORKER_ALREADY_ACTIVE")
+        );
+        drop(first);
+        let second = ResearchInstanceLease::acquire_named(&name).unwrap();
+        drop(second);
     }
 }

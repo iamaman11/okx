@@ -110,11 +110,8 @@ async fn execute(
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(c).map_err(|_| "SERIALIZATION_FAILED".into())
         }
-        AgentOperation::Market { .. }
-        | AgentOperation::MarketCapabilities
+        AgentOperation::MarketCapabilities
         | AgentOperation::MarketMicrostructure { .. }
-        | AgentOperation::Research { .. }
-        | AgentOperation::PortfolioScenario { .. }
         | AgentOperation::FindInstruments { .. }
         | AgentOperation::MarketOverview { .. } => Err("RESEARCH_OWNER_REQUIRED".into()),
         AgentOperation::Trade { request } => {
@@ -183,5 +180,11 @@ async fn execute(
         AgentOperation::MailboxTelemetry => Ok(
             json!({"contract":"okx.product/v1","installation_id":ctx.finance.accounts()?.installation_id()}),
         ),
+        // In `cargo check --all-targets`, Cargo can unify the test-only IPC
+        // feature into an ordinary library build even though `cfg(test)` is
+        // false for that target. Reject only the retired Research variants;
+        // this arm MUST remain last, after Trade/Strategies/Diagnostics.
+        #[allow(unreachable_patterns)]
+        _ => Err("RESEARCH_OWNER_REQUIRED".into()),
     }
 }

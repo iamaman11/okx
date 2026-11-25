@@ -37,6 +37,21 @@ const RETRY_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
 const STABLE_PROCESS_SECONDS: u64 = 30;
 const HOST_JOB_ASSIGNED_MARKER: &[u8] = b"RESEARCH_HOST_JOB_ASSIGNED\n";
 
+fn research_exit_reason(code: Option<i32>) -> &'static str {
+    match code {
+        Some(70) => "RESEARCH_CATALOG_MISSING",
+        Some(71) => "RESEARCH_SCOPE_MISMATCH",
+        Some(72) => "RESEARCH_CATALOG_SCOPE_UNBOUND",
+        Some(73) => "RESEARCH_ROOT_LOCKED",
+        Some(74) => "RESEARCH_WORKER_ALREADY_ACTIVE",
+        // These only describe local CredMan/configuration failures, never an
+        // authenticated Edge WSS connection or a remote auth rejection.
+        Some(75) => "RESEARCH_EDGE_CREDENTIAL_UNAVAILABLE",
+        Some(76) => "RESEARCH_EDGE_LOCAL_AUTH_CONFIG_INVALID",
+        _ => "RESEARCH_PROCESS_EXITED",
+    }
+}
+
 fn valid_sha(value: &str) -> bool {
     value.len() == 64
         && value
@@ -308,16 +323,7 @@ impl ResearchSupervisor {
             self.job.take();
             self.active_sha256 = None;
             self.started_at = None;
-            self.last_error = Some(
-                match status.code() {
-                    Some(70) => "RESEARCH_CATALOG_MISSING",
-                    Some(71) => "RESEARCH_SCOPE_MISMATCH",
-                    Some(72) => "RESEARCH_CATALOG_SCOPE_UNBOUND",
-                    Some(73) => "RESEARCH_ROOT_LOCKED",
-                    _ => "RESEARCH_PROCESS_EXITED",
-                }
-                .into(),
-            );
+            self.last_error = Some(research_exit_reason(status.code()).into());
             if self.desired.desired_running {
                 self.schedule_restart();
             }
@@ -698,6 +704,95 @@ impl ResearchSupervisor {
         Ok(resolve_verified_installed_research(&self.runtime_root)?.binary)
     }
 
+    pub(crate) fn process_generation(&self) -> u64 {
+        self.desired.process_generation
+    }
+
+    /// Transition one verified Research image without touching the Engine.
+    /// The only caller holds the serial CONTROL mailbox executor and supplies
+    /// a pointer snapshot with its inverse operation. A failed activation
+    /// must restore both the installed pointer and the desired image before
+    /// the previous process can be restarted. A process PID is deliberately
+    /// not interpreted as authenticated Edge readiness.
+    pub(crate) fn transition_image<C, R>(
+        &mut self,
+        expected_current_sha256: Option<&str>,
+        expected_generation: u64,
+        target_sha256: &str,
+        commit_pointer: C,
+        restore_pointer: R,
+    ) -> HostControlResult<Value>
+    where
+        C: FnOnce() -> HostControlResult<()>,
+        R: FnOnce() -> HostControlResult<()>,
+    {
+        if self.state_error.is_some() || !valid_sha(target_sha256) {
+            return Err(HostControlError::ResearchStateCorrupt);
+        }
+        // No command may silently adopt a different installed image or a
+        // newer process generation. A stopped never-started Research has no
+        // desired SHA; it may receive its first verified installation.
+        if self.desired.process_generation != expected_generation
+            || self
+                .desired
+                .expected_worker_sha256
+                .as_deref()
+                .is_some_and(|sha| Some(sha) != expected_current_sha256)
+        {
+            return Err(HostControlError::ResearchIdentityMismatch);
+        }
+        let was_running = self.running()?;
+        if self.desired.desired_running
+            && self.desired.expected_worker_sha256.as_deref() != expected_current_sha256
+        {
+            return Err(HostControlError::ResearchIdentityMismatch);
+        }
+        let original = self.desired.clone();
+        if expected_current_sha256 == Some(target_sha256) {
+            commit_pointer()?;
+            return self.status();
+        }
+        if was_running || self.job.is_some() {
+            self.terminate_owned()?;
+        }
+        // No await/reconcile happens between stopping the old Job, changing
+        // the pointer and persisting the new expected image.
+        let activation = (|| -> HostControlResult<Value> {
+            commit_pointer()?;
+            let mut next = original.clone();
+            if next.expected_worker_sha256.is_some() {
+                next.expected_worker_sha256 = Some(target_sha256.to_owned());
+            }
+            self.persist(next)?;
+            if original.desired_running {
+                self.launch()?;
+                if !self.running()? {
+                    return Err(HostControlError::ResearchIdentityMismatch);
+                }
+            }
+            self.status()
+        })();
+        match activation {
+            Ok(status) => Ok(status),
+            Err(_) => {
+                if (self.child.is_some() || self.job.is_some()) && self.terminate_owned().is_err() {
+                    self.last_error = Some("RESEARCH_ROLLBACK_UNCONFIRMED".into());
+                    return Err(HostControlError::ResearchRollbackUnconfirmed);
+                }
+                if restore_pointer().is_err() || self.persist(original.clone()).is_err() {
+                    self.last_error = Some("RESEARCH_ROLLBACK_UNCONFIRMED".into());
+                    return Err(HostControlError::ResearchRollbackUnconfirmed);
+                }
+                if original.desired_running && self.launch().is_err() {
+                    self.last_error = Some("RESEARCH_ROLLBACK_UNCONFIRMED".into());
+                    return Err(HostControlError::ResearchRollbackUnconfirmed);
+                }
+                self.last_error = Some("RESEARCH_ACTIVATION_ROLLED_BACK".into());
+                Err(HostControlError::ResearchActivationRolledBack)
+            }
+        }
+    }
+
     /// Credential rollover requires an explicitly stopped Research process.
     /// Never replace the CredMan secret underneath a live Edge session.
     pub fn ensure_stopped_for_provision(&mut self) -> HostControlResult<()> {
@@ -721,6 +816,23 @@ impl Drop for ResearchSupervisor {
 mod tests {
     use super::*;
     use catalog::CATALOG_DB;
+
+    #[test]
+    fn research_process_exit_diagnostic_distinguishes_local_startup_failures() {
+        assert_eq!(
+            research_exit_reason(Some(74)),
+            "RESEARCH_WORKER_ALREADY_ACTIVE"
+        );
+        assert_eq!(
+            research_exit_reason(Some(75)),
+            "RESEARCH_EDGE_CREDENTIAL_UNAVAILABLE"
+        );
+        assert_eq!(
+            research_exit_reason(Some(76)),
+            "RESEARCH_EDGE_LOCAL_AUTH_CONFIG_INVALID"
+        );
+        assert_eq!(research_exit_reason(Some(1)), "RESEARCH_PROCESS_EXITED");
+    }
 
     #[test]
     fn research_state_is_strict_and_independent_of_engine_state() {

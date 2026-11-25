@@ -1,3 +1,4 @@
+#[cfg(feature = "legacy-research-test")]
 mod legacy_research_source;
 
 use std::collections::BTreeMap;
@@ -477,6 +478,7 @@ mod tests {
     use super::*;
     use okx_api::PublicInstrument;
 
+    #[cfg(feature = "legacy-research-test")]
     #[tokio::test]
     async fn catalog_source_uses_host_public_get_and_shared_rate_budget() {
         use okx_api::{HttpSend, HttpTransport, RawHttpResponse};

@@ -58,6 +58,86 @@ async fn start(
     );
     (child, input, output)
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn legacy_and_standalone_workers_cannot_claim_separate_cpu_quotas() {
+    use tokio::io::AsyncWriteExt;
+
+    let legacy_root = tempfile::tempdir().unwrap();
+    let standalone_root = tempfile::tempdir().unwrap();
+    let legacy_scope = ResearchScope::new("legacy-no-overlap-test".into()).unwrap();
+    let standalone_scope = ResearchScope::new("standalone-no-overlap-test".into()).unwrap();
+    let session = WorkerSession::new("legacy-session".into()).unwrap();
+    let (mut legacy, legacy_input, legacy_output) =
+        start(legacy_root.path(), &session, &legacy_scope).await;
+
+    // The standalone start gate is a test-only receipt. The second process
+    // must fail on the kernel singleton before reading credentials, starting
+    // an Edge connection or creating a second resource Job.
+    let mut standalone = Command::new(env!("CARGO_BIN_EXE_okx-research-service"))
+        .arg("--edge-runtime")
+        .arg("--root")
+        .arg(standalone_root.path())
+        .arg("--scope")
+        .arg(standalone_scope.as_str())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = standalone.stdin.take().unwrap();
+    input
+        .write_all(b"RESEARCH_HOST_JOB_ASSIGNED\n")
+        .await
+        .unwrap();
+    drop(input);
+    let status = tokio::time::timeout(Duration::from_secs(10), standalone.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.code(), Some(74));
+    assert!(
+        !standalone_root
+            .path()
+            .join("research-catalog.sqlite")
+            .exists()
+    );
+
+    // Direct execution of the built-in provisioning command must not bypass
+    // CONTROL's no-rotation-while-running rule or modify Credential Manager.
+    let mut provisioner = Command::new(env!("CARGO_BIN_EXE_okx-research-service"))
+        .arg("--set-edge-token")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut token_input = provisioner.stdin.take().unwrap();
+    token_input
+        .write_all(b"research-test-secret-value-0123456789")
+        .await
+        .unwrap();
+    drop(token_input);
+    let credential_status = tokio::time::timeout(Duration::from_secs(10), provisioner.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(credential_status.code(), Some(74));
+
+    drop(legacy_input);
+    drop(legacy_output);
+    legacy.kill().await.unwrap();
+    legacy.wait().await.unwrap();
+    let (mut reopened, input, output) =
+        start(standalone_root.path(), &session, &standalone_scope).await;
+    drop(input);
+    drop(output);
+    reopened.kill().await.unwrap();
+    reopened.wait().await.unwrap();
+}
 #[tokio::test]
 async fn child_round_trip_source_and_eof_restart() {
     let root = std::env::temp_dir().join(format!(

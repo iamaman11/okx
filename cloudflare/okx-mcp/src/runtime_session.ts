@@ -491,7 +491,8 @@ export class RuntimeSession {
     const action=request.operation?.request?.action;
     const protective=(type==="trade" && (["status","cancel","close"].includes(String(action)) ||
       (action==="execute"&&["reduce","close"].includes(String(request.operation?.request?.operation))))) ||
-      (type==="strategies"&&action==="stop");
+      (type==="strategies"&&action==="stop") ||
+      (type==="research"&&action==="cancel");
     const queuedRead=!protective&&!isExecutionMutation(type,action);
     admission.activeRequests.add(request.request_id);
     let admitted=false;
@@ -578,6 +579,15 @@ export class RuntimeSession {
       // even when this HTTP/WS envelope loses ACK or response. Returning a
       // retryable failure would tempt blind duplicate sends. Require an exact
       // read-only intent/ledger reconciliation, never auto-retry the mutation.
+      if (request.operation?.type === "research" &&
+          isExecutionMutation("research", request.operation?.request?.action)) {
+        // Backtest/grid/benchmark create durable jobs; cancel/record_decision
+        // can also commit before the transport drops. Their recovery owner is
+        // the Research job/idempotency receipt, not a financial trade intent.
+        return { schema: "okx.direct-transport.result/v1", status: "UNKNOWN",
+          reason: "RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB", scope: "research",
+          retryable: false, next_action: "inspect_research_job_or_idempotency_receipt" };
+      }
       if (isExecutionMutation(request.operation?.type,request.operation?.request?.action)) {
         return transportFailure("MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT", false);
       }

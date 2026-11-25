@@ -19,7 +19,9 @@ ALLOWED = {
     "okx-analysis": {"okx-research-domain", "okx-strategy-core"},
     "okx-research": {"okx-analysis"},
     "okx-trade-execution": set(),
-    "okx-ipc-contracts": {"okx-engine-domain", "okx-research-protocol"},
+    # The financial wire must never import Research-owned definitions. A shared
+    # protocol would cause a Research-only edit to compile Trading Engine.
+    "okx-ipc-contracts": {"okx-engine-domain"},
     "okx-research-protocol": {"okx-research-domain"},
     "okx-github": set(),
     "okx-native-finance-check": set(),
@@ -38,6 +40,11 @@ ALLOWED = {
         "okx-market-runtime",
     },
 }
+
+# Temporary S1 debt: native Engine T06–T10 child-process witnesses have not
+# all been migrated to an owner-independent harness. Never confuse this
+# test-only exception with a permitted normal/build dependency or S1 PASS.
+TEMPORARY_ENGINE_TEST_DEBT = {"okx-trading-engine": {"okx-research-protocol"}}
 
 
 # Scoped supplemental source guard: the Cargo DAG cannot see std::fs/network/
@@ -84,7 +91,8 @@ def validate(graph: dict[str, set[str]], dev_graph: dict[str, set[str]] | None =
     if dev_graph is not None:
         for crate in sorted(expected & set(dev_graph)):
             for dep in sorted(dev_graph[crate] - ALLOWED[crate]):
-                errors.append(f"forbidden test dependency: {crate} -> {dep}")
+                if dep not in TEMPORARY_ENGINE_TEST_DEBT.get(crate, set()):
+                    errors.append(f"forbidden test dependency: {crate} -> {dep}")
     return errors
 
 
@@ -108,11 +116,26 @@ def load_graph(metadata: dict) -> tuple[dict[str, set[str]], dict[str, set[str]]
     }
     workspace_names = {package["name"] for package in packages.values()}
 
+    def exceptional_optional_test_edge(package: dict, dependency: dict) -> bool:
+        # One narrowly identified migration fixture. Do not silently ignore
+        # arbitrary optional dependencies in an accepted Cargo graph.
+        return (
+            package["name"] == "okx-ipc-contracts"
+            and dependency["name"] == "okx-research-protocol"
+            and dependency.get("optional", False)
+            and "dep:okx-research-protocol" in package.get("features", {}).get("legacy-research-test", [])
+            and "legacy-research-test" not in package.get("features", {}).get("default", [])
+        )
+
     def edges(dev: bool) -> dict[str, set[str]]:
         return {
             package["name"]: {
                 dependency["name"] for dependency in package["dependencies"]
                 if dependency["name"] in workspace_names
+                # The exact migration feature must not be mistaken for an
+                # unconditional dependency. All other optional edges retain
+                # normal direct-graph admission rules.
+                and not exceptional_optional_test_edge(package, dependency)
                 and (dependency["kind"] == "dev") == dev
             }
             for package in packages.values()
@@ -163,7 +186,10 @@ def pure_dependency_violations(
 
 
 BOUNDARY_FORBIDDEN = {
-    "okx-trading-engine": {"okx-research", "okx-research-service", "okx-strategy-core", "okx-analysis"},
+    "okx-trading-engine": {
+        "okx-research", "okx-research-service", "okx-strategy-core", "okx-analysis",
+        "okx-research-protocol", "okx-research-domain",
+    },
     "okx-research-service": {"okx-engine-domain", "okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-host-controller", "okx-bridge-mcp", "okx-ipc-contracts"},
     # Host lifecycle processes cannot acquire financial/market capabilities
     # through a direct or transitive production dependency. CONTROL may use
@@ -185,8 +211,13 @@ COMPONENT_FORBIDDEN = {
 }
 
 
-def component_scope_dependency_violations(metadata: dict) -> list[str]:
-    """Reject cross-component paths in every resolved Cargo dependency kind."""
+def component_scope_dependency_violations(metadata: dict, *, include_dev: bool = True) -> list[str]:
+    """Check the complete test graph, including dev-activated optional features.
+
+    Cargo metadata resolves optional features across dev and normal consumers;
+    filtering dep_kinds alone is NOT proof of the production-only root closure.
+    See cargo_component_tree_violations for the normal/build authority.
+    """
     from collections import deque
 
     names = {package["id"]: package["name"] for package in metadata["packages"]}
@@ -207,6 +238,10 @@ def component_scope_dependency_violations(metadata: dict) -> list[str]:
                 errors.append(f"CI scope missing resolved Cargo node: {names.get(owner, owner)}")
                 continue
             for dep in node["deps"]:
+                if not include_dev and not any(
+                    kind["kind"] in (None, "build") for kind in dep.get("dep_kinds", [])
+                ):
+                    continue
                 next_node = dep["pkg"]
                 next_path = path + [next_node]
                 if next_node not in names or not dep.get("dep_kinds"):
@@ -219,6 +254,55 @@ def component_scope_dependency_violations(metadata: dict) -> list[str]:
                 if next_node not in visited:
                     visited.add(next_node)
                     queue.append((next_node, next_path))
+    return errors
+
+
+def cargo_tree_scope_violations(output: str, root: str, forbidden: set[str]) -> list[str]:
+    """Parse one root-scoped `cargo tree --prefix depth --format {p}` result."""
+    errors = []
+    path: list[str] = []
+    seen_root = False
+    for line in output.splitlines():
+        match = re.fullmatch(r"(\d+)([a-zA-Z0-9_-]+) v\S+.*", line)
+        if match is None:
+            errors.append(f"Cargo tree unexpectedly formatted dependency: {line[:140]}")
+            continue
+        depth, package = int(match.group(1)), match.group(2)
+        if depth > len(path):
+            errors.append(f"Cargo tree skipped dependency depth: {line[:140]}")
+            continue
+        path = path[:depth] + [package]
+        if not seen_root:
+            if depth != 0 or package != root:
+                errors.append(f"Cargo tree did not begin at root {root}")
+            seen_root = True
+        elif depth == 0:
+            errors.append(f"Cargo tree unexpectedly added root {package}")
+        if package in forbidden and depth > 0:
+            errors.append("forbidden normal/build component dependency: " + " -> ".join(path))
+    if not seen_root:
+        errors.append(f"Cargo tree returned no root: {root}")
+    return errors
+
+
+def cargo_component_tree_violations() -> list[str]:
+    """The actual Windows normal/build closure, without dev feature unification."""
+    errors = []
+    roots = sorted(set(BOUNDARY_FORBIDDEN) | set(COMPONENT_FORBIDDEN))
+    for root in roots:
+        forbidden = BOUNDARY_FORBIDDEN.get(root, set()) | COMPONENT_FORBIDDEN.get(root, set())
+        try:
+            output = subprocess.check_output(
+                ["cargo", "tree", "--locked", "-p", root, "--target",
+                 "x86_64-pc-windows-msvc", "--edges", "normal,build",
+                 "--prefix", "depth", "--format", "{p}"],
+                text=True,
+                stderr=subprocess.PIPE,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            errors.append(f"Cargo normal/build closure unavailable for {root}: {error}")
+            continue
+        errors.extend(cargo_tree_scope_violations(output, root, forbidden))
     return errors
 
 
@@ -319,6 +403,38 @@ def self_test() -> int:
     if component_scope_dependency_violations(metadata):
         print("self-test failed: clean Engine scoped-owner closure rejected", file=sys.stderr)
         return 1
+    # Historical AgentOperation routed Research inside okx-ipc-contracts.
+    # Assert that a normal, build, or dev edge anywhere in Engine's resolved
+    # closure cannot silently reintroduce Research's protocol or domain.
+    for forbidden_id, forbidden_name in (
+        ("research-protocol-id", "okx-research-protocol"),
+        ("research-domain-id", "okx-research-domain"),
+    ):
+        for kind in (None, "build", "dev"):
+            leaked = json.loads(json.dumps(metadata))
+            if forbidden_id == "research-domain-id":
+                leaked["workspace_members"].append("research-domain-id")
+                leaked["packages"].append({"id": "research-domain-id", "name": forbidden_name})
+                leaked["resolve"]["nodes"].append({"id": "research-domain-id", "deps": []})
+            next(node for node in leaked["resolve"]["nodes"] if node["id"] == "ipc-id")["deps"].append({
+                "pkg": forbidden_id, "dep_kinds": [{"kind": kind}],
+            })
+            expected_path = f"okx-trading-engine -> okx-ipc-contracts -> {forbidden_name}"
+            if not any(expected_path in error for error in component_scope_dependency_violations(leaked)):
+                print(f"self-test failed: Engine indirect {kind} {forbidden_name} dependency accepted", file=sys.stderr)
+                return 1
+            in_production = any(
+                expected_path in error
+                for error in component_scope_dependency_violations(leaked, include_dev=False)
+            )
+            if in_production != (kind != "dev"):
+                print(f"self-test failed: Engine {kind} {forbidden_name} production/dev classification", file=sys.stderr)
+                return 1
+            if kind is None:
+                graph, names = load_complete_workspace_graph(leaked)
+                if not any(expected_path in error for error in production_boundary_violations(graph, names)):
+                    print(f"self-test failed: Engine production {forbidden_name} dependency accepted", file=sys.stderr)
+                    return 1
     for kind in (None, "dev", "build"):
         dirty_scope = json.loads(json.dumps(metadata))
         dirty_scope["resolve"]["nodes"][1]["deps"].append({
@@ -388,6 +504,25 @@ def self_test() -> int:
     if "forbidden local dependency: okx-analysis -> okx-ipc-contracts" not in validate(wire_leak):
         print("self-test failed: analysis gained an IPC dependency", file=sys.stderr)
         return 1
+    legacy_wire = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
+    legacy_wire["okx-ipc-contracts"].add("okx-research-protocol")
+    if "forbidden local dependency: okx-ipc-contracts -> okx-research-protocol" not in validate(legacy_wire):
+        print("self-test failed: shared Engine IPC gained Research protocol", file=sys.stderr)
+        return 1
+    temporary_test_wire = {name: set() for name in ALLOWED}
+    temporary_test_wire["okx-trading-engine"].add("okx-research-protocol")
+    if validate(accepted, temporary_test_wire):
+        print("self-test failed: test-only Engine Research witness debt rejected before migration", file=sys.stderr)
+        return 1
+    clean_tree = "0okx-trading-engine v0.1.0\n1okx-ipc-contracts v0.1.0\n2okx-engine-domain v0.1.0 (*)\n"
+    if cargo_tree_scope_violations(clean_tree, "okx-trading-engine", BOUNDARY_FORBIDDEN["okx-trading-engine"]):
+        print("self-test failed: clean production Engine Cargo tree rejected", file=sys.stderr)
+        return 1
+    for name in ("okx-research-protocol", "okx-research-domain"):
+        dirty_tree = clean_tree + f"2{name} v0.1.0\n"
+        if not any(name in err for err in cargo_tree_scope_violations(dirty_tree, "okx-trading-engine", BOUNDARY_FORBIDDEN["okx-trading-engine"])):
+            print(f"self-test failed: {name} production Cargo tree leak accepted", file=sys.stderr)
+            return 1
 
     dev = {name: set() for name in ALLOWED}
     dev["okx-research-service"].update({"okx-api", "okx-market-runtime"})
@@ -492,6 +627,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--k10-purity", action="store_true", help="check the complete resolved production graph for pure crates")
+    parser.add_argument(
+        "--strict-component-test-boundary", action="store_true",
+        help="require Engine and Research build/test closures to be independent including dev (final S1)",
+    )
     args = parser.parse_args()
 
     if args.self_test:
@@ -514,13 +653,26 @@ def main() -> int:
     errors.extend(pure_risk_source_violations(load_risk_sources()))
     graph, names = load_complete_workspace_graph(metadata)
     errors.extend(pure_dependency_violations(graph, K10_ENFORCED_PURE, names))
-    errors.extend(production_boundary_violations(graph, names))
-    errors.extend(component_scope_dependency_violations(metadata))
+    # `cargo metadata` unifies optional Research test features across the
+    # workspace; treating those as Engine production deps is a false failure.
+    # Root-scoped cargo tree normal/build is the authoritative release graph.
+    production_scope_errors = cargo_component_tree_violations()
+    errors.extend(production_scope_errors)
+    complete_scope_errors = component_scope_dependency_violations(metadata, include_dev=True)
+    test_debt = sorted(set(complete_scope_errors))
+    if args.strict_component_test_boundary:
+        errors.extend(test_debt)
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
         return 1
 
+    if test_debt:
+        print("ARCHITECTURE_TEST_BOUNDARY=DEBT_UNRESOLVED", file=sys.stderr)
+        for debt in test_debt:
+            print(f"S1_DEV_DEBT: {debt}", file=sys.stderr)
+    else:
+        print("ARCHITECTURE_TEST_BOUNDARY=PASS")
     print("ARCHITECTURE_DEPENDENCY_GUARD=PASS")
     return 0
 

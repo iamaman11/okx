@@ -1,6 +1,12 @@
 import {mcpApi,projectNativeResponse} from './mcp.js';
 import {payloadFixtures} from './execution_tools.test.js';
 const ctx={auth:{scope:['mcp:use']}};
+for(const unauthorized of [{}, {auth:{scope:['research:read']}}, {auth:{scope:[]}}]){
+ const forbidden=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+  jsonrpc:'2.0',id:101,method:'tools/call',params:{name:'research',arguments:{action:'benchmark',idempotency_key:'test_auth_deny_01'}}
+ })}),{RUNTIME:{idFromName:()=>{throw Error('unauthorized request reached Research');}}} as any,unauthorized);
+ if(forbidden.status!==403)throw Error('Research MCP request bypassed authenticated mcp:use scope');
+}
 // Model-visible trading operations are separately named and have no caller
 // action selector. The legacy test fixtures continue to describe native calls.
 const publicArgs=(name:string,args:any)=>{
@@ -22,7 +28,9 @@ for(const action of ['preview','execute','status','cancel','close','capabilities
 }
 if(body.result.tools.some((t:any)=>t.name==='trade'))throw Error('generic trade must not remain model-callable');
 
-if(body.result.tools.length!==13||bytes>24576)throw Error(`tools budget ${bytes}`);
+// Retain at least 512 bytes of room for a future versioned field without
+// silently exceeding the host's hard 24 KiB tools/list limit.
+if(body.result.tools.length!==13||bytes>24576-512)throw Error(`tools budget/headroom ${bytes}`);
 for(const fixture of payloadFixtures){const r:any=await(await call('tools/call',publicArgs(fixture.tool,fixture.negative[0]))).json();if(r.error?.code!==-32602)throw Error('negative dispatched');}
 const unconfirmedStart:any=await(await call('tools/call',{name:'strategies',arguments:{
  action:'start',account:'fixture',instance_id:'alpha',idempotency_key:'start_fixture'
@@ -462,6 +470,14 @@ const deliveredUnknown=await mcpResponse('trade',payloadFixtures.find(x=>x.tool=
  {schema:'okx.direct-transport.result/v1',status:'FAILED',reason:'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT',retryable:false});
 if(deliveredUnknown.status!=='unknown'||deliveredUnknown.retryable!==false||
  deliveredUnknown.next_action!=='inspect_exact_intent')throw Error('UNKNOWN exchange outcome can be retried');
+const researchOutcomeUnknown=await mcpResponse('research',{action:'benchmark',idempotency_key:'research_benchmark_01'},
+ {schema:'okx.direct-transport.result/v1',status:'UNKNOWN',reason:'RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB',
+  scope:'research',retryable:false,next_action:'inspect_research_job_or_idempotency_receipt'});
+if(researchOutcomeUnknown.status!=='unknown'||researchOutcomeUnknown.retryable!==false||
+ researchOutcomeUnknown.scope!=='research'||researchOutcomeUnknown.reason_code!=='RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB'||
+ researchOutcomeUnknown.next_action!=='inspect_research_job_or_idempotency_receipt'||
+ researchOutcomeUnknown.next_action==='inspect_exact_intent')
+ throw Error('Research outcome unknown incorrectly became a trade reconciliation or blind retry');
 const deterministicUnknown=projectNativeResponse({status:'FAILED',reason:'UNKNOWN_ACCOUNT',retryable:false});
 if(deterministicUnknown.status!=='failed'||deterministicUnknown.reason_code!=='UNKNOWN_ACCOUNT')
  throw Error('deterministic unknown reason incorrectly became uncertain POST');
@@ -495,13 +511,17 @@ if(corruptRuntime.status!=='failed'||corruptRuntime.reason_code!=='INVALID_RUNTI
 console.log('diagnostics_runtime_freshness_and_negative PASS');
 
 const deploymentTree='a'.repeat(40);
-for(const online of [true,false]){
+for(const [transportStatus,connected,sessionFresh] of [
+ ['PASS',true,true],['STALE',true,false],['OFFLINE',false,false]
+] as const){
+ const verifiedEdge=transportStatus==='PASS';
  const deploymentEnv:any={RELEASE_SOURCE_TREE:deploymentTree,RUNTIME:{idFromName:()=>0,get:()=>({
   fetch:async(url:string)=>{
    if(!url.includes('/status?probe=1&owner=research'))throw Error('deployment must observe Research transport');
-   return Response.json({schema:'okx.direct-transport.status/v1',owner:'research',status:online?'PASS':'OFFLINE',
-    connected:online,session_fresh:online,agent_pid:online?31:null,
-    ...(online?{runtime_profile:'research'}:{})});
+   return Response.json({schema:'okx.direct-transport.status/v1',owner:'research',status:transportStatus,
+    connected,session_fresh:sessionFresh,agent_pid:connected?31:null,
+    agent_binary_sha256:connected?'b'.repeat(64):null,
+    ...(connected?{runtime_profile:'research'}:{})});
   }
  })}};
  const response:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
@@ -509,8 +529,17 @@ for(const online of [true,false]){
  })}),deploymentEnv,ctx)).json();
  const result=response.result.structuredContent, data=result.data;
  if(result.status!=='partial'||data.schema!=='okx.research.deployment-edge/v1'||
-    data.edge.release_source_tree!==deploymentTree||data.edge.research_transport.connected!==online||
-    data.control.status!=='unavailable'||data.control.reason_code!=='CONTROL_EVIDENCE_UNAVAILABLE')
+    data.edge.release_source_tree!==deploymentTree||data.edge.research_transport.connected!==connected||
+    data.edge.research_transport.agent_reported_pid!==(connected?31:null)||
+    data.edge.research_transport.agent_reported_binary_sha256!==(connected?'b'.repeat(64):null)||
+    data.control.status!=='unavailable'||data.control.evidence!=='NOT_PERFORMED'||
+    data.control.pid!==null||data.control.active_worker_sha256!==null||
+    data.control.installed_worker_sha256!==null||data.control.process_generation!==null||
+    data.control.reason_code!=='CONTROL_EVIDENCE_UNAVAILABLE'||
+    data.verification.edge_authenticated_session!==(verifiedEdge?'PASS':'UNVERIFIED')||
+    data.verification.control_process_proof!=='NOT_PERFORMED'||
+    data.verification.first_unproven_stage!==(verifiedEdge?'CONTROL_PID_SHA_GENERATION':'EDGE_AUTHENTICATED_SESSION')||
+    data.verification.next_action!==(verifiedEdge?'inspect_control_research_status':'inspect_research_connection'))
   throw Error('deployment must report Edge observation and unavailable CONTROL evidence');
 }
 const deploymentRead={action:'explain',view:'research',reference:'deployment'};

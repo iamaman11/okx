@@ -1,5 +1,5 @@
 use super::*;
-use crate::provenance::InstalledAgentProvenanceStore;
+use crate::{provenance::InstalledAgentProvenanceStore, research_supervisor::ResearchSupervisor};
 use std::{path::PathBuf, time::Instant};
 
 // A composition has its own accepted source identity. Each component records
@@ -41,6 +41,21 @@ struct InstalledResearch {
     worker_sha256: String,
     protocol_version: u32,
     storage_version: u32,
+}
+
+#[derive(Debug, Clone)]
+struct StagedResearchTransition {
+    target: InstalledResearch,
+    current: Option<InstalledResearch>,
+    rollback: Option<InstalledResearch>,
+}
+
+impl StagedResearchTransition {
+    fn previous_sha(&self) -> Option<&str> {
+        self.current
+            .as_ref()
+            .map(|record| record.worker_sha256.as_str())
+    }
 }
 
 /// Immutable, freshly checked Research image. The caller must not derive an
@@ -179,6 +194,7 @@ async fn verify_component_origin(
 
 pub async fn deploy_research(
     github: &GitHubClient,
+    supervisor: &mut ResearchSupervisor,
     run_id: u64,
     artifact_id: u64,
     expected_source_tree: &str,
@@ -297,13 +313,23 @@ pub async fn deploy_research(
         storage_version: c.storage_version,
     };
     let verified = Instant::now();
-    stage_research(Path::new(okx_host_launcher::RUNTIME_ROOT), &record, &worker)?;
+    let root = Path::new(okx_host_launcher::RUNTIME_ROOT);
+    let staged = prepare_research_transition(root, &record, &worker)?;
+    let expected_generation = supervisor.process_generation();
+    let status = supervisor.transition_image(
+        staged.previous_sha(),
+        expected_generation,
+        &record.worker_sha256,
+        || commit_research_transition(root, &staged),
+        || restore_research_transition(root, &staged),
+    )?;
     let staged = Instant::now();
     Ok(json!({
         "installed": true,
         "provenance": record,
         "agent_lifecycle_changed": false,
-        "activation": "requires_engine_observation",
+        "activation": "requires_research_edge_attestation",
+        "research_process": status,
         "timing_ms": {
             "fetch_accepted_archive": (archive_ready - started).as_millis(),
             "verify_composition_and_origins": (verified - archive_ready).as_millis(),
@@ -317,16 +343,71 @@ pub async fn deploy_research(
 /// the current one. Do not require the historical composition to equal today's
 /// main tree; both on-disk images and the requested transition are hash-fenced.
 pub fn rollback_research(
+    supervisor: &mut ResearchSupervisor,
     expected_current_worker_sha256: &str,
     expected_rollback_worker_sha256: &str,
 ) -> HostControlResult<Value> {
-    rollback_research_at(
+    rollback_research_with_supervisor(
         Path::new(okx_host_launcher::RUNTIME_ROOT),
+        supervisor,
         expected_current_worker_sha256,
         expected_rollback_worker_sha256,
     )
 }
 
+fn rollback_research_with_supervisor(
+    root: &Path,
+    supervisor: &mut ResearchSupervisor,
+    expected_current_worker_sha256: &str,
+    expected_rollback_worker_sha256: &str,
+) -> HostControlResult<Value> {
+    let started = Instant::now();
+    validate_existing_ancestors(root)?;
+    existing_plain_directory(root)?;
+    let current = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?.ok_or(
+        HostControlError::ArtifactVerification("current research provenance missing"),
+    )?;
+    let previous = read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)?.ok_or(
+        HostControlError::ArtifactVerification("research rollback image missing"),
+    )?;
+    if current.worker_sha256 != expected_current_worker_sha256
+        || previous.worker_sha256 != expected_rollback_worker_sha256
+        || current.worker_sha256 == previous.worker_sha256
+    {
+        return Err(HostControlError::ResearchIdentityMismatch);
+    }
+    verify_staged_research(root, &current)?;
+    verify_staged_research(root, &previous)?;
+    let verified = Instant::now();
+    let expected_generation = supervisor.process_generation();
+    let status = supervisor.transition_image(
+        Some(&current.worker_sha256),
+        expected_generation,
+        &previous.worker_sha256,
+        || {
+            if read_research_pointer(root, CURRENT_RESEARCH_POINTER)?.as_ref() != Some(&current) {
+                return Err(HostControlError::ResearchIdentityMismatch);
+            }
+            write_research_pointer(root, CURRENT_RESEARCH_POINTER, &previous)
+        },
+        || write_research_pointer(root, CURRENT_RESEARCH_POINTER, &current),
+    )?;
+    let restored = Instant::now();
+    Ok(json!({
+        "rolled_back": true,
+        "provenance": previous,
+        "agent_lifecycle_changed": false,
+        "activation": "requires_research_edge_attestation",
+        "research_process": status,
+        "timing_ms": {
+            "verify_current_and_rollback": (verified - started).as_millis(),
+            "publish_pointer_and_supervise": (restored - verified).as_millis(),
+            "control_total": (restored - started).as_millis()
+        }
+    }))
+}
+
+#[cfg(test)]
 fn rollback_research_at(
     root: &Path,
     expected_current_worker_sha256: &str,
@@ -576,7 +657,11 @@ fn write_stage_file(directory: &Path, bytes: &[u8]) -> HostControlResult<std::pa
     Ok(path)
 }
 
-fn stage_research(root: &Path, record: &InstalledResearch, bytes: &[u8]) -> HostControlResult<()> {
+fn prepare_research_transition(
+    root: &Path,
+    record: &InstalledResearch,
+    bytes: &[u8],
+) -> HostControlResult<StagedResearchTransition> {
     validate_research_record(record)?;
     if sha256_hex(bytes) != record.worker_sha256 {
         return Err(HostControlError::ArtifactHashMismatch);
@@ -617,24 +702,82 @@ fn stage_research(root: &Path, record: &InstalledResearch, bytes: &[u8]) -> Host
         Err(e) => return Err(e.into()),
     }
     let current = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?;
-    let previous = read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)?;
+    let rollback = read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)?;
     if let Some(old) = &current {
         verify_staged_research(root, old)?;
-        if old == record {
-            return Ok(());
-        }
-        if old.worker_sha256 == record.worker_sha256 {
+        if old.worker_sha256 == record.worker_sha256 && old != record {
             return Err(HostControlError::ArtifactVerification(
                 "same research bytes with different provenance",
             ));
         }
-        write_research_pointer(root, ROLLBACK_RESEARCH_POINTER, old)?;
-    } else if previous.is_some() {
+    } else if rollback.is_some() {
         return Err(HostControlError::ArtifactVerification(
             "orphaned research rollback pointer",
         ));
     }
-    write_research_pointer(root, CURRENT_RESEARCH_POINTER, record)
+    if let Some(saved) = &rollback {
+        verify_staged_research(root, saved)?;
+    }
+    Ok(StagedResearchTransition {
+        target: record.clone(),
+        current,
+        rollback,
+    })
+}
+
+fn commit_research_transition(
+    root: &Path,
+    staged: &StagedResearchTransition,
+) -> HostControlResult<()> {
+    if read_research_pointer(root, CURRENT_RESEARCH_POINTER)? != staged.current
+        || read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)? != staged.rollback
+    {
+        return Err(HostControlError::ResearchIdentityMismatch);
+    }
+    verify_staged_research(root, &staged.target)?;
+    if staged.current.as_ref() == Some(&staged.target) {
+        return Ok(());
+    }
+    if let Some(old) = &staged.current {
+        write_research_pointer(root, ROLLBACK_RESEARCH_POINTER, old)?;
+    }
+    write_research_pointer(root, CURRENT_RESEARCH_POINTER, &staged.target)
+}
+
+/// Compensate a failed activation only while the pointer still matches the
+/// exact snapshot or the expected candidate. Never overwrite a third image.
+fn restore_research_transition(
+    root: &Path,
+    staged: &StagedResearchTransition,
+) -> HostControlResult<()> {
+    let current = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?;
+    if current.as_ref() != Some(&staged.target) && current != staged.current {
+        return Err(HostControlError::ResearchRollbackUnconfirmed);
+    }
+    let rollback = read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)?;
+    if rollback != staged.rollback && rollback != staged.current {
+        return Err(HostControlError::ResearchRollbackUnconfirmed);
+    }
+    match &staged.current {
+        Some(old) => write_research_pointer(root, CURRENT_RESEARCH_POINTER, old)?,
+        None if current.is_some() => fs::remove_file(root.join(CURRENT_RESEARCH_POINTER))?,
+        None => {}
+    }
+    match &staged.rollback {
+        Some(old) => write_research_pointer(root, ROLLBACK_RESEARCH_POINTER, old)?,
+        None if rollback.is_some() => fs::remove_file(root.join(ROLLBACK_RESEARCH_POINTER))?,
+        None => {}
+    }
+    Ok(())
+}
+
+// Existing test fixtures exercise the original staged-pointer contract without
+// running a Host. Production deployment uses the same two phases under the
+// independent Research process supervisor.
+#[cfg(test)]
+fn stage_research(root: &Path, record: &InstalledResearch, bytes: &[u8]) -> HostControlResult<()> {
+    let staged = prepare_research_transition(root, record, bytes)?;
+    commit_research_transition(root, &staged)
 }
 
 pub(super) fn parse_persisted_manifest(bytes: &[u8]) -> HostControlResult<BundleManifest> {
@@ -748,6 +891,179 @@ pub(super) fn parse_bundle_compatible(zip_bytes: &[u8]) -> HostControlResult<Ver
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::research_supervisor::ResearchSupervisor;
+
+    fn fixture_record(bytes: &[u8], marker: char) -> InstalledResearch {
+        InstalledResearch {
+            schema: "okx.host-control.installed-research/v1".into(),
+            repository_id: REPOSITORY_ID,
+            run_id: 1,
+            artifact_id: 2,
+            source_head_sha: marker.to_string().repeat(40),
+            source_tree: "b".repeat(40),
+            worker_sha256: sha256_hex(bytes),
+            protocol_version: 1,
+            storage_version: 1,
+        }
+    }
+
+    #[test]
+    fn research_transition_is_staged_before_promotion_and_fenced_by_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "research-atomic-stage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime = root.join("runtime");
+        let control = root.join("control");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&control).unwrap();
+        let old = fixture_record(b"old research", 'a');
+        stage_research(&runtime, &old, b"old research").unwrap();
+        let new = fixture_record(b"new research", 'c');
+        let prepared = prepare_research_transition(&runtime, &new, b"new research").unwrap();
+        assert_eq!(
+            read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(old.clone()),
+            "staging an immutable image must not activate it"
+        );
+        let mut owner = ResearchSupervisor::at(control, runtime.clone()).unwrap();
+        assert_eq!(
+            owner
+                .transition_image(
+                    prepared.previous_sha(),
+                    1,
+                    &new.worker_sha256,
+                    || commit_research_transition(&runtime, &prepared),
+                    || restore_research_transition(&runtime, &prepared),
+                )
+                .unwrap_err()
+                .code(),
+            "RESEARCH_IDENTITY_MISMATCH"
+        );
+        assert_eq!(
+            read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(old)
+        );
+        let status = owner
+            .transition_image(
+                prepared.previous_sha(),
+                0,
+                &new.worker_sha256,
+                || commit_research_transition(&runtime, &prepared),
+                || restore_research_transition(&runtime, &prepared),
+            )
+            .unwrap();
+        assert_eq!(status["phase"], "STOPPED");
+        assert_eq!(
+            read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(new)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_research_promotion_compensates_both_pointers_without_engine_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "research-promotion-fault-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime = root.join("runtime");
+        let control = root.join("control");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&control).unwrap();
+        fs::write(runtime.join("okx-agent.exe"), b"untouched").unwrap();
+        let old = fixture_record(b"previous version", 'a');
+        stage_research(&runtime, &old, b"previous version").unwrap();
+        let new = fixture_record(b"candidate version", 'c');
+        let prepared = prepare_research_transition(&runtime, &new, b"candidate version").unwrap();
+        let mut owner = ResearchSupervisor::at(control, runtime.clone()).unwrap();
+        let error = owner
+            .transition_image(
+                prepared.previous_sha(),
+                0,
+                &new.worker_sha256,
+                || {
+                    commit_research_transition(&runtime, &prepared)?;
+                    Err(HostControlError::ArtifactVerification(
+                        "injected activation failure",
+                    ))
+                },
+                || restore_research_transition(&runtime, &prepared),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "RESEARCH_ACTIVATION_ROLLED_BACK");
+        assert_eq!(
+            read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(old)
+        );
+        assert!(
+            read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            fs::read(runtime.join("okx-agent.exe")).unwrap(),
+            b"untouched"
+        );
+        assert_eq!(owner.status().unwrap()["last_error"], error.code());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn controlled_research_rollback_restores_prior_hash_with_no_process_spawn() {
+        let root = std::env::temp_dir().join(format!(
+            "research-controlled-rollback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime = root.join("runtime");
+        let control = root.join("control");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&control).unwrap();
+        let old = fixture_record(b"rollback target", 'a');
+        let current = fixture_record(b"running candidate", 'c');
+        stage_research(&runtime, &old, b"rollback target").unwrap();
+        stage_research(&runtime, &current, b"running candidate").unwrap();
+        let mut owner = ResearchSupervisor::at(control, runtime.clone()).unwrap();
+        let receipt = rollback_research_with_supervisor(
+            &runtime,
+            &mut owner,
+            &current.worker_sha256,
+            &old.worker_sha256,
+        )
+        .unwrap();
+        assert_eq!(receipt["rolled_back"], true);
+        assert_eq!(receipt["research_process"]["phase"], "STOPPED");
+        assert_eq!(receipt["activation"], "requires_research_edge_attestation");
+        assert_eq!(
+            read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(old)
+        );
+        assert_eq!(
+            rollback_research_with_supervisor(
+                &runtime,
+                &mut owner,
+                &current.worker_sha256,
+                &"0".repeat(64)
+            )
+            .unwrap_err()
+            .code(),
+            "RESEARCH_IDENTITY_MISMATCH"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(windows)]
     #[test]

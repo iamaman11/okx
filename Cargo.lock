@@ -1527,6 +1527,7 @@ dependencies = [
  "okx-ipc-contracts",
  "okx-market-runtime",
  "okx-observation",
+ "okx-research-protocol",
  "okx-trade-execution",
  "reqwest",
  "rusqlite",

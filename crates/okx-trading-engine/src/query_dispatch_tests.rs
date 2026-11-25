@@ -191,6 +191,36 @@ fn rejection(response: AgentResponse, code: &str) {
 }
 
 #[tokio::test]
+async fn trading_and_strategy_requests_reach_finance_owner_not_research_fallback() {
+    use okx_ipc_contracts::trading::{StrategyRequest, TradeRequest};
+
+    // No installed account, network, Research process or financial mutation.
+    // Distinct finance failure proves the router reached the proper owner.
+    let ctx = DispatchContext {
+        finance: crate::finance_dispatch::FinanceDispatch::missing(),
+    };
+    for operation in [
+        AgentOperation::Trade {
+            request: TradeRequest::Capabilities {},
+        },
+        AgentOperation::Strategies {
+            request: StrategyRequest::List {},
+        },
+    ] {
+        let request = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.into(),
+            request_id: "engine_route_guard_001".into(),
+            account: Some("test-account".into()),
+            operation,
+        };
+        rejection(
+            dispatch(&ctx, &request).await,
+            "FINANCE_INSTALLATION_NOT_INITIALIZED",
+        );
+    }
+}
+
+#[tokio::test]
 async fn engine_rejects_every_research_operation_without_network_or_finance_work() {
     use okx_ipc_contracts::{analytics::ResearchRequest, trading::DiagnosticsRequest};
     let fixture = Fixture::new(empty_reference()).await;
