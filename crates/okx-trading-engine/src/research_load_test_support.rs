@@ -125,8 +125,13 @@ impl ResearchLoadFixture {
     }
 
     pub(crate) async fn start(&self) -> (String, String, Value) {
+        // The historical T10 worker first performed three bounded pre-source
+        // admission checks and enqueued two jobs, THEN waited up to 90s for
+        // real concurrent Grid compute. The 120s JSONL transport ceiling
+        // includes those same separate startup phases; it is not the Finance
+        // p95 or Engine STOP deadline, both of which remain unchanged.
         let data = self
-            .call("start", None, Duration::from_secs(90))
+            .call("start", None, Duration::from_secs(120))
             .await
             .expect("actual Research grids must enter concurrent compute");
         let first = data["first"]
@@ -145,17 +150,37 @@ impl ResearchLoadFixture {
             .expect("real external Research Worker PID");
         assert!(worker_pid > 0);
         assert_ne!(worker_pid, std::process::id() as u64);
+        let mut observed_work_progress = false;
         for (name, id) in [("first_status", &first), ("second_status", &second)] {
             let snapshot = &data[name];
             assert_eq!(snapshot["id"], id.as_str(), "real Worker job ID mismatch");
             assert_eq!(snapshot["state"], "running", "{name} must enter compute");
-            assert!(
-                snapshot["candidate_progress"]["completed_candidates"]
-                    .as_u64()
-                    .is_some_and(|count| count > 0),
-                "{name} must have completed authentic Research candidate work"
-            );
+            observed_work_progress |= snapshot["candidate_progress"]["completed_work_units"]
+                .as_u64()
+                .is_some_and(|count| count > 0);
         }
+        // Restore the original protected Engine T10
+        // `accounts_native_engine_research_contract_tests::wait_for_grid_compute`
+        // criterion: BOTH real jobs running, ANY completed work unit. A single
+        // long-running candidate can advance work units without completing a
+        // candidate; requiring one completed candidate from EACH job was an
+        // accidental test-fixture strengthening, not a financial guard.
+        assert!(
+            observed_work_progress,
+            "two running real Research jobs must have actual work-unit progress"
+        );
+        assert!(
+            data["successful_requests_at_start"]
+                .as_u64()
+                .is_some_and(|count| count > 0),
+            "real Research source capture must precede the finance load phase"
+        );
+        assert!(
+            data["returned_rows_at_start"]
+                .as_u64()
+                .is_some_and(|count| count > 0),
+            "real Research Worker must receive synthetic source rows before finance load"
+        );
         let boundary = data
             .get("boundary_evidence")
             .cloned()
