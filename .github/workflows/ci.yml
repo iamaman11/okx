@@ -1182,7 +1182,14 @@ jobs:
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+          # `--exact` selects this one named test and filters out the other
+          # Engine libtests. Zero filtered would reject a correctly scoped
+          # current suite; instead require BOTH this test's positive line and
+          # one exact passing result with a nonzero filtered roster.
+          $log = $output -join "`n"
+          $testName = 'query::public_dispatch_tests::research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes'
+          if ($log -notmatch ('(?m)^test ' + [regex]::Escape($testName) + ' \.\.\. ok$') -or
+              $log -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [1-9][0-9]* filtered out;') {
             throw 'ENGINE_RESEARCH_OWNER_FINANCE_DENIAL_EXACT_TEST_REQUIRED'
           }
 
