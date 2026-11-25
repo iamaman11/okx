@@ -116,8 +116,7 @@ where
     let _ = tx.send(true);
     let drained = tokio::time::timeout(Duration::from_secs(9), async {
         while tasks.join_next().await.is_some() {}
-        // Financial drain starts immediately even if the separate worker is unresponsive.
-        tokio::join!(dispatch.finance.shutdown(), dispatch.research.shutdown());
+        dispatch.finance.shutdown().await;
     })
     .await
     .is_ok();

@@ -183,7 +183,7 @@ const researchRoutes:[string,any,string,boolean][]=[
  ['market',{action:'microstructure',instrument:'BTC-USDT'},'market_microstructure',true],
  ['market',payloadFixtures.find(f=>f.tool==='market'&&f.action==='screen')!.positive,'market',true],
  ['research',{action:'capabilities'},'research',true],
- ['diagnostics',{action:'explain',view:'research',reference:'deployment'},'diagnostics',true],
+ ['diagnostics',{action:'explain',view:'research',reference:'job_fixture'},'diagnostics',true],
  ['diagnostics',{action:'explain',view:'finance',reference:'intent_fixture'},'diagnostics',false],
  ['portfolio',payloadFixtures.find(f=>f.tool==='portfolio'&&f.action==='scenario')!.positive,'portfolio_scenario',true],
  ['portfolio',payloadFixtures.find(f=>f.tool==='portfolio'&&f.action==='summary')!.positive,'portfolio',false],
@@ -203,7 +203,7 @@ for(const configured of [false,true]){
   if(reply.error||reply.result?.structuredContent?.status!=='completed')
    throw Error(`routing fixture rejected ${name}.${args.action}: ${JSON.stringify(reply)}`);
   const sent=seen.at(-1);
-  if(sent?.operation?.type!==operation || sent.target_owner!==(configured&&researchOwned?'research':undefined))
+  if(sent?.operation?.type!==operation || sent.target_owner!==(researchOwned?'research':undefined))
    throw Error(`incorrect ${configured?'configured':'legacy'} owner route for ${name}.${args.action}`);
  }
  if(seen.length!==researchRoutes.length)throw Error('owner routing test lost a native dispatch');
@@ -217,7 +217,7 @@ for(const forbidden of [
  })}),{RESEARCH_RUNTIME_TOKEN_SHA256:'f'.repeat(64)} as any,ctx)).json();
  if(reply.error?.code!==-32602)throw Error('MCP caller tried to override authenticated target owner');
 }
-console.log('mcp_configured_research_owner_routes_and_legacy PASS');
+console.log('mcp_research_owner_routes_independent_of_credential PASS');
 
 // P0 #537: an optional user graph must reach the Native request unchanged.
 // Otherwise different hypotheses can silently reuse the flat market job.
@@ -489,23 +489,32 @@ if(corruptRuntime.status!=='failed'||corruptRuntime.reason_code!=='INVALID_RUNTI
 console.log('diagnostics_runtime_freshness_and_negative PASS');
 
 const deploymentTree='a'.repeat(40);
-for(const correlated of [true,false]){
+for(const online of [true,false]){
  const deploymentEnv:any={RELEASE_SOURCE_TREE:deploymentTree,RUNTIME:{idFromName:()=>0,get:()=>({
-  fetch:async(_url:string,init:RequestInit)=>{
-   const native=JSON.parse(String(init.body));
-   if(native.operation.type!=='diagnostics'||native.operation.request.reference!=='deployment'||native.operation.request.view!=='research')
-    throw Error('deployment diagnostic did not reach the native owner');
-   return Response.json({schema:'okx.agent.response/v1',request_id:correlated?native.request_id:'wrong-id',
-    status:'completed',quality:'FRESH',warnings:[],result:{schema:'okx.research.deployment/v1',engine_pid:27,
-     research:{active:'b'.repeat(64),active_pid:31,draining:false},read_only:true}});
+  fetch:async(url:string)=>{
+   if(!url.includes('/status?probe=1&owner=research'))throw Error('deployment must observe Research transport');
+   return Response.json({schema:'okx.direct-transport.status/v1',owner:'research',status:online?'PASS':'OFFLINE',
+    connected:online,session_fresh:online,agent_pid:online?31:null,
+    ...(online?{runtime_profile:'research'}:{})});
   }
  })}};
  const response:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
   jsonrpc:'2.0',id:96,method:'tools/call',params:{name:'diagnostics',arguments:{action:'explain',view:'research',reference:'deployment'}}
  })}),deploymentEnv,ctx)).json();
- const data=response.result.structuredContent.data;
- if(data.engine_pid!==27||data.research.active_pid!==31||
-    (correlated?(data.edge?.release_source_tree!==deploymentTree||data.edge?.engine_response_received!==true):data.edge!==undefined))
-  throw Error('deployment must retain native process evidence, with Edge identity only for a correlated reply');
+ const result=response.result.structuredContent, data=result.data;
+ if(result.status!=='partial'||data.schema!=='okx.research.deployment-edge/v1'||
+    data.edge.release_source_tree!==deploymentTree||data.edge.research_transport.connected!==online||
+    data.control.status!=='unavailable'||data.control.reason_code!=='CONTROL_EVIDENCE_UNAVAILABLE')
+  throw Error('deployment must report Edge observation and unavailable CONTROL evidence');
 }
-console.log('diagnostics_research_deployment_native_and_edge_readback PASS');
+const deploymentRead={action:'explain',view:'research',reference:'deployment'};
+const wrongOwner=await mcpResponse('diagnostics',deploymentRead,
+ {schema:'okx.direct-transport.status/v1',owner:'engine',runtime_profile:'engine',
+  status:'PASS',connected:true,session_fresh:true});
+if(wrongOwner.reason_code!=='INVALID_RUNTIME_STATUS')
+ throw Error('Engine transport cannot be used as Research deployment evidence');
+const accountDeployment=await mcpResponse('diagnostics',{...deploymentRead,account:'scope-not-applicable'},
+ {schema:'okx.direct-transport.status/v1',owner:'research',status:'OFFLINE',connected:false,session_fresh:false});
+if(accountDeployment.reason_code!=='RESEARCH_OPERATION_FORBIDDEN')
+ throw Error('Research deployment cannot select a trading account');
+console.log('diagnostics_research_deployment_edge_only_readback PASS');

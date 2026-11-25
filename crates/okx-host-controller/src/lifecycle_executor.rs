@@ -25,7 +25,7 @@ use crate::{
     controller_update,
     desired::{AgentDesired, AgentDesiredState, DesiredStateStore},
     job::AgentJob,
-    provenance::InstalledAgentProvenanceStore,
+    provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore},
     research_supervisor::ResearchSupervisor,
 };
 
@@ -41,7 +41,38 @@ const WORKSPACE_STATUS_MAX_CHANGES: usize = 16;
 const WORKSPACE_STATUS_MAX_CHANGE_BYTES: usize = 512;
 const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
 const NATIVE_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(300);
+const ENGINE_CONTRACT_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_REPLY_MAX_BYTES: u64 = 4096;
+
+fn validate_engine_contract(bytes: &[u8]) -> HostControlResult<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RuntimeContract<'a> {
+        schema: &'a str,
+        runtime_owner: &'a str,
+        research_child: bool,
+    }
+    let contract: RuntimeContract<'_> =
+        serde_json::from_slice(bytes).map_err(|_| HostControlError::IndependentEngineRequired)?;
+    if contract.schema != "okx.engine.runtime-contract/v1"
+        || contract.runtime_owner != "engine"
+        || contract.research_child
+    {
+        return Err(HostControlError::IndependentEngineRequired);
+    }
+    Ok(())
+}
+
+fn inspect_engine_contract(binary: &Path) -> HostControlResult<()> {
+    let bytes = bounded_native_output(
+        hidden_command(binary)
+            .arg("runtime-contract")
+            .stdin(Stdio::null()),
+        ENGINE_CONTRACT_TIMEOUT,
+    )
+    .map_err(|_| HostControlError::IndependentEngineRequired)?;
+    validate_engine_contract(&bytes)
+}
 
 /// Run the existing installed Agent exactly once, without a pipe deadlock.
 /// Windows waits on the native process handle; an ephemeral OS Job owns every
@@ -138,6 +169,7 @@ struct NativeChildPipe {
 pub struct HostExecutor {
     native_child_pipe: Option<NativeChildPipe>,
     repo_root: PathBuf,
+    runtime_root: PathBuf,
     agent_child: Option<Child>,
     agent_started_at: Option<Instant>,
     agent_launch: Option<AgentLaunchEvidence>,
@@ -154,12 +186,14 @@ pub struct HostExecutor {
 impl HostExecutor {
     pub fn canonical() -> HostControlResult<Self> {
         Self::with_lifecycle(
+            PathBuf::from(RUNTIME_ROOT),
             DesiredStateStore::canonical(),
             ResearchSupervisor::canonical()?,
         )
     }
 
     fn with_lifecycle(
+        runtime_root: PathBuf,
         desired_store: DesiredStateStore,
         research: ResearchSupervisor,
     ) -> HostControlResult<Self> {
@@ -171,6 +205,7 @@ impl HostExecutor {
         Ok(Self {
             native_child_pipe: None,
             repo_root: PathBuf::from(CANONICAL_ROOT),
+            runtime_root,
             agent_child: None,
             agent_started_at: None,
             agent_launch: None,
@@ -193,13 +228,10 @@ impl HostExecutor {
             HostControlOperation::StartResearch {
                 expected_installed_worker_sha256,
                 existing_catalog_scope_sha256,
-            } => {
-                self.require_engine_stopped_for_research()?;
-                self.research.start(
-                    &expected_installed_worker_sha256,
-                    existing_catalog_scope_sha256.as_deref(),
-                )
-            }
+            } => self.research.start(
+                &expected_installed_worker_sha256,
+                existing_catalog_scope_sha256.as_deref(),
+            ),
             HostControlOperation::StopResearch {
                 expected_active_worker_sha256,
                 expected_process_generation,
@@ -308,13 +340,8 @@ impl HostExecutor {
 
     pub fn reconcile_desired(&mut self) -> HostControlResult<Value> {
         let engine_result = self.reconcile_engine_desired();
-        // Until Engine's legacy child is removed, only one Research process
-        // may be owned by CONTROL. A stopped Research can still finish cleanup.
-        if !self.research.desired_running() || self.require_engine_stopped_for_research().is_ok() {
-            let _ = self.research.reconcile();
-        } else {
-            self.research.mark_transition_blocked();
-        }
+        // Each owner reports and retries its own reconciliation errors.
+        let _ = self.research.reconcile();
         engine_result
     }
 
@@ -395,8 +422,7 @@ impl HostExecutor {
 
         let running = self.agent_is_running()?;
         let agent_binary = self.agent_binary();
-        let installed_agent =
-            InstalledAgentProvenanceStore::canonical().status_value(&agent_binary);
+        let installed_agent = self.agent_provenance().status_value(&agent_binary);
         // Read-only release identity: the controller must not mistake an
         // independently updated agent for the same tested release set.
         let launcher = okx_host_launcher::status_value();
@@ -742,14 +768,13 @@ impl HostExecutor {
     }
 
     fn start_agent(&mut self) -> HostControlResult<Value> {
-        self.research.require_stopped_for_legacy_engine()?;
         if self.agent_is_running()? {
             self.persist_desired(AgentDesiredState::running())?;
             return Ok(json!({"disposition":"ALREADY_RUNNING"}));
         }
-        self.require_agent_binary()?;
+        self.require_independent_agent()?;
         self.persist_desired(AgentDesiredState::running())?;
-        let pid = match self.start_agent_process() {
+        let pid = match self.start_agent_process_inner() {
             Ok(pid) => pid,
             Err(e) => {
                 self.schedule_restart();
@@ -771,10 +796,10 @@ impl HostExecutor {
     }
 
     fn restart_agent(&mut self) -> HostControlResult<Value> {
-        self.research.require_stopped_for_legacy_engine()?;
+        self.require_independent_agent()?;
         self.persist_desired(AgentDesiredState::running())?;
         self.terminate_agent_owned()?;
-        let pid = self.start_agent_process()?;
+        let pid = self.start_agent_process_inner()?;
         Ok(json!({"disposition":"RESTARTED","pid":pid}))
     }
 
@@ -826,19 +851,6 @@ impl HostExecutor {
         }
         Ok(reply)
     }
-    fn require_engine_stopped_for_research(&mut self) -> HostControlResult<()> {
-        let desired = self.desired_store.load()?;
-        if desired.agent != AgentDesired::Stopped || self.desired_error.is_some() {
-            return Err(HostControlError::ResearchTransitionRequiresExclusiveProcess);
-        }
-        self.require_storage_stopped().map_err(|error| match error {
-            HostControlError::AgentRunning => {
-                HostControlError::ResearchTransitionRequiresExclusiveProcess
-            }
-            other => other,
-        })
-    }
-
     fn require_storage_stopped(&mut self) -> HostControlResult<()> {
         self.require_agent_stopped()?;
         if self.desired_agent != AgentDesired::Stopped
@@ -982,28 +994,28 @@ impl HostExecutor {
         self.git(&["rev-parse", "origin/main^{tree}"])
     }
 
-    pub fn install_verified_agent(&mut self, bytes: &[u8]) -> HostControlResult<()> {
+    pub fn install_verified_agent(
+        &mut self,
+        bytes: &[u8],
+        provenance: &InstalledAgentProvenance,
+    ) -> HostControlResult<()> {
         let current = self.agent_binary();
         let expected_hash = okx_host_launcher::sha256_bytes(bytes);
+        if expected_hash != provenance.agent_sha256 {
+            return Err(HostControlError::ArtifactHashMismatch);
+        }
+        let store = self.agent_provenance();
 
         // Exact retry must not interrupt an already running Agent, replace
         // its durable backup, or publish a new partially staged executable.
         if current.is_file() && okx_host_launcher::sha256_file(&current)? == expected_hash {
-            return Ok(());
-        }
-
-        let should_restore = self.desired_agent == AgentDesired::Running;
-        if should_restore {
-            self.research.require_stopped_for_legacy_engine()?;
-        }
-        let running = self.agent_is_running()?;
-        if running {
-            self.terminate_agent_owned()?;
+            inspect_engine_contract(&current)?;
+            return store.save(provenance);
         }
 
         fs::create_dir_all(self.runtime_dir())?;
 
-        let staging = self.runtime_dir().join("okx-agent.exe.new");
+        let staging = self.runtime_dir().join("okx-agent.new.exe");
         let backup = self.runtime_dir().join("okx-agent.exe.previous");
 
         // Persist and verify the candidate BEFORE changing any last-known
@@ -1015,8 +1027,19 @@ impl HostExecutor {
         if okx_host_launcher::sha256_file(&staging)? != expected_hash {
             return Err(HostControlError::ArtifactHashMismatch);
         }
+        if let Err(error) = inspect_engine_contract(&staging) {
+            let _ = fs::remove_file(&staging);
+            return Err(error);
+        }
+        let staged_provenance = store.stage(provenance)?;
 
-        if current.exists() {
+        let should_restore = self.desired_agent == AgentDesired::Running;
+        if self.agent_is_running()? {
+            self.terminate_agent_owned()?;
+        }
+
+        let had_current = current.exists();
+        if had_current {
             // Only discard an older backup while a known current binary still
             // exists. If a crash has already moved current -> backup, that
             // backup is the sole recoverable executable and must survive.
@@ -1033,11 +1056,27 @@ impl HostExecutor {
             return Err(error.into());
         }
 
-        if okx_host_launcher::sha256_file(&current)? != expected_hash {
-            return Err(HostControlError::ArtifactHashMismatch);
+        let publish = (|| -> HostControlResult<()> {
+            if okx_host_launcher::sha256_file(&current)? != expected_hash {
+                return Err(HostControlError::ArtifactHashMismatch);
+            }
+            store.publish_staged(&staged_provenance)
+        })();
+        if let Err(error) = publish {
+            // Provenance is still bound to the previous image. Restore that
+            // pair before another reconciliation can try to start Engine.
+            fs::rename(&current, &staging)?;
+            if had_current {
+                fs::rename(&backup, &current)?;
+                if should_restore && let Err(restart) = self.start_agent_process() {
+                    self.schedule_restart();
+                    self.last_reconcile = format!("ROLLBACK_RESTART_FAILED_{}", restart.code());
+                }
+            }
+            return Err(error);
         }
 
-        if should_restore && let Err(error) = self.start_agent_process() {
+        if should_restore && let Err(error) = self.start_agent_process_inner() {
             self.schedule_restart();
             return Err(error);
         }
@@ -1046,7 +1085,7 @@ impl HostExecutor {
     }
 
     fn start_agent_process(&mut self) -> HostControlResult<u32> {
-        self.research.require_stopped_for_legacy_engine()?;
+        self.require_independent_agent()?;
         self.start_agent_process_inner()
     }
 
@@ -1055,7 +1094,7 @@ impl HostExecutor {
             return Err(HostControlError::AgentRunning);
         }
         self.require_agent_binary()?;
-        let runtime_dir = PathBuf::from(RUNTIME_ROOT);
+        let runtime_dir = self.runtime_dir();
         fs::create_dir_all(&runtime_dir)?;
 
         let stdout = okx_host_launcher::logging::RotatingLog::open(
@@ -1084,6 +1123,8 @@ impl HostExecutor {
         let mut child = self
             .agent_command()
             .args(args)
+            .arg("--root")
+            .arg(runtime_dir)
             .arg("--native-child-control-stdio")
             .env("OKX_CONTROL_AGENT_INCAR", &incarnation)
             .stdin(Stdio::piped())
@@ -1244,6 +1285,19 @@ impl HostExecutor {
         }
     }
 
+    fn require_independent_agent(&self) -> HostControlResult<()> {
+        self.require_agent_binary()?;
+        let binary = self.agent_binary();
+        let identity = self
+            .agent_provenance()
+            .load()?
+            .ok_or(HostControlError::IndependentEngineRequired)?;
+        if okx_host_launcher::sha256_file(&binary)? != identity.agent_sha256 {
+            return Err(HostControlError::ArtifactHashMismatch);
+        }
+        inspect_engine_contract(&binary)
+    }
+
     fn require_agent_stopped(&mut self) -> HostControlResult<()> {
         if self.agent_is_running()? {
             Err(HostControlError::AgentRunning)
@@ -1323,11 +1377,15 @@ impl HostExecutor {
     }
 
     fn agent_binary(&self) -> PathBuf {
-        PathBuf::from(RUNTIME_ROOT).join("okx-agent.exe")
+        self.runtime_root.join("okx-agent.exe")
     }
 
     fn runtime_dir(&self) -> PathBuf {
-        PathBuf::from(RUNTIME_ROOT)
+        self.runtime_root.clone()
+    }
+
+    fn agent_provenance(&self) -> InstalledAgentProvenanceStore {
+        InstalledAgentProvenanceStore::at(self.runtime_root.join("installed-agent.json"))
     }
 }
 
@@ -1986,9 +2044,27 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 mod tests {
     use super::*;
 
+    #[test]
+    fn independent_engine_runtime_receipt_is_strict() {
+        assert!(validate_engine_contract(
+            br#"{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false}"#
+        ).is_ok());
+        for receipt in [
+            br#"{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":true}"#.as_slice(),
+            br#"{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"research","research_child":false}"#,
+            br#"{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false,"research_child":false}"#,
+            br#"{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine"}"#,
+        ] {
+            assert!(matches!(
+                validate_engine_contract(receipt),
+                Err(HostControlError::IndependentEngineRequired)
+            ));
+        }
+    }
+
     #[cfg(windows)]
     #[test]
-    fn control_rejects_overlapping_legacy_engine_and_standalone_research() {
+    fn control_reconciles_research_when_engine_image_is_incompatible() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2003,6 +2079,7 @@ mod tests {
         let engine = DesiredStateStore::at(control.join("engine-state.pb"));
         let open = || {
             HostExecutor::with_lifecycle(
+                runtime.clone(),
                 engine.clone(),
                 ResearchSupervisor::at(control.clone(), runtime.clone()).unwrap(),
             )
@@ -2010,6 +2087,9 @@ mod tests {
         };
         let research_state_path = control.join("research-state.json");
         let sha = "a".repeat(64);
+        fs::create_dir_all(&runtime).unwrap();
+        let engine_image = runtime.join("okx-agent.exe");
+        fs::write(&engine_image, b"legacy witness must never start").unwrap();
         engine.save(AgentDesiredState::running()).unwrap();
         let mut owner = open();
         assert!(matches!(
@@ -2017,7 +2097,9 @@ mod tests {
                 expected_installed_worker_sha256: sha.clone(),
                 existing_catalog_scope_sha256: None,
             }),
-            Err(HostControlError::ResearchTransitionRequiresExclusiveProcess)
+            Err(HostControlError::ArtifactVerification(
+                "installed research pointer missing"
+            ))
         ));
         assert!(!research_state_path.exists());
         drop(owner);
@@ -2035,10 +2117,13 @@ mod tests {
         let mut conflict = open();
         assert!(matches!(
             conflict.reconcile_desired(),
-            Err(HostControlError::ResearchTransitionRequiresExclusiveProcess)
+            Err(HostControlError::IndependentEngineRequired)
         ));
         assert!(conflict.agent_child.is_none());
-        assert!(conflict.research.status().unwrap()["pid"].is_null());
+        let research = conflict.research.status().unwrap();
+        assert!(research["pid"].is_null());
+        assert_eq!(research["phase"], "INVALID_PROVENANCE");
+        assert!(research["retry_in_ms"].is_number());
         drop(conflict);
 
         engine.save(AgentDesiredState::stopped()).unwrap();
@@ -2049,11 +2134,33 @@ mod tests {
         ] {
             assert!(matches!(
                 owner.execute(command),
-                Err(HostControlError::ResearchTransitionRequiresExclusiveProcess)
+                Err(HostControlError::IndependentEngineRequired)
             ));
             assert_eq!(engine.load().unwrap(), AgentDesiredState::stopped());
         }
         assert!(owner.agent_child.is_none());
+        // A valid, isolated PE without the runtime-contract command. It
+        // returns libtest output for the unmatched command and never starts
+        // Engine, opens financial state, or attempts to use credentials.
+        let candidate = fs::read(std::env::current_exe().unwrap()).unwrap();
+        let provenance = InstalledAgentProvenance::verified(
+            1,
+            2,
+            "a".repeat(40),
+            "b".repeat(40),
+            "1.100.0".into(),
+            okx_host_launcher::sha256_bytes(&candidate),
+        );
+        assert!(matches!(
+            owner.install_verified_agent(&candidate, &provenance),
+            Err(HostControlError::IndependentEngineRequired)
+        ));
+        assert_eq!(
+            fs::read(&engine_image).unwrap(),
+            b"legacy witness must never start"
+        );
+        assert!(!runtime.join("installed-agent.json").exists());
+        assert!(!runtime.join("okx-agent.new.exe").exists());
         drop(owner);
         fs::remove_dir_all(root).unwrap();
     }

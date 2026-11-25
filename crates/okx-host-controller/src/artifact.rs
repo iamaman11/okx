@@ -16,7 +16,7 @@ use crate::{
     HostControlError, HostControlResult,
     controller_update::{self, ControllerUpdateCandidate},
     lifecycle_executor::HostExecutor,
-    provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore},
+    provenance::InstalledAgentProvenance,
     root_migration,
 };
 
@@ -79,8 +79,7 @@ pub async fn deploy_agent(
         actual_agent_hash.clone(),
     );
 
-    executor.install_verified_agent(&bundle.agent_bytes)?;
-    InstalledAgentProvenanceStore::canonical().save(&provenance)?;
+    executor.install_verified_agent(&bundle.agent_bytes, &provenance)?;
 
     Ok(json!({
         "run_id": provenance.run_id,

@@ -1,8 +1,8 @@
 //! Public routing tests: real owners, with delivery replaced only at HTTP/WS.
 use super::*;
 use crate::accounts::{initialize_installation, recorded_support};
-use crate::research_test_support::client as research_test_client;
 use crate::trade_service::TradeService;
+use crate::{research_client::ResearchClient, research_test_support};
 use okx_api::{HttpSend, HttpTransport, OkxEnvironment, RateBudget};
 use okx_ipc_contracts::{AGENT_REQUEST_SCHEMA_V1, InstrumentTypeFilter};
 use std::sync::Arc;
@@ -28,6 +28,9 @@ impl HttpTransport for ForbiddenNetwork {
 struct Fixture {
     root: PathBuf,
     context: DispatchContext,
+    market: crate::market_bootstrap::MarketBootstrapper,
+    public_ws: okx_market_runtime::PublicWsHandle,
+    legacy_research: Option<ResearchClient>,
     // Keep the actual command receiver alive without starting a network task.
     _coordinator: okx_market_runtime::PublicWsCoordinator,
     network: Arc<ForbiddenNetwork>,
@@ -76,7 +79,6 @@ impl Fixture {
             )
             .unwrap(),
         );
-        let analytics = research_test_client(root.join("research"), market.clone()).unwrap();
         let (coordinator, public_ws) = okx_market_runtime::PublicWsCoordinator::new_with_connector(
             environment,
             reference,
@@ -93,28 +95,56 @@ impl Fixture {
         Self {
             root,
             context: DispatchContext {
-                research: analytics,
-                public_ws,
                 finance: crate::finance_dispatch::FinanceDispatch::ready(accounts, trade),
-                market,
             },
+            market,
+            public_ws,
+            legacy_research: None,
             _coordinator: coordinator,
             network,
             finance_owner,
         }
     }
     async fn request(&self, operation: AgentOperation, account: Option<&str>) -> AgentResponse {
-        let finance_jobs_before = self.finance_owner.sql_timing().observed_jobs;
-        let response = dispatch(
-            &self.context,
-            &AgentRequest {
-                schema: AGENT_REQUEST_SCHEMA_V1.into(),
-                request_id: "query-dispatch-request-001".into(),
-                account: account.map(str::to_owned),
-                operation,
-            },
+        self.route(operation, account, None).await
+    }
+    async fn legacy_request(
+        &self,
+        operation: AgentOperation,
+        account: Option<&str>,
+    ) -> AgentResponse {
+        self.route(
+            operation,
+            account,
+            Some(self.legacy_research.as_ref().unwrap()),
         )
-        .await;
+        .await
+    }
+    fn enable_legacy_research(&mut self) {
+        self.legacy_research = Some(
+            research_test_support::client(self.root.join("research"), self.market.clone()).unwrap(),
+        );
+    }
+    async fn route(
+        &self,
+        operation: AgentOperation,
+        account: Option<&str>,
+        legacy_research: Option<&ResearchClient>,
+    ) -> AgentResponse {
+        let finance_jobs_before = self.finance_owner.sql_timing().observed_jobs;
+        let request = AgentRequest {
+            schema: AGENT_REQUEST_SCHEMA_V1.into(),
+            request_id: "query-dispatch-request-001".into(),
+            account: account.map(str::to_owned),
+            operation,
+        };
+        let response = match legacy_research {
+            Some(client) => {
+                research_test_support::dispatch(&self.public_ws, &self.market, client, &request)
+                    .await
+            }
+            None => dispatch(&self.context, &request).await,
+        };
         assert_eq!(
             self.finance_owner.sql_timing().observed_jobs,
             finance_jobs_before,
@@ -123,7 +153,9 @@ impl Fixture {
         response
     }
     async fn finish(self) {
-        self.context.research.shutdown().await;
+        if let Some(client) = &self.legacy_research {
+            client.shutdown().await;
+        }
         assert_eq!(
             self.network.0.load(Ordering::Relaxed),
             0,
@@ -159,7 +191,79 @@ fn rejection(response: AgentResponse, code: &str) {
 }
 
 #[tokio::test]
-async fn research_without_finance_uses_real_worker_and_cannot_create_financial_authority() {
+async fn engine_rejects_every_research_operation_without_network_or_finance_work() {
+    use okx_ipc_contracts::{analytics::ResearchRequest, trading::DiagnosticsRequest};
+    let fixture = Fixture::new(empty_reference()).await;
+    let operations = [
+        AgentOperation::Market {
+            request: serde_json::from_value(json!({
+                "action":"screen", "instruments":["BTC-USDT"], "fields":["returns"],
+                "timeframe_ms":60_000, "start_ms":0, "end_ms":12_000_000, "limit":1
+            }))
+            .unwrap(),
+        },
+        AgentOperation::MarketCapabilities,
+        AgentOperation::MarketMicrostructure {
+            instrument: "BTC-USDT-SWAP".into(),
+            size_contracts: Some("1".into()),
+        },
+        AgentOperation::Research {
+            request: ResearchRequest::Status {
+                job_id: "a".repeat(64),
+            },
+        },
+        AgentOperation::PortfolioScenario {
+            request: two_position_scenario(),
+        },
+        AgentOperation::FindInstruments {
+            asset: "BTC".into(),
+            settle_currency: Some("USDT".into()),
+            instrument_type: Some(InstrumentTypeFilter::Swap),
+        },
+        AgentOperation::MarketOverview {
+            instrument: "BTC-USDT-SWAP".into(),
+        },
+        AgentOperation::Diagnostics {
+            request: DiagnosticsRequest {
+                view: Some(DiagnosticsView::Research),
+                reference: Some("deployment".into()),
+                account: None,
+                cycle_id: None,
+                limit: None,
+            },
+        },
+        AgentOperation::Diagnostics {
+            request: DiagnosticsRequest {
+                view: Some(DiagnosticsView::Research),
+                reference: Some("a".repeat(64)),
+                account: None,
+                cycle_id: None,
+                limit: None,
+            },
+        },
+    ];
+    for operation in operations {
+        let response = fixture.request(operation.clone(), None).await;
+        assert!(!response.failure.as_ref().unwrap().retryable);
+        rejection(response, "RESEARCH_OWNER_REQUIRED");
+        for finance in [FinanceDispatch::missing(), FinanceDispatch::invalid()] {
+            let request = AgentRequest {
+                schema: AGENT_REQUEST_SCHEMA_V1.into(),
+                request_id: "query-dispatch-offline-001".into(),
+                account: None,
+                operation: operation.clone(),
+            };
+            let response = dispatch(&DispatchContext { finance }, &request).await;
+            rejection(response, "RESEARCH_OWNER_REQUIRED");
+        }
+    }
+    assert!(!fixture.root.join("research").exists());
+    assert!(!fixture.root.join("analytics").exists());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn legacy_research_without_finance_cannot_create_financial_authority() {
     use okx_ipc_contracts::{
         analytics::ResearchRequest,
         trading::{DiagnosticsRequest, DiagnosticsView, TradeRequest},
@@ -199,12 +303,9 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
             .await
             .finish(public_ws.clone(), market.clone())
             .await;
-        let context = DispatchContext {
-            finance,
-            research: research_test_client(root.join("research"), market.clone()).unwrap(),
-            public_ws,
-            market,
-        };
+        let context = DispatchContext { finance };
+        let research =
+            research_test_support::client(root.join("research"), market.clone()).unwrap();
         let request = |operation, account: Option<&str>| AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.into(),
             request_id: "research-only-host-001".into(),
@@ -225,12 +326,18 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
                 None,
             )
         };
-        let snapshot = dispatch(&context, &deployment()).await.result.unwrap();
+        let snapshot =
+            research_test_support::dispatch(&public_ws, &market, &research, &deployment())
+                .await
+                .result
+                .unwrap();
         assert_eq!(snapshot["schema"], "okx.research.deployment/v1");
         assert!(snapshot["research"]["active_pid"].is_null());
         assert!(!root.join("research").exists());
-        let response = dispatch(
-            &context,
+        let response = research_test_support::dispatch(
+            &public_ws,
+            &market,
+            &research,
             &request(
                 AgentOperation::Research {
                     request: ResearchRequest::Capabilities {},
@@ -244,7 +351,11 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
             AgentResponseStatus::Completed,
             "{response:?}"
         );
-        let snapshot = dispatch(&context, &deployment()).await.result.unwrap();
+        let snapshot =
+            research_test_support::dispatch(&public_ws, &market, &research, &deployment())
+                .await
+                .result
+                .unwrap();
         assert_eq!(snapshot["engine_pid"], std::process::id());
         assert!(snapshot["research"]["active_pid"].is_u64());
         let denied = dispatch(
@@ -274,8 +385,10 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
             cycle_id: None,
             limit: None,
         };
-        let response = dispatch(
-            &context,
+        let response = research_test_support::dispatch(
+            &public_ws,
+            &market,
+            &research,
             &request(
                 AgentOperation::Diagnostics {
                     request: diagnostic.clone(),
@@ -289,8 +402,10 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
             response.result.unwrap()["reason_code"],
             "UNKNOWN_NOT_RETAINED"
         );
-        let denied = dispatch(
-            &context,
+        let denied = research_test_support::dispatch(
+            &public_ws,
+            &market,
+            &research,
             &request(
                 AgentOperation::Diagnostics {
                     request: diagnostic,
@@ -301,7 +416,7 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
         .await;
         rejection(denied, "RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE");
         assert_eq!(network.0.load(Ordering::Relaxed), 0);
-        context.research.shutdown().await;
+        research.shutdown().await;
         if let Some(bytes) = before {
             assert_eq!(std::fs::read(&finance_file).unwrap(), bytes);
             assert_eq!(std::fs::read(&catalog).unwrap(), catalog_before.unwrap());
@@ -317,9 +432,10 @@ async fn research_without_finance_uses_real_worker_and_cannot_create_financial_a
 
 #[tokio::test]
 async fn capabilities_and_mailbox_use_public_dispatch_without_external_effects() {
-    let fixture = Fixture::new(empty_reference()).await;
+    let mut fixture = Fixture::new(empty_reference()).await;
+    fixture.enable_legacy_research();
     let capabilities = fixture
-        .request(AgentOperation::MarketCapabilities, None)
+        .legacy_request(AgentOperation::MarketCapabilities, None)
         .await;
     assert_eq!(capabilities.request_id, "query-dispatch-request-001");
     assert_eq!(capabilities.status, AgentResponseStatus::Completed);
@@ -363,21 +479,21 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     let expected_worker_sha256 =
         format!("{:x}", Sha256::digest(std::fs::read(&executable).unwrap()));
     let research_root = fixture.root.join("public-research");
-    fixture.context.research = ResearchClient::new(
+    fixture.legacy_research = Some(ResearchClient::new(
         ResearchClientConfig {
             executable,
             root: research_root.clone(),
             scope: ResearchScope::new("query-dispatch-installation".into()).unwrap(),
         },
         crate::research_dispatch_tests::candle_source(calls.clone()),
-    );
+    ));
     let mut request = crate::research_dispatch_tests::grid("public-dispatch-progress");
     // A decision is scoped to one experiment, so use one instrument at this boundary.
     if let ResearchRequest::Grid { instruments, .. } = &mut request {
         instruments.truncate(1);
     }
     let queued = fixture
-        .request(
+        .legacy_request(
             AgentOperation::Research {
                 request: request.clone(),
             },
@@ -389,7 +505,7 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     let complete = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let response = fixture
-                .request(
+                .legacy_request(
                     AgentOperation::Research {
                         request: ResearchRequest::Status { job_id: id.clone() },
                     },
@@ -421,7 +537,7 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     assert_eq!(complete["candidate_progress"]["completed_candidates"], 64);
     assert_eq!(complete["candidate_progress"]["total_work_units"], 193);
     let result = fixture
-        .request(
+        .legacy_request(
             AgentOperation::Research {
                 request: ResearchRequest::Result {
                     job_id: id.clone(),
@@ -451,7 +567,7 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
         reason: "Await review".into(),
     };
     let recorded = fixture
-        .request(
+        .legacy_request(
             AgentOperation::Research {
                 request: record.clone(),
             },
@@ -467,7 +583,7 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     assert_eq!(decision["trading_authority"], false);
     assert_eq!(
         fixture
-            .request(AgentOperation::Research { request: record }, None)
+            .legacy_request(AgentOperation::Research { request: record }, None)
             .await
             .result
             .unwrap(),
@@ -487,7 +603,7 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     };
     let observed = tokio::time::timeout(
         std::time::Duration::from_millis(500),
-        fixture.request(
+        fixture.legacy_request(
             AgentOperation::Diagnostics {
                 request: request.clone(),
             },
@@ -504,7 +620,7 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     assert_eq!(observed.result.unwrap()["job"]["state"], "completed");
     assert_eq!(catalog.total_changes(), changes_before);
     let refused = fixture
-        .request(
+        .legacy_request(
             AgentOperation::Diagnostics { request },
             Some("another-account"),
         )
@@ -513,13 +629,13 @@ async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero
     catalog.execute_batch("ROLLBACK").unwrap();
     drop(catalog);
     assert_eq!(calls.load(Ordering::Relaxed), calls_before);
-    fixture.context.research.shutdown().await;
+    fixture.legacy_research.as_ref().unwrap().shutdown().await;
     let mut replay_request = crate::research_dispatch_tests::grid("public-dispatch-progress");
     if let ResearchRequest::Grid { instruments, .. } = &mut replay_request {
         instruments.truncate(1);
     }
     let replay = fixture
-        .request(
+        .legacy_request(
             AgentOperation::Research {
                 request: replay_request,
             },
@@ -539,7 +655,7 @@ async fn public_screen_distinguishes_flat_and_two_compositions_through_real_rese
 
     let mut fixture = Fixture::new(empty_reference()).await;
     let reads = Arc::new(AtomicUsize::new(0));
-    fixture.context.research = ResearchClient::new(
+    fixture.legacy_research = Some(ResearchClient::new(
         ResearchClientConfig {
             executable: std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
                 .expect("build Research before running child process contracts")
@@ -548,7 +664,7 @@ async fn public_screen_distinguishes_flat_and_two_compositions_through_real_rese
             scope: ResearchScope::new("query-dispatch-installation".into()).unwrap(),
         },
         crate::research_dispatch_tests::candle_source(reads.clone()),
-    );
+    ));
 
     let flat = json!({"action":"screen", "instruments":["BTC-USDT"], "fields":["returns"],
         "timeframe_ms":60_000, "start_ms":0, "end_ms":12_000_000, "limit":1});
@@ -571,7 +687,7 @@ async fn public_screen_distinguishes_flat_and_two_compositions_through_real_rese
         };
         let completed = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let reply = fixture.request(operation.clone(), None).await;
+                let reply = fixture.legacy_request(operation.clone(), None).await;
                 assert_eq!(reply.status, AgentResponseStatus::Completed, "{reply:?}");
                 let result = reply.result.unwrap();
                 if result["rows"].is_array() {
@@ -586,7 +702,11 @@ async fn public_screen_distinguishes_flat_and_two_compositions_through_real_rese
         })
         .await
         .expect("Research screening did not complete");
-        let replay = fixture.request(operation, None).await.result.unwrap();
+        let replay = fixture
+            .legacy_request(operation, None)
+            .await
+            .result
+            .unwrap();
         for key in [
             "job_id",
             "market_request_fingerprint",
@@ -628,12 +748,13 @@ async fn instrument_search_routes_type_filter_before_public_limit() {
         .map(|i| instrument(format!("A-SWAP-{i:02}"), "SWAP"))
         .collect::<Vec<_>>();
     instruments.extend((0..55).map(|i| instrument(format!("Z-FUTURE-{i:02}"), "FUTURES")));
-    let fixture = Fixture::new(
+    let mut fixture = Fixture::new(
         okx_observation::ReferenceRegistry::from_public("fixture", instruments).unwrap(),
     )
     .await;
+    fixture.enable_legacy_research();
     let response = fixture
-        .request(
+        .legacy_request(
             AgentOperation::FindInstruments {
                 asset: "BTC".into(),
                 settle_currency: Some("USDT".into()),
@@ -654,7 +775,7 @@ async fn instrument_search_routes_type_filter_before_public_limit() {
     }));
     rejection(
         fixture
-            .request(
+            .legacy_request(
                 AgentOperation::FindInstruments {
                     asset: "".into(),
                     settle_currency: None,
@@ -766,10 +887,11 @@ async fn account_summary_checks_account_and_source_at_public_boundary() {
 
 #[tokio::test]
 async fn overview_without_reference_rejects_unavailable_source_instead_of_empty_success() {
-    let fixture = Fixture::new(empty_reference()).await;
+    let mut fixture = Fixture::new(empty_reference()).await;
+    fixture.enable_legacy_research();
     rejection(
         fixture
-            .request(
+            .legacy_request(
                 AgentOperation::MarketOverview {
                     instrument: "BTC-USDT-SWAP".into(),
                 },
@@ -780,7 +902,7 @@ async fn overview_without_reference_rejects_unavailable_source_instead_of_empty_
     );
     rejection(
         fixture
-            .request(
+            .legacy_request(
                 AgentOperation::MarketMicrostructure {
                     instrument: "BTC-USDT-SWAP".into(),
                     size_contracts: None,
@@ -832,11 +954,18 @@ use crate::accounts::tests::read_only_fixture_files as fixture_artifacts;
 
 #[tokio::test]
 async fn portfolio_scenario_public_dispatch_returns_independent_virtual_risk_values() {
-    let fixture = Fixture::new(empty_reference()).await;
-    fixture.context.research.capabilities().await.unwrap();
+    let mut fixture = Fixture::new(empty_reference()).await;
+    fixture.enable_legacy_research();
+    fixture
+        .legacy_research
+        .as_ref()
+        .unwrap()
+        .capabilities()
+        .await
+        .unwrap();
     let before = fixture_artifacts(&fixture.root);
     let response = fixture
-        .request(
+        .legacy_request(
             AgentOperation::PortfolioScenario {
                 request: two_position_scenario(),
             },
@@ -880,8 +1009,15 @@ async fn portfolio_scenario_public_dispatch_returns_independent_virtual_risk_val
 #[tokio::test]
 async fn portfolio_scenario_public_dispatch_rejects_non_psd_and_invalid_parameters() {
     use okx_ipc_contracts::analytics::ScenarioCorrelation;
-    let fixture = Fixture::new(empty_reference()).await;
-    fixture.context.research.capabilities().await.unwrap();
+    let mut fixture = Fixture::new(empty_reference()).await;
+    fixture.enable_legacy_research();
+    fixture
+        .legacy_research
+        .as_ref()
+        .unwrap()
+        .capabilities()
+        .await
+        .unwrap();
     let before = fixture_artifacts(&fixture.root);
     let mut non_psd = two_position_scenario();
     non_psd.positions.push(non_psd.positions[0].clone());
@@ -907,7 +1043,7 @@ async fn portfolio_scenario_public_dispatch_rejects_non_psd_and_invalid_paramete
     assert!(non_psd.valid());
     rejection(
         fixture
-            .request(AgentOperation::PortfolioScenario { request: non_psd }, None)
+            .legacy_request(AgentOperation::PortfolioScenario { request: non_psd }, None)
             .await,
         "CORRELATION_NOT_PSD",
     );
@@ -915,7 +1051,7 @@ async fn portfolio_scenario_public_dispatch_rejects_non_psd_and_invalid_paramete
     invalid.positions[0].price_shock_bps = -10001;
     rejection(
         fixture
-            .request(AgentOperation::PortfolioScenario { request: invalid }, None)
+            .legacy_request(AgentOperation::PortfolioScenario { request: invalid }, None)
             .await,
         "INVALID_COMMAND",
     );
@@ -923,7 +1059,7 @@ async fn portfolio_scenario_public_dispatch_rejects_non_psd_and_invalid_paramete
     invalid.correlations[0].rho = 1.01;
     rejection(
         fixture
-            .request(AgentOperation::PortfolioScenario { request: invalid }, None)
+            .legacy_request(AgentOperation::PortfolioScenario { request: invalid }, None)
             .await,
         "INVALID_COMMAND",
     );

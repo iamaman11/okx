@@ -1,12 +1,7 @@
 import {PUBLIC_TOOLS,validTool} from './execution_tools.js';
 import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,TOOL_CONTRACT_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure,workerReleaseSourceTree} from './shared.js';
 const NORMAL_RESULT_BYTES=12_288;
-// An installed Engine still serves Research while the independent Research
-// bearer is not configured. Once that bearer is configured, Research is a
-// separate failure domain: do not ask the financial Engine to stand in.
-function researchOwnerRoute(env:Env):{target_owner:'research'}|Record<string,never>{
- return env.RESEARCH_RUNTIME_TOKEN_SHA256!==undefined?{target_owner:'research'}:{};
-}
+const RESEARCH_OWNER = {target_owner:'research'} as const;
 // An on-demand, read-only operator catalogue includes all versioned type and
 // provenance descriptors. It is not a normal Research decision packet; keep
 // its own finite bound rather than silently dropping required T01/T15 fields.
@@ -286,31 +281,51 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
           quality:fresh?'fresh':'partial',
           warnings:fresh?[]:['RUNTIME_SESSION_NOT_FRESH']}));
       }
+ if(name==='diagnostics'&&args.action==='explain'&&args.view==='research'&&args.reference==='deployment'){
+   if(args.account!==undefined||args.cycle_id!==undefined||args.limit!==undefined)
+     return jsonRpc(id,toolResult(transportFailure('RESEARCH_OPERATION_FORBIDDEN',false)));
+   const observed=await runtimeFetch(env,'/status?probe=1&owner=research');
+   if(!isObject(observed)||observed.schema!=='okx.direct-transport.status/v1'||
+      observed.owner!=='research'||(observed.connected===true&&observed.runtime_profile!=='research')||
+      typeof observed.connected!=='boolean'||typeof observed.session_fresh!=='boolean'||
+      !['PASS','STALE','OFFLINE'].includes(String(observed.status)))
+     return jsonRpc(id,toolResult({status:'failed',data:null,quality:'not_ready',reason_code:'INVALID_RUNTIME_STATUS'}));
+   return jsonRpc(id,toolResult({status:'partial',quality:'partial',warnings:['CONTROL_EVIDENCE_UNAVAILABLE'],
+     data:{schema:'okx.research.deployment-edge/v1',edge:{worker_version:MCP_SERVER_VERSION,
+       release_source_tree:workerReleaseSourceTree(env),research_transport:{
+         schema:'okx.direct-transport.status/v1',owner:'research',status:stringField(observed,'status')??'OFFLINE',
+         connected:observed.connected,session_fresh:observed.session_fresh,
+         connection_generation:numericField(observed,'connection_generation')??null,
+         agent_reported_pid:numericField(observed,'agent_pid')??null,
+         agent_reported_binary_sha256:stringField(observed,'agent_binary_sha256')??null,
+         agent_reported_incarnation:stringField(observed,'agent_incarnation')??null}},
+       control:{status:'unavailable',reason_code:'CONTROL_EVIDENCE_UNAVAILABLE'}}}));
+ }
  if(name==='market'&&args.action==='instruments'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
-     ...researchOwnerRoute(env),
+     ...RESEARCH_OWNER,
      operation:{type:'find_instruments',asset:args.asset,settle_currency:args.settle_currency??null,instrument_type:null}})));
  }
  if(name==='market'&&args.action==='snapshot'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
-     ...researchOwnerRoute(env),
+     ...RESEARCH_OWNER,
      operation:{type:'market_overview',instrument:args.instrument}})));
  }
  if(name==='market'&&args.action==='microstructure'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
-     ...researchOwnerRoute(env),
+     ...RESEARCH_OWNER,
      operation:{type:'market_microstructure',instrument:args.instrument,
        size_contracts:args.size_contracts??null}})));
  }
  if(name==='market'&&args.action==='capabilities'){
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
-     ...researchOwnerRoute(env),
+     ...RESEARCH_OWNER,
      operation:{type:'market_capabilities'}}),MARKET_CAPABILITIES_RESULT_BYTES));
  }
  if(name==='portfolio'&&args.action==='scenario'){
    const {action:scopedAction,...scenario}=args;
    return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
-      ...researchOwnerRoute(env),
+      ...RESEARCH_OWNER,
       operation:{type:'portfolio_scenario',request:scenario}})));
  }
  const {account,...body}=nativeArgs;
@@ -319,17 +334,9 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
  const nativeRequestId=requestId();
  const researchRoute=nativeName==='research'||nativeName==='market'||
    (nativeName==='diagnostics'&&nativeArgs.view==='research')
-   ?researchOwnerRoute(env):{};
+   ?RESEARCH_OWNER:{};
  const reply=await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:nativeRequestId,
    ...researchRoute,...(typeof account==='string'?{account}:{}),operation});
- if(nativeName==='diagnostics'&&nativeArgs.view==='research'&&nativeArgs.reference==='deployment'&&isObject(reply)){
-   const native=nativeEnvelope(reply);
-   const result=native?.result;
-   if(native?.request_id===nativeRequestId&&native.status==='completed'&&isObject(result)&&result.schema==='okx.research.deployment/v1'){
-     return jsonRpc(id,toolResult({...native,result:{...result,edge:{worker_version:MCP_SERVER_VERSION,
-       release_source_tree:workerReleaseSourceTree(env),engine_response_received:true}}} as Json));
-   }
- }
  return jsonRpc(id,toolResult(reply));
  }catch(error){return jsonRpc(id,toolResult(transportFailure(error instanceof Error?error.message:'transport failure')));}
 }};

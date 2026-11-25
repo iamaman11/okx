@@ -312,9 +312,13 @@ async fn mcp_request(
             .send(),
     )
     .await
-    .expect("MCP HTTP/DO/WSS request timeout")
-    .expect("MCP localhost HTTP request failed");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    .unwrap_or_else(|error| panic!("MCP_HTTP_DEADLINE action={action}: {error}"))
+    .unwrap_or_else(|error| panic!("MCP_HTTP_TRANSPORT action={action}: {error}"));
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "MCP_HTTP_STATUS action={action}"
+    );
     let json = response.text().await.expect("MCP body read failed");
     serde_json::from_str(&json).expect("MCP JSON-RPC reply must decode")
 }
@@ -344,54 +348,7 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     let bootstrap = MarketBootstrapper::new(api);
     let reads = Arc::new(SourceReadWitness::default());
     let research = heavy_research(fixture.root.join("heavy-research"), reads.clone());
-    let boundaries = t10_real_worker_boundary_proof(&research, &reads).await;
-    // Wall clock begins after fixture start, before the first actual source
-    // fetch. Cargo build and MCP host startup are outside this interval.
-    let phase_started = std::time::Instant::now();
-    let first = research.research(heavy_grid("heavy-one")).await.unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let second = research.research(heavy_grid("heavy-two")).await.unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    tokio::time::timeout(Duration::from_secs(90), async {
-        loop {
-            let a = state(&research, &first).await;
-            let b = state(&research, &second).await;
-            assert!(
-                !matches!(
-                    a["state"].as_str(),
-                    Some("failed" | "completed" | "cancelled")
-                ),
-                "first job stopped before CPU boundary: {a}"
-            );
-            assert!(
-                !matches!(
-                    b["state"].as_str(),
-                    Some("failed" | "completed" | "cancelled")
-                ),
-                "second job stopped before CPU boundary: {b}"
-            );
-            if a["state"] == "running"
-                && b["state"] == "running"
-                && (a["candidate_progress"]["completed_work_units"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    > 0
-                    || b["candidate_progress"]["completed_work_units"]
-                        .as_u64()
-                        .unwrap_or(0)
-                        > 0)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("real child did not enter grid evaluation");
+    let boundary_evidence = t10_real_worker_boundary_proof(&research, &reads).await;
     fixture.trade = Arc::new(TradeService::new(
         fixture.registry.clone(),
         public.clone(),
@@ -400,15 +357,12 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     fixture
         .trade
         .set_live_source(okx_market_runtime::live_source::LiveCandleSource::new(
-            bootstrap.clone(),
+            bootstrap,
         ))
         .await;
     let mut ctx = EngineContext {
         dispatch: DispatchContext {
             finance: FinanceDispatch::ready(fixture.registry.clone(), fixture.trade.clone()),
-            research: research.clone(),
-            public_ws: public,
-            market: bootstrap,
         },
         public: market,
         transport: None,
@@ -430,10 +384,13 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     let authority = fixture.authority.clone();
     let child = research.clone();
     let source_reads = reads.clone();
-    let boundary_evidence = boundaries.clone();
     let (evidence_tx, evidence_rx) = tokio::sync::oneshot::channel();
+    let (compute_tx, compute_rx) = tokio::sync::oneshot::channel();
     let until = async move {
-        let mcp_client = reqwest::Client::new();
+        let mcp_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("isolated loopback MCP client");
         if let Some(url) = &http_url {
             tokio::time::timeout(Duration::from_secs(20), async {
                 loop {
@@ -449,6 +406,20 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
             .await
             .expect("genuine loopback HTTP->DO->Agent WSS must become fresh");
         }
+        // A transport probe establishes setup only. The measured workload
+        // begins before the first source fetch. Every timed Finance group
+        // still runs while the grids are active, or after deliberate loss.
+        let phase_started = std::time::Instant::now();
+        let first = child.research(heavy_grid("heavy-one")).await.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let second = child.research(heavy_grid("heavy-two")).await.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        wait_for_grid_compute(&child, &first, &second).await;
+        compute_tx.send(()).expect("compute phase receiver dropped");
         if disconnect_before_opening {
             child.shutdown().await;
             assert!(
@@ -555,7 +526,11 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
                     "MCP schema must accept Finance read"
                 );
                 let data = &reply["result"]["structuredContent"]["data"];
-                assert_eq!(data["schema"], "okx.finance-diagnostics/v1");
+                assert_eq!(
+                    data["schema"], "okx.finance-diagnostics/v1",
+                    "MCP_FINANCE_DIAGNOSTIC action=explain reason={}",
+                    reply["result"]["structuredContent"]["reason_code"]
+                );
                 assert_eq!(data["account"], account);
                 assert_eq!(
                     data["central_budget"]["state"], "NOT_EVALUATED",
@@ -612,7 +587,13 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
             },
         })
     };
-    let outcome = tokio::time::timeout(Duration::from_secs(40), run_engine_until(ctx, until))
+    let engine = run_engine_until(ctx, until);
+    tokio::pin!(engine);
+    tokio::select! {
+        ready = compute_rx => ready.expect("compute phase did not start"),
+        result = &mut engine => panic!("Engine exited before the compute phase: {result:?}"),
+    }
+    let outcome = tokio::time::timeout(Duration::from_secs(40), &mut engine)
         .await
         .expect("Engine STOP deadline")
         .unwrap();
@@ -647,6 +628,36 @@ async fn engine_maintenance_and_stop_remain_independent_of_heavy_research_and_di
             "exchange_trade_post":false,
         })
     );
+}
+
+async fn wait_for_grid_compute(child: &ResearchClient, first: &str, second: &str) {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let a = state(child, first).await;
+            let b = state(child, second).await;
+            for (label, job) in [("first", &a), ("second", &b)] {
+                assert!(
+                    !matches!(
+                        job["state"].as_str(),
+                        Some("failed" | "completed" | "cancelled")
+                    ),
+                    "{label} job stopped before CPU boundary: {job}"
+                );
+            }
+            let began = [&a, &b].iter().any(|job| {
+                job["candidate_progress"]["completed_work_units"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    > 0
+            });
+            if a["state"] == "running" && b["state"] == "running" && began {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("real child did not enter grid evaluation");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

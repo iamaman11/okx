@@ -12,7 +12,6 @@ struct Fixture {
     native: native::NativeFixture,
     ctx: crate::query::DispatchContext,
     feed: Arc<recorded_support::RecordedAccountHttp>,
-    _coordinator: okx_market_runtime::PublicWsCoordinator,
     owner: Arc<AccountResources>,
 }
 
@@ -21,36 +20,16 @@ impl Fixture {
         let native = native::fixture().await;
         let owner = native._account.clone();
         let feed = native.feed.clone();
-        let environment = okx_api::OkxEnvironment::new(okx_api::Region::Global, false);
-        let budget = okx_api::RateBudget::new();
-        let (coordinator, public_ws) = okx_market_runtime::PublicWsCoordinator::new_with_connector(
-            environment,
-            okx_observation::ReferenceRegistry::from_public("fixture", vec![]).unwrap(),
-            budget.clone(),
-            Arc::new(recorded_support::OfflineSocket),
-        );
-        let market = crate::market_bootstrap::MarketBootstrapper::new(
-            okx_api::OkxPublicClient::with_http_transport(environment, budget, feed.clone())
-                .unwrap(),
-        );
         let ctx = crate::query::DispatchContext {
-            research: crate::research_test_support::client(
-                native.root.join("research"),
-                market.clone(),
-            )
-            .unwrap(),
-            public_ws,
             finance: crate::finance_dispatch::FinanceDispatch::ready(
                 native.registry.clone(),
                 native.trade.clone(),
             ),
-            market,
         };
         Self {
             native,
             ctx,
             feed,
-            _coordinator: coordinator,
             owner,
         }
     }
@@ -97,12 +76,10 @@ impl Fixture {
             ctx,
             owner,
             feed,
-            _coordinator,
         } = self;
         drop(ctx);
         drop(owner);
         drop(feed);
-        drop(_coordinator);
         native.finish().await;
     }
 }

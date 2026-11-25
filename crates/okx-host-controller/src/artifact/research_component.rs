@@ -1,4 +1,5 @@
 use super::*;
+use crate::provenance::InstalledAgentProvenanceStore;
 use std::{path::PathBuf, time::Instant};
 
 // A composition has its own accepted source identity. Each component records

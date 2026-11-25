@@ -14,16 +14,16 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 | Financial persistence and RiskBook | Existing `UnifiedFinanceHandle`, one financial SQLite |
 | Live closed candles | `okx-market-runtime::live_source::LiveCandleSource` |
 | Public market HTTP and shared rate budget | `okx-market-runtime::market_bootstrap::MarketBootstrapper` |
-| Legacy Engine-hosted Research child, request correlation, activation | `okx-trading-engine::research_client::ResearchClient` |
-| Framing and typed public-source requests | `okx-ipc-contracts::research_ipc` |
+| Engine delivery and financial observations | `okx-trading-engine::cloudflare_transport` |
+| Research delivery and typed public-source requests | `okx-research-service::edge_runtime` |
 | Research command handler | `okx-research-service::analytics::AnalyticsService` |
 | Research jobs, identity, cancellation, root lease | Worker `analytics::jobs::Jobs` |
 | Pure calculations | Existing `okx-analysis` and `okx-research` libraries |
 | Verified component staging | CONTROL `artifact::research_component` |
-| Optional standalone Research process, Windows Job and desired state | CONTROL `research_supervisor::ResearchSupervisor` |
+| Standalone Research process, Windows Job and desired state | CONTROL `research_supervisor::ResearchSupervisor` |
 | Standalone Research Cloudflare credential | Research `edge_credentials`, separate Windows Credential Manager target |
 
-## Independent Edge lane (prepared, not yet activated)
+## Independent Edge lane
 
 The Research Service also has a **Research-owned** outbound WebSocket adapter
 (`edge_runtime.rs`) behind the explicit `--edge-runtime` mode. It connects
@@ -33,22 +33,21 @@ It does not import Engine's Cloudflare transport, private account credentials,
 financial storage or exchange order-sending capability. This mode uses the
 already implemented `IndependentOkxPublicSource` rather than Engine's public
 market callback, and bounds frame size and concurrent work. The existing
-Engine-hosted IPC mode remains unchanged.
+legacy IPC runners remain available to the acceptance tests while their
+independent-process witnesses are migrated.
 
-Supported direct operations: Research calculations/jobs, explicit-instrument
-Market requests, MarketCapabilities, PortfolioScenario, and read-only
-Research job diagnostics. FindInstruments, MarketOverview and
-MarketMicrostructure depend on public cache/reference behavior still owned by
-Engine; the independent endpoint currently returns a typed unavailable error
-for these, **not** fabricated data or a financial Engine fallback. A Research
-deployment diagnostic also returns `RESEARCH_DEPLOYMENT_NOT_SUPERVISED` until
-CONTROL can attest the standalone process instead of reusing the old Engine
-child's deployment snapshot. A Research socket refuses trading, account
+Research owns market queries with explicit instruments or a public universe,
+market capabilities, instrument search, overview, microstructure, portfolio
+scenarios, and Research job commands and diagnostics. Edge routes these
+operations to Research even if its socket is offline. A Research deployment
+diagnostic reports the Edge transport observation. CONTROL's
+`StatusResearch` remains the source for locally verified image and Job state.
+A Research socket refuses trading, account
 selection, strategy mutation, risk commands
 and policy snapshot frames. Edge's internal `target_owner` routing marker is
 removed before constructing the strict native Rust request.
 
-The standalone mode now has an **opt-in CONTROL code path**:
+The standalone mode uses the existing CONTROL:
 
 - `StartResearch` requires the exact SHA-256 of the installed, reverified
   content-addressed worker. CONTROL starts it in a **separate Windows Job**,
@@ -57,13 +56,13 @@ The standalone mode now has an **opt-in CONTROL code path**:
   is absent or invalid; it does not race its own memory Job against CONTROL.
   Inside that process the Worker installs and reads back a nested Windows Job
   with a **4 GiB memory limit and 50% CPU hard cap**. Both are fail-closed:
-  inability to enforce either limit prevents Research startup. During this
-  transition CONTROL admits standalone Research only with Engine stopped and
-  rejects an Engine start while standalone Research is desired or owned.
-  Conflicting desired states after restart cannot launch either process.
-  Simultaneous Engine and Research operation follows retirement of the Engine-owned
-  Research child. Windows environments with DFSS need physical verification of
-  the CPU rate control.
+  inability to enforce either limit prevents Research startup. Each
+  application has its own desired state and can run concurrently. Before
+  starting Engine, CONTROL verifies its installed SHA-256 and its local
+  `runtime-contract` response. DeployAgent checks this contract on the staged
+  image before stopping or replacing the current Engine. Older Engine images
+  that can launch a Research child are refused. Windows environments with
+  DFSS need physical verification of the CPU rate control.
 - `StopResearch` requires the active worker SHA and matching process generation;
   status/desired state live in CONTROL's own `research-state.json` rather than
   Engine's `engine-state.pb`. A new installation uses
@@ -100,14 +99,11 @@ The standalone mode now has an **opt-in CONTROL code path**:
   response with only Research configured. The local harness supplies a test
   MCP scope. The deployed OAuth and installed Windows checks remain required.
 
-This opt-in code path is subject to Windows CI and subsequent physical
-acceptance, **not** an assertion that the installed product has changed mode.
-Do not enable Edge's `RESEARCH_RUNTIME_TOKEN_SHA256` merely because the
-executable can connect: a configured but offline Research owner fails closed.
+The deployed Edge, CONTROL, and Engine must be switched using an accepted
+candidate. An offline Research owner returns its own unavailable status.
 Independent Edge token registration, authenticated-session readback, clean
 restart/reboot, job compatibility, independent update and rollback evidence
-are still required before cutover. Until that accepted cutover, the installed
-product continues to use the Engine child and its Engine-owned source.
+are required for installed acceptance.
 Separate Credential Manager targets and distinct crates are a code-level
 least-authority measure, **not** an OS security boundary when both processes
 run as the same Windows user.

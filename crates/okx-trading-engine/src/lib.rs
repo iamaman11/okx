@@ -24,7 +24,8 @@ pub mod once;
 mod portfolio;
 pub mod query;
 pub mod reference_bootstrap;
-pub mod research_client;
+#[cfg(test)]
+mod research_client;
 #[cfg(test)]
 mod research_dispatch_tests;
 #[cfg(test)]
@@ -73,9 +74,6 @@ pub enum AgentError {
 
     #[error("public observation runtime task failed: {0}")]
     PublicRuntimeTask(String),
-
-    #[error("research session runtime task failed: {0}")]
-    ResearchSessionTask(String),
 
     #[error("native financial evidence capture task failed: {0}")]
     FinancialCaptureTask(String),

@@ -39,7 +39,7 @@ function credentialFingerprint(value: unknown): string | null {
   return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
 }
 
-type RuntimeOwner = "engine" | "research" | "legacy_research";
+type RuntimeOwner = "engine" | "research";
 type ReadWaiter = {
   resolve: (admitted: boolean) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -62,9 +62,6 @@ function socketOwner(attachment: SocketAttachment | null): RuntimeOwner | null {
   if (attachment.sessionMode === "research_only") {
     if (attachment.runtimeProfile === "research" && attachment.credentialOwner === "research")
       return "research";
-    if (attachment.runtimeProfile === "engine" &&
-        (attachment.credentialOwner === "engine" || attachment.credentialOwner === undefined))
-      return "legacy_research";
     return null;
   }
   if (attachment.runtimeProfile === "engine" &&
@@ -77,8 +74,6 @@ export class RuntimeSession {
   private state: any;
   private env: Env;
   private pending = new Map<string, Pending>();
-  // The old Engine-owned Research path retains Engine's admission policy
-  // during cutover. Standalone Research cannot consume an Engine slot.
   private admissions = { engine: new OwnerAdmission(), research: new OwnerAdmission() };
 
   constructor(state: any, env: Env) {
@@ -283,7 +278,7 @@ export class RuntimeSession {
       }
       if (frame.type === "hello_research") {
         const fields = ["agent_binary_sha256","agent_incarnation","agent_pid","connection_id","contract","host_scope","runtime_id","runtime_profile","schema","type"];
-        if (Object.keys(frame).sort().join(",") !== fields.sort().join(",") || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id) || typeof frame.host_scope !== "string" || !/^[0-9a-f]{64}$/.test(frame.host_scope) || frame.contract !== "okx.product/v1" || !["engine","research"].includes(runtimeProfile) || (attachment.credentialOwner??"engine") !== runtimeProfile) {
+        if (Object.keys(frame).sort().join(",") !== fields.sort().join(",") || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id) || typeof frame.host_scope !== "string" || !/^[0-9a-f]{64}$/.test(frame.host_scope) || frame.contract !== "okx.product/v1" || runtimeProfile !== "research" || attachment.credentialOwner !== "research") {
           ws.close(1008, "invalid research hello"); return;
         }
         attachment.sessionMode = "research_only";
@@ -309,7 +304,6 @@ export class RuntimeSession {
       // Exactly one live generation per owner, never a global socket owner.
       // Research reconnects must not interrupt financial protection, and
       // Engine reconnects must not invalidate Research's independent lane.
-      // An Engine-credential legacy Research socket is never the new Research owner.
       for (const existing of this.state.getWebSockets("runtime") as any[]) {
         if (existing === ws) continue;
         const prior = existing.deserializeAttachment() as SocketAttachment | null;
@@ -328,7 +322,7 @@ export class RuntimeSession {
     }
 
     if (
-      !attachment.hello ||
+      !socketOwner(attachment) ||
       frame.session_id !== attachment.sessionId ||
       frame.connection_generation !== attachment.generation
     ) {
@@ -464,19 +458,11 @@ export class RuntimeSession {
     }
     if (request.target_owner !== undefined && request.target_owner !== "research" &&
         request.target_owner !== "engine") return transportFailure("INVALID_OWNER", false);
-    // Configuring a distinct Research bearer is the cutover boundary. From
-    // that point unmarked Research operations must never silently go to the
-    // financial Engine or an Engine-credential legacy research socket, even
-    // if the dedicated Research runtime is currently offline. Before the
-    // cutover, preserve installed unmarked Engine/legacy compatibility.
-    const researchConfigured = this.env.RESEARCH_RUNTIME_TOKEN_SHA256 !== undefined;
-    if (researchConfigured && request.target_owner === "engine" && researchOwnedOperation(request))
+    // Ownership follows the operation, independently of credential configuration.
+    if (request.target_owner === "engine" && researchOwnedOperation(request))
       return transportFailure("RESEARCH_OWNER_REQUIRED", false);
-    const owner: RuntimeOwner = request.target_owner === "research" ||
-      (request.target_owner === undefined && researchConfigured && researchOwnedOperation(request))
-      ? "research" :
-      request.target_owner === undefined && !researchConfigured && !this.activeSocket("engine") &&
-      researchOnlyPermits(request) && this.activeSocket("legacy_research") ? "legacy_research" : "engine";
+    const owner: RuntimeOwner = request.target_owner === "research" || researchOwnedOperation(request)
+      ? "research" : "engine";
     if (owner !== "engine" && !researchOnlyPermits(request))
       return transportFailure("RESEARCH_OPERATION_FORBIDDEN", false);
     const active = this.activeSocket(owner);

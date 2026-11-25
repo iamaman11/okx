@@ -597,25 +597,6 @@ impl ResearchSupervisor {
         self.terminate_owned()
     }
 
-    pub(crate) fn desired_running(&self) -> bool {
-        self.desired.desired_running
-    }
-
-    pub(crate) fn require_stopped_for_legacy_engine(&mut self) -> HostControlResult<()> {
-        if self.desired_running() || self.running()? || self.job.is_some() {
-            return Err(HostControlError::ResearchTransitionRequiresExclusiveProcess);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn mark_transition_blocked(&mut self) {
-        self.last_error = Some(
-            HostControlError::ResearchTransitionRequiresExclusiveProcess
-                .code()
-                .into(),
-        );
-    }
-
     pub fn reconcile(&mut self) -> HostControlResult<()> {
         let running = self.running()?;
         if !self.desired.desired_running {

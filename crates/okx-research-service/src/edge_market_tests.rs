@@ -182,6 +182,28 @@ async fn public_market_operations_work_from_research_owner_and_cursor_reads_pers
         "MARKET_CURSOR_REQUEST_MISMATCH"
     );
     assert_eq!(venue.0.load(Ordering::Relaxed), requests_before);
+
+    let diagnostic = |reference: Value| {
+        json!({"type":"diagnostics","request":{
+            "reference":reference,"view":"research","account":null,"cycle_id":null,"limit":null
+        }})
+    };
+    let observed = request(&reopened, &public, diagnostic(page["job_id"].clone()))
+        .await
+        .unwrap();
+    assert_eq!(observed["owner"], "research_job_catalog");
+    assert_eq!(observed["state"], "OBSERVED");
+    assert_eq!(observed["job"]["state"], "completed");
+    assert_eq!(observed["read_only"], true);
+    let response = response_for(
+        "fixture-market-request",
+        request(&reopened, &public, diagnostic(json!("deployment"))).await,
+    );
+    assert_eq!(response.quality, DataQuality::NotReady);
+    assert_eq!(
+        response.failure.unwrap().code,
+        "RESEARCH_DEPLOYMENT_NOT_SUPERVISED"
+    );
 }
 
 #[tokio::test]

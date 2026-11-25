@@ -106,10 +106,8 @@ pub enum HostControlError {
     #[error("independent Research process generation overflow")]
     ResearchGenerationExhausted,
 
-    #[error(
-        "legacy Engine and standalone Research require exclusive process ownership during cutover"
-    )]
-    ResearchTransitionRequiresExclusiveProcess,
+    #[error("the verified Engine image must expose the independent Engine runtime contract")]
+    IndependentEngineRequired,
 
     #[error("existing Research catalog requires its expected scope fingerprint")]
     ResearchCatalogScopeRequired,
@@ -212,9 +210,7 @@ impl HostControlError {
             Self::ResearchStateCorrupt => "RESEARCH_STATE_CORRUPT",
             Self::ResearchIdentityMismatch => "RESEARCH_IDENTITY_MISMATCH",
             Self::ResearchGenerationExhausted => "RESEARCH_GENERATION_EXHAUSTED",
-            Self::ResearchTransitionRequiresExclusiveProcess => {
-                "RESEARCH_TRANSITION_REQUIRES_EXCLUSIVE_PROCESS"
-            }
+            Self::IndependentEngineRequired => "INDEPENDENT_ENGINE_REQUIRED",
             Self::ResearchCatalogScopeRequired => "RESEARCH_CATALOG_SCOPE_REQUIRED",
             Self::ResearchCatalogMissing => "RESEARCH_CATALOG_MISSING",
             Self::ResearchCatalogConflict => "RESEARCH_CATALOG_CONFLICT",

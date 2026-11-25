@@ -170,31 +170,6 @@ impl ResearchClient {
             after_drain_barrier: None,
         }
     }
-    /// Production factory. Pointer changes are checked on demand; images are hashed before launch.
-    pub fn installed(
-        runtime_root: PathBuf,
-        research_root: PathBuf,
-        scope: ResearchScope,
-        bootstrap: crate::market_bootstrap::MarketBootstrapper,
-    ) -> Self {
-        let source: SourceHandler = Arc::new(move |request| {
-            let bootstrap = bootstrap.clone();
-            Box::pin(async move { bootstrap.research_source(request).await })
-        });
-        Self {
-            config: ResearchClientConfig {
-                executable: PathBuf::new(),
-                root: research_root,
-                scope,
-            },
-            installation_runtime: Some(runtime_root),
-            source,
-            connection: Arc::new(Mutex::new(None)),
-            deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
-            #[cfg(test)]
-            after_drain_barrier: None,
-        }
-    }
     async fn resolve_installed(&self, root: PathBuf) -> Result<PathBuf, String> {
         let resolved = tokio::task::spawn_blocking(move || installed::resolve(&root))
             .await

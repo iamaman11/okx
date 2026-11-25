@@ -76,7 +76,7 @@ console.log('runtime_native_owner_and_wss_separation PASS');
 
 // The bearer-authenticated scope is a namespace claim, not key attestation.
 {
- let stored:any={runtimeId:"windows-primary",sessionId:"session_research_0123",generation:9,hello:false,connectedAtMs:Date.now()};
+ let stored:any={runtimeId:"windows-primary",sessionId:"session_research_0123",generation:9,hello:false,credentialOwner:"research",connectedAtMs:Date.now()};
  let closed=""; const sent:any[]=[]; let instance:any;
  const ws:any={deserializeAttachment:()=>({...stored}),serializeAttachment:(v:any)=>{stored=v;},close:(_:number,why:string)=>{closed=why;},send:(text:string)=>{
    const frame=JSON.parse(text);sent.push(frame);
@@ -84,7 +84,7 @@ console.log('runtime_native_owner_and_wss_separation PASS');
    if(frame.type==="request")queueMicrotask(()=>{instance.resolvePending(`ack:${frame.request.request_id}`,9,{});instance.resolvePending(`response:${frame.request.request_id}`,9,{status:"completed"});});
  }};
  instance=new RuntimeSession({storage:{get:async()=>undefined},getWebSockets:()=>[ws]} as any,{} as any);
- const hello:any={type:"hello_research",schema:FRAME_SCHEMA,runtime_id:"windows-primary",connection_id:"native_0123456789abcdef0123456789abcdef",runtime_profile:"engine",host_scope:"a".repeat(64),contract:"okx.product/v1",agent_pid:12,agent_binary_sha256:"b".repeat(64),agent_incarnation:"ctl_"+"c".repeat(32)};
+ const hello:any={type:"hello_research",schema:FRAME_SCHEMA,runtime_id:"windows-primary",connection_id:"native_0123456789abcdef0123456789abcdef",runtime_profile:"research",host_scope:"a".repeat(64),contract:"okx.product/v1",agent_pid:12,agent_binary_sha256:"b".repeat(64),agent_incarnation:"ctl_"+"c".repeat(32)};
  await instance.webSocketMessage(ws,JSON.stringify({...hello,installation_id:"fake_install"}));
  check(closed==="invalid research hello"&&!stored.hello,"mixed finance claim rejected");
  closed="";await instance.webSocketMessage(ws,JSON.stringify({...hello,host_scope:"BAD"}));
@@ -209,8 +209,8 @@ console.log('runtime_native_owner_and_wss_separation PASS');
    "Engine bearer research_only never masquerades as independent Research");
  sockets=[legacyResearch];
  const legacyRequest={schema:"okx.agent.request/v1",request_id:"legacy_research_21",operation:{type:"research",request:{action:"capabilities"}}};
- check((await owner.dispatch(legacyRequest)).owner==="legacy",
-   "unmarked legacy research_only remains available during cutover without finance permission");
+ check((await owner.dispatch(legacyRequest)).reason==="RESEARCH_RUNTIME_OFFLINE",
+   "unmarked Research never falls back to legacy Engine sessions");
  const nextIndependent=mk("research",{runtimeId:"windows-primary",sessionId:"research_22",generation:22,hello:false,credentialOwner:"research",connectedAtMs:Date.now()});
  sockets.push(nextIndependent);
  await owner.webSocketMessage(nextIndependent,JSON.stringify(hello));
@@ -218,9 +218,7 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  check((await owner.dispatch(req("direct_research_7","research",{type:"research",request:{action:"capabilities"}}))).owner==="research",
    "explicit Research route chooses separately credentialed Research, not legacy");
 
- // Configuring a distinct Research credential turns owner separation on for
- // every unmarked internal dispatch as well as the public MCP tool facade.
- ownerEnv.RESEARCH_RUNTIME_TOKEN_SHA256="f".repeat(64);
+ // Separation holds even with no Research credential configured.
  sockets=[financeWs,legacyResearch];
  const unmarked=(id:string,operation:any,account?:string)=>({schema:"okx.agent.request/v1",request_id:id,
    ...(account?{account}:{}),operation});

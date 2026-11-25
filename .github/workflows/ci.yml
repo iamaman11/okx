@@ -678,7 +678,8 @@ jobs:
             'research_control_root_is_independent_and_start_requires_verified_installation',
             'corrupted_and_hash_mismatched_research_image_never_launch',
             'research_state_is_strict_and_independent_of_engine_state',
-            'control_rejects_overlapping_legacy_engine_and_standalone_research',
+            'control_reconciles_research_when_engine_image_is_incompatible',
+            'independent_engine_runtime_receipt_is_strict',
             'typed_research_rollback_requires_two_distinct_exact_hashes',
             'standalone_research_lifecycle_requires_exact_image_and_process_generation',
             'standalone_research_status_is_typed_and_does_not_claim_edge_online',
@@ -1092,7 +1093,8 @@ jobs:
               'research_control_root_is_independent_and_start_requires_verified_installation',
               'corrupted_and_hash_mismatched_research_image_never_launch',
               'research_state_is_strict_and_independent_of_engine_state',
-              'control_rejects_overlapping_legacy_engine_and_standalone_research',
+              'control_reconciles_research_when_engine_image_is_incompatible',
+              'independent_engine_runtime_receipt_is_strict',
               'typed_research_rollback_requires_two_distinct_exact_hashes',
               'standalone_research_lifecycle_requires_exact_image_and_process_generation',
               'standalone_research_status_is_typed_and_does_not_claim_edge_online',
@@ -1518,6 +1520,10 @@ jobs:
           cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($name in $names) { Copy-Item (Join-Path 'target\release' $name) (Join-Path $dist $name) }
+          $engineContract = & (Join-Path $dist 'okx-agent.exe') runtime-contract
+          if ($LASTEXITCODE -ne 0 -or ($engineContract -join "`n") -cne '{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false}') {
+            throw 'PACKAGED_ENGINE_RUNTIME_CONTRACT_INVALID'
+          }
           $freshNames = $names
           foreach ($name in $freshNames) {
             $path = Join-Path $dist $name

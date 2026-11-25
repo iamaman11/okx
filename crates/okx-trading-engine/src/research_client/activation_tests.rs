@@ -178,7 +178,9 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
     release.notify_waiters();
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            client.capabilities().await.unwrap();
+            // The handoff includes verification, shutdown, reopen and Hello.
+            // Bound those steps separately from a command on the ready child.
+            client.connect().await.unwrap();
             if client.deployment_status().active.as_deref() == Some(v2.as_str()) {
                 break;
             }
@@ -187,6 +189,7 @@ async fn installed_worker_drains_and_replays_across_actual_child_handoff() {
     })
     .await
     .expect("worker handoff");
+    client.capabilities().await.unwrap();
     let second_session = client
         .connection
         .lock()
@@ -290,7 +293,7 @@ async fn changed_pointer_after_drain_recovers_verified_previous_child() {
     pointer(&runtime, &update);
     let switching = tokio::spawn({
         let client = client.clone();
-        async move { client.capabilities().await }
+        async move { client.connect().await }
     });
     tokio::time::timeout(Duration::from_secs(10), reached.notified())
         .await
@@ -302,6 +305,7 @@ async fn changed_pointer_after_drain_recovers_verified_previous_child() {
         .expect("verified previous image restarted")
         .unwrap()
         .unwrap();
+    client.capabilities().await.unwrap();
 
     let recovered = client.deployment_status();
     assert_eq!(recovered.active.as_deref(), Some(original.as_str()));

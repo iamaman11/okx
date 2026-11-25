@@ -220,6 +220,7 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(build, /shared-key: trading-engine-tests-windows/);
   assert.match(build, /cache-on-failure: false/);
   assert.match(build, /cargo build --locked --release/);
+  assert.match(build, /PACKAGED_ENGINE_RUNTIME_CONTRACT_INVALID/);
   assert.match(build, /name: okx-windows-bundle-\$\{\{ github.event.pull_request.head.sha \}\}/);
   assert.match(build, /if: github.event_name == 'pull_request'\n        uses: actions\/upload-artifact/);
   assert.match(build, /source_head_sha = \$sourceHead/);
