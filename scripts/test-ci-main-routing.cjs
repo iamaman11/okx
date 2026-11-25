@@ -394,25 +394,63 @@ function validate(yaml, fileNames) {
   assert.match(researchPublish, /test "sha256:\$digest" = '\$\{\{ steps.select.outputs.digest \}\}'/);
   assert.match(researchPublish, /verify_research_component_release\.py "\$zip" "\$digest"/);
   assert.match(researchPublish, /tag="research-component-\$ACCEPTED_MAIN"/);
-  assert.match(researchPublish, /if ! gh release create "\$tag" --draft/,
+  assert.match(researchPublish, /https:\/\/api\.github\.com\/repos\/\$GITHUB_REPOSITORY\/git\/ref\/tags\/\$tag/);
+  assert.match(researchPublish, /object="\$\(gh api "\/repos\/\$GITHUB_REPOSITORY\/git\/tags\/\$sha"\)"/,
+    'ANNOTATED_TAGS_MUST_BE_PEELED_TO_COMMIT');
+  assert.match(researchPublish, /test "\$sha" = "\$ACCEPTED_MAIN"/);
+  assert.match(researchPublish, /verify_tag_target optional/);
+  assert.match(researchPublish, /verify_tag_target required/);
+  assert.match(researchPublish, /RESEARCH_TAG_REF_WRONG_COMMIT/);
+  assert.match(researchPublish, /RESEARCH_PUBLISHED_TAG_REF_MISSING/);
+  assert.match(researchPublish, /gh api --paginate "\/repos\/\$GITHUB_REPOSITORY\/releases\?per_page=100" \|/);
+  assert.match(researchPublish, /jq -sc --arg tag "\$tag"/,
+    'JQ_SLURP_MUST_SUPPORT_OLDER_GH_API_CLIENTS');
+  assert.match(researchPublish, /if \(\$matches \| length\) > 1 then error\("RESEARCH_RELEASE_TAG_COLLISION"\)/,
+    'DUPLICATE_DRAFT_TAG_MUST_FAIL_CLOSED');
+  assert.match(researchPublish, /if ! gh api --method POST "\/repos\/\$GITHUB_REPOSITORY\/releases"/);
+  assert.match(researchPublish, /-F draft=true -F prerelease=false/,
     'RESEARCH_RELEASE_ASSETS_MUST_BE_VERIFIED_BEFORE_PUBLISHING');
   assert.match(researchPublish, /RESEARCH_DRAFT_CREATE_AMBIGUOUS_VERIFY_ORIGIN/);
+  assert.match(researchPublish, /RESEARCH_DRAFT_ORIGIN_NOT_FOUND/);
+  assert.match(researchPublish, /\[\[ "\$release_id" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/);
+  assert.match(researchPublish, /gh api "\/repos\/\$GITHUB_REPOSITORY\/releases\/\$release_id"/,
+    'UNPUBLISHED_DRAFT_MUST_BE_READ_BY_RELEASE_ID');
+  assert.match(researchPublish, /\.id == \$id and \.tag_name == \$tag and \.target_commitish == \$main/);
   assert.match(researchPublish, /if jq -e '\.draft == true' <<<"\$release"/);
-  assert.match(researchPublish, /gh release upload "\$tag" "\$RUNNER_TEMP\/\$name"/);
+  assert.equal((researchPublish.match(/-H "Authorization: Bearer \$GH_TOKEN"/g) || []).length, 2,
+    'GITHUB_TOKEN_REQUIRED_FOR_TAG_REF_AND_ASSET_UPLOAD');
+  assert.match(researchPublish, /--data-binary "@\$RUNNER_TEMP\/\$name"/);
+  assert.match(researchPublish, /https:\/\/uploads\.github\.com\/repos\/\$GITHUB_REPOSITORY\/releases\/\$release_id\/assets\?name=\$name/,
+    'UNPUBLISHED_DRAFT_ASSETS_MUST_UPLOAD_BY_RELEASE_ID');
   assert.match(researchPublish, /test "\$present" = "\$expected"/,
     'RESEARCH_DUPLICATE_UPLOAD_MUST_PROVE_EXACT_EXISTING_SHA');
   assert.match(researchPublish, /RESEARCH_ASSET_UPLOAD_AMBIGUOUS_VERIFY_SHA:/);
-  assert.match(researchPublish, /if ! gh release edit "\$tag" --draft=false/);
+  assert.match(researchPublish, /if ! gh api --method PATCH "\/repos\/\$GITHUB_REPOSITORY\/releases\/\$release_id"/);
+  assert.match(researchPublish, /-F draft=false > "\$RUNNER_TEMP\/research-release-publish\.json"/);
   assert.match(researchPublish, /RESEARCH_DRAFT_PUBLISH_AMBIGUOUS_VERIFY_RELEASE/);
   assert.match(researchPublish, /\(\[\.assets\[\]\.name\] \| sort\) ==/,
     'RESEARCH_DRAFT_MUST_CONTAIN_EXACT_THREE_ASSETS');
   const shaReadback = researchPublish.indexOf('test "$present" = "$expected"');
   const completeDraft = researchPublish.indexOf('jq -e \'([.assets[].name] | sort) ==');
-  const publishDraft = researchPublish.indexOf('gh release edit "$tag" --draft=false');
+  const publishDraft = researchPublish.indexOf('gh api --method PATCH "/repos/$GITHUB_REPOSITORY/releases/$release_id"');
   assert.ok(shaReadback > 0 && completeDraft > shaReadback && publishDraft > completeDraft,
     'RESEARCH_ASSET_SHA_AND_EXACT_SET_REQUIRED_BEFORE_PUBLICATION');
   assert.match(researchPublish, /\.tag_name == \$tag and \.target_commitish == \$main and \.prerelease == false and/);
   assert.match(researchPublish, /\(\[\.assets\[\]\.name\] \| unique \| length\)/);
+  for (const [proof, count] of [['all(.assets[]; .state == "uploaded")', 2],
+    ['.assets[] | select(.name == $n) | .size', 3],
+    ['asset_id="$(jq -r --arg n "$name"', 3],
+    ['[[ "$asset_id" =~ ^[1-9][0-9]*$ ]]', 3]])
+    assert.equal(researchPublish.split(proof).length - 1, count,
+      `RESEARCH_ASSET_${proof}_REQUIRED_PRE_AND_POST_PUBLISH`);
+  assert.match(researchPublish, /published="\$\(gh api "\/repos\/\$GITHUB_REPOSITORY\/releases\/tags\/\$tag" 2>\/dev\/null\)"/);
+  assert.match(researchPublish, /RESEARCH_PUBLISHED_TAG_READBACK_NOT_VISIBLE/);
+  assert.match(researchPublish, /test "\$\(jq -r \.id <<<"\$published"\)" = "\$release_id"/,
+    'PUBLISHED_TAG_MUST_RESOLVE_SAME_RELEASE_ID');
+  assert.ok(researchPublish.indexOf('published="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag" 2>/dev/null)"') > publishDraft,
+    'DRAFT_MUST_NEVER_BE_READ_BY_PUBLISHED_TAG_ENDPOINT');
+  assert.doesNotMatch(researchPublish, /^\s*(?:if ! )?gh release (?:upload|edit|create|view)/m,
+    'DRAFT_GH_TAG_COMMANDS_ARE_UNRELIABLE');
   assert.doesNotMatch(researchPublish, /^\s+(?:if ! )?gh release upload[^\n]*(?:--clobber|--force)/m,
     'RESEARCH_EXISTING_ASSET_MUST_NEVER_BE_DELETED_OR_REPLACED');
   assert.match(researchPublish, /RESEARCH_COMPONENT_RELEASE=VERIFIED_APPEND_ONLY/);
@@ -573,17 +611,70 @@ assert.throws(() => validate(source.replace('test "sha256:$digest" = \'${{ steps
 assert.throws(() => validate(source.replace('RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED',
   'gh release delete "$old" --cleanup-tag --yes'), workflows));
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
-  'if ! gh release create "$tag" --draft', 'if ! gh release create "$tag"'), workflows),
+  '-F draft=true -F prerelease=false', '-F draft=false -F prerelease=false'), workflows),
   'RESEARCH_RELEASE_MUST_STAGE_DRAFT_FIRST');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100"',
+  'gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag"'), workflows),
+  'RESEARCH_DRAFT_MUST_BE_LOCATED_IN_AUTHENTICATED_RELEASE_LIST');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'if ($matches | length) > 1 then error("RESEARCH_RELEASE_TAG_COLLISION")',
+  'if ($matches | length) > 1 then $matches[0]'), workflows),
+  'RESEARCH_RELEASE_TAG_COLLISION_MUST_FAIL_CLOSED');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'gh api "/repos/$GITHUB_REPOSITORY/releases/$release_id"',
+  'gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag"'), workflows),
+  'DRAFT_CANNOT_BE_READ_BY_PUBLISHED_TAG_ENDPOINT');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  '.id == $id and .tag_name == $tag and .target_commitish == $main',
+  '.tag_name == $tag and .target_commitish == $main'), workflows),
+  'RESEARCH_RELEASE_READBACK_REQUIRES_NUMERIC_ID_MATCH');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'RESEARCH_DRAFT_ORIGIN_NOT_FOUND', 'DRAFT_ORIGIN_UNKNOWN_IGNORED'), workflows),
+  'RESEARCH_RELEASE_MUST_REJECT_ABSENT_DRAFT_ORIGIN');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'test "$sha" = "$ACCEPTED_MAIN"', 'test "$sha" != "$ACCEPTED_MAIN"'), workflows),
+  'RESEARCH_PUBLISHED_TAG_CANNOT_POINT_TO_DIFFERENT_SOURCE');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'verify_tag_target required', 'verify_tag_target optional'), workflows),
+  'RESEARCH_PUBLISHED_RELEASE_MUST_HAVE_AN_ACTUAL_TAG_REF');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'object="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$sha")"',
+  'object="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$sha")"'), workflows),
+  'RESEARCH_ANNOTATED_TAG_TARGET_MUST_BE_PEELED');
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
   'test "$present" = "$expected"', 'true'), workflows),
   'RESEARCH_UPLOAD_422_MUST_NOT_BYPASS_DIGEST');
+assert.throws(() => validate(source.replaceAll(
+  'all(.assets[]; .state == "uploaded")', 'all(.assets[]; .state == "starter")'), workflows),
+  'RESEARCH_PARTIAL_STARTER_ASSETS_MUST_NOT_PUBLISH');
+assert.throws(() => validate(source.replaceAll(
+  '[[ "$asset_id" =~ ^[1-9][0-9]*$ ]]', 'true'), workflows),
+  'RESEARCH_ASSET_IDS_MUST_BE_POSITIVE');
+assert.throws(() => validate(source.replaceAll(
+  '.assets[] | select(.name == $n) | .size', '.assets[] | select(.name == $n) | .url'), workflows),
+  'RESEARCH_RELEASE_ASSET_SIZE_MUST_MATCH_LOCAL_BYTES');
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
-  'gh release upload "$tag" "$RUNNER_TEMP/$name"',
-  'gh release upload "$tag" "$RUNNER_TEMP/$name" --clobber'), workflows),
+  'https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$name',
+  'https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/999/assets?name=$name'), workflows),
+  'RESEARCH_DRAFT_UPLOAD_MUST_TARGET_SELECTED_RELEASE_ID');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  '--data-binary "@$RUNNER_TEMP/$name"',
+  '--data-binary @"$RUNNER_TEMP/unverified-file"'), workflows),
+  'RESEARCH_RELEASE_MUST_UPLOAD_EXACT_VERIFIED_BYTES');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  '-H "Authorization: Bearer $GH_TOKEN"', '-H "Authorization: Bearer invalid"'), workflows),
+  'RESEARCH_DRAFT_UPLOAD_REQUIRES_GITHUB_TOKEN');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'test "$present" = "$expected"', 'gh release upload "$tag" "$RUNNER_TEMP/$name" --clobber'), workflows),
   'RESEARCH_RELEASE_NEVER_CLOBBERS_EXISTING_ASSET');
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
-  'if ! gh release edit "$tag" --draft=false', 'if ! echo published'), workflows),
+  'if ! gh api --method PATCH "/repos/$GITHUB_REPOSITORY/releases/$release_id"',
+  'if ! gh release edit "$tag" --draft=false'), workflows),
+  'RESEARCH_DRAFT_MUST_PUBLISH_BY_SELECTED_NUMERIC_ID');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  '-F draft=false > "$RUNNER_TEMP/research-release-publish.json"',
+  '-F draft=true > "$RUNNER_TEMP/research-release-publish.json"'), workflows),
   'RESEARCH_RELEASE_ONLY_PUBLISHED_AFTER_COMPLETE_PROOF');
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
   'RESEARCH_DRAFT_CREATE_AMBIGUOUS_VERIFY_ORIGIN', 'DRAFT_CREATE_ERROR_IGNORED'), workflows),
@@ -598,6 +689,10 @@ assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_c
   'if jq -e \'.draft == true\' <<<"$release"; then',
   'if true; then'), workflows),
   'PUBLISHED_RESEARCH_RELEASE_MUST_NOT_ACCEPT_NEW_ASSETS');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'test "$(jq -r .id <<<"$published")" = "$release_id"',
+  'true'), workflows),
+  'RESEARCH_PUBLISHED_TAG_MUST_BIND_NUMERIC_RELEASE_ID');
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
   '.workflow_run.head_repository_id == 1388071566 and', 'true and'), workflows));
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
