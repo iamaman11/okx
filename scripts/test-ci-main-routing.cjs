@@ -17,6 +17,7 @@ const regressionSuites = ['engine', 'host', 'execution', 'research', 'clippy'];
 const releaseGates = ['trading-engine-acceptance-windows',
   ...regressionSuites.map(suite => `trading-engine-regressions-windows (${suite})`),
   'trading-engine-build-windows', 'linux-core', 'windows-native'];
+const acceptedWorkflowPath = String.raw`test("^\\.github/workflows/ci\\.yml@[A-Za-z0-9_./-]+$")`;
 const nativeCacheJobs = [
   ['trading_engine_acceptance_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
@@ -47,7 +48,7 @@ function validate(yaml, fileNames) {
   // Finance, independent regressions and release share a single workflow.
   // The only cache-only job primes exact accepted main, outside the PR gate.
   assert.ok(map.size <= 17, 'OBSOLETE_JOB_GRAPH_REGRESSION');
-  for (const unused of ['required_classify', 'draft-trading-migration-512',
+  for (const unused of ['required_classify', 'research_package_proof', 'draft-trading-migration-512',
     'draft-riskbook-migration-510', 'trading_safety_acceptance_windows', 'cloudflare_deploy', 'readonly_observer',
     'production_recovery_promote', 'named_validate', 'all26_windows_targeted']) {
     assert.ok(!map.has(unused), `UNNECESSARY_CI_JOB:${unused}`);
@@ -91,6 +92,9 @@ function validate(yaml, fileNames) {
   assert.match(classify, /scope="\$\{\{ steps.proven_scope.outputs.scope \}\}"/);
   assert.match(classify, /compare\/\$base\.\.\.\$CHECKED_HEAD/);
   assert.match(classify, /\.commits\[-1\]\.sha == \$head/);
+  assert.ok(classify.includes(acceptedWorkflowPath), 'MAIN_REUSE_MUST_MATCH_GITHUB_WORKFLOW_PATH_WITH_REF');
+  assert.match(classify, /\.run_attempt == 1\) \| \[\.id, \.run_attempt\] \| @tsv/,
+    'UNREVIEWED_RERUN_CANNOT_AUTHORIZE_MAIN_REUSE');
   assert.match(classify, /host-controller\|host-launcher\) edge_required="\$\{\{ steps\.file_scope\.outputs\.edge_changed \}\}"/);
   assert.doesNotMatch(classify, /pulls\/\$PR_NUMBER\/files|prepare-research-release\.ps1/);
   assert.match(classify, /"research_only=true" >> "\$GITHUB_OUTPUT"/);
@@ -102,9 +106,20 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(draft, /check_p0\.py --base|fetch-depth: 0/);
   assert.match(job('dependency-audit'), /if: \(github.event_name != 'pull_request' \|\| github.event.pull_request.draft != true\)/);
   const research = job('research_service_tests_windows');
-  assert.match(research, /base_head: \$\{\{ steps\.package\.outputs\.base_head \}\}/);
-  assert.equal((research.match(/prepare-research-release\.ps1 -Dist/g) || []).length, 1);
-  assert.match(research, /RESEARCH_BASE_PROOF_REQUIRED/);
+  assert.match(research, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true'/,
+    'MAIN_MUST_NOT_BUILD_UNREVIEWED_RESEARCH_ORIGIN');
+  assert.match(research, /research_component_sha256: \$\{\{ steps\.package\.outputs\.research_component_sha256 \}\}/);
+  assert.doesNotMatch(research, /prepare-research-release\.ps1 -Dist/,
+    'RESEARCH_ONLY_MUST_NOT_DOWNLOAD_NATIVE_BASE_OR_COPY_ENGINE_BYTES');
+  assert.match(research, /Build self-contained Research-only Windows component/);
+  assert.match(research, /schema = 'okx\.windows\.research-component\/v1'/);
+  assert.match(research, /cargo_lock_sha256 = \(Get-FileHash/);
+  assert.match(research, /node scripts\/research-component-artifact\.cjs \$dist \$sourceHead \$sourceTree/);
+  assert.match(research, /RESEARCH_COMPONENT_EXACT_THREE_FILE_PROOF_FAILED/);
+  assert.match(research, /name: okx-research-component-\$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+  assert.doesNotMatch(research, /cargo build --locked --release -p okx-trading-engine|actions\/attest/);
+  assert.match(research, /edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture --test-threads 1/);
+  assert.match(research, /RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED/);
   // Research-only changes must not resurrect the four real-child IPC timeouts
   // previously observed when nine Windows processes started in parallel. The
   // dedicated harness retains the original 10s receive deadline.
@@ -138,7 +153,6 @@ function validate(yaml, fileNames) {
     trading_engine_build_windows: 'trading-engine-build-windows',
     research_service_tests_windows: 'research-service-tests-windows',
     host_controller_launcher_checks: 'host-controller-launcher-checks',
-    'research_package_proof': 'research-package-proof',
   };
   for (const [id, display] of Object.entries(names)) {
     assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'),
@@ -290,6 +304,9 @@ function validate(yaml, fileNames) {
   const windows = job('required_windows');
   assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
   assert.match(windows, /test "\$\{\{ needs\.component_impact\.outputs\.native_proof \}\}" = "RESEARCH_OWNER_ONLY"/);
+  assert.match(windows, /research_component_sha256.*\^\[0-9a-f\]\{64\}\$/);
+  assert.match(windows, /WINDOWS_NATIVE_PROOF=RESEARCH_COMPONENT_VERIFIED_/);
+  assert.doesNotMatch(windows, /REUSED_ACCEPTED_BASE_\$\{\{ needs\.research_service_tests_windows/);
   assert.match(windows, /test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "success"/);
   assert.match(windows, /native_proof \}\}" = "ENGINE_OWNER_ONLY"/);
   assert.match(windows, /WINDOWS_NATIVE_PROOF=FRESH_ENGINE_AND_FULL_FINANCIAL_SUCCESS/);
@@ -324,14 +341,55 @@ function validate(yaml, fileNames) {
   assert.match(publish, /NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS/);
   assert.ok(publish.includes(JSON.stringify(releaseGates)), 'PUBLICATION_REQUIRES_EACH_WINDOWS_SUITE');
 
+  const researchPublish = job('publish_accepted_research_component');
+  assert.match(researchPublish, /^    name: publish-accepted-research-component$/m);
+  assert.match(researchPublish, /group: research-component-publication/);
+  assert.match(researchPublish, /^      contents: write$/m);
+  assert.match(researchPublish, /github.event_name == 'push' &&/);
+  assert.match(researchPublish, /needs.component_impact.outputs.component_scope == 'research' &&/);
+  assert.match(researchPublish, /needs.component_impact.outputs.build_required == 'false' &&/);
+  assert.match(researchPublish, /needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree'/);
+  assert.match(researchPublish, /needs.required_linux.result == 'success'/);
+  assert.match(researchPublish, /needs.required_windows.result == 'success'/);
+  assert.match(researchPublish, /\.merge_commit_sha == \$main and \.base.ref == "main"/);
+  assert.match(researchPublish, /test "\$main_tree" = "\$head_tree"/);
+  for (const name of ['classify', 'dependency-audit', 'architecture-contracts',
+    'research-service-tests-windows', 'cloudflare-mcp-contracts', 'linux-core', 'windows-native'])
+    assert.ok(researchPublish.includes(`"${name}"`), `RESEARCH_PUBLICATION_MISSING_READY_GATE:${name}`);
+  assert.match(researchPublish, /runs\/\$candidate\/attempts\/\$attempt\/jobs\?per_page=100/);
+  assert.match(researchPublish, /"\$attempt" == 1/);
+  assert.match(researchPublish, /\.head_sha == \$head and \.run_attempt == 1 and/);
+  assert.match(researchPublish, /all\(\.jobs\[\]; \.run_id == \$run and \.head_sha == \$head\)/);
+  assert.match(researchPublish, /\.path \| test\("\^\\\\\.github\/workflows\/ci\\\\\.yml@\[A-Za-z0-9_\.\/-\]\+\$"\)/);
+  assert.ok(researchPublish.includes(acceptedWorkflowPath), 'RESEARCH_PUBLISH_MUST_MATCH_SAME_REF_PATH');
+  assert.match(researchPublish, /\.head_repository\.id == 1388071566/);
+  assert.match(researchPublish, /\.workflow_run\.id == \$run and \.workflow_run\.repository_id == 1388071566/);
+  assert.match(researchPublish, /\.workflow_run\.head_repository_id == 1388071566/);
+  assert.match(researchPublish, /\.workflow_run\.head_sha == \$head/);
+  assert.match(research, /RESEARCH_COMPONENT_NOT_EXACT_PR_HEAD/);
+  assert.match(research, /RESEARCH_COMPONENT_PR_HEAD_CHANGED_BEFORE_BUILD/);
+  assert.match(researchPublish, /okx-research-component-\$head/);
+  assert.match(researchPublish, /test "sha256:\$digest" = '\$\{\{ steps.select.outputs.digest \}\}'/);
+  assert.match(researchPublish, /verify_research_component_release\.py "\$zip" "\$digest"/);
+  assert.match(researchPublish, /tag="research-component-\$ACCEPTED_MAIN"/);
+  assert.match(researchPublish, /RESEARCH_COMPONENT_RELEASE=VERIFIED_APPEND_ONLY/);
+  assert.match(researchPublish, /RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED/);
+  assert.doesNotMatch(researchPublish, /cargo build|native-base-|gh release delete|--cleanup-tag|actions\/attest/);
+
   for (const [id, block] of map) {
-    if (id !== 'publish_accepted_windows_release') {
+    if (!['publish_accepted_windows_release', 'publish_accepted_research_component'].includes(id)) {
       assert.doesNotMatch(block, /^      contents: write$/m, `UNEXPECTED_WRITE_SCOPE:${id}`);
     }
   }
 }
 
 validate(source, workflows);
+const canonicalWorkflowPath = /^\.github\/workflows\/ci\.yml@[A-Za-z0-9_./-]+$/;
+for (const value of ['.github/workflows/ci.yml@main', '.github/workflows/ci.yml@refs/heads/main'])
+  assert.ok(canonicalWorkflowPath.test(value));
+for (const value of ['.github/workflows/ci.yml', '.github/workflows/ci.yml@',
+  '.github/workflows/other.yml@main', '.github/workflows/ci.yml@ main'])
+  assert.equal(canonicalWorkflowPath.test(value), false);
 // Research's OS resource policy can change the measured Native Finance latency
 // without touching Engine source.
 // Route that rare change through the real Windows financial acceptance gate.
@@ -382,7 +440,22 @@ assert.throws(() => validate(source.replaceAll('test "${{ needs.trading_engine_b
 assert.throws(() => validate(source.replaceAll('test "${{ needs.trading_engine_regressions_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"', 'true'), workflows));
 assert.throws(() => validate(source.replace('"research_only=true" >> "$GITHUB_OUTPUT"', 'true'), workflows));
-assert.throws(() => validate(source.replace('RESEARCH_BASE_PROOF_REQUIRED', 'BYPASS'), workflows));
+assert.throws(() => validate(source.replace('RESEARCH_COMPONENT_EXACT_THREE_FILE_PROOF_FAILED', 'BYPASS'), workflows));
+assert.throws(() => validate(source.replaceAll(acceptedWorkflowPath,
+  String.raw`test("^\\.github/workflows/ci\\.yml$")`), workflows));
+assert.throws(() => validate(source.replace('.run_attempt == 1) | [.id, .run_attempt]',
+  '.run_attempt > 0) | [.id, .run_attempt]'), workflows));
+assert.throws(() => validate(source.replace('"$attempt" == 1', '"$attempt" =~ ^[1-9]'), workflows));
+assert.throws(() => validate(source.replace('RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED', 'BYPASS'), workflows));
+assert.throws(() => validate(source.replace('name: okx-research-component-${{ github.event.pull_request.head.sha }}',
+  'name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}'), workflows));
+assert.throws(() => validate(source.replace('test "sha256:$digest" = \'${{ steps.select.outputs.digest }}\'',
+  'true'), workflows));
+assert.throws(() => validate(source.replace('RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED',
+  'gh release delete "$old" --cleanup-tag --yes'), workflows));
+assert.throws(() => validate(source.replace('.workflow_run.head_repository_id == 1388071566 and',
+  'true and'), workflows));
+assert.throws(() => validate(source.replace('.head_repository.id == 1388071566) |', 'true) |'), workflows));
 assert.throws(() => validate(source.replace('.commits[-1].sha == $head', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_OWNER_ONLY"', 'true'), workflows));
 assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-manifest.cjs --verify-report', 'echo skipped'), workflows));

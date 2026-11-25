@@ -244,8 +244,15 @@ export class RuntimeSession {
   }
 
   async webSocketMessage(ws: any, message: string | ArrayBuffer): Promise<void> {
-    if (typeof message !== "string" || message.length > MAX_BODY_BYTES) {
+    if (typeof message !== "string") {
       ws.close(1003, "text frames only");
+      return;
+    }
+    // JavaScript string.length counts UTF-16 code units. Native WSS caps the
+    // serialized UTF-8 frame at 64 KiB, including multibyte JSON strings.
+    if (message.length > MAX_BODY_BYTES ||
+        new TextEncoder().encode(message).byteLength > MAX_BODY_BYTES) {
+      ws.close(1009, "frame too large");
       return;
     }
 

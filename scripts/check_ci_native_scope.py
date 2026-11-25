@@ -359,7 +359,7 @@ def _self_test() -> None:
     assert "research_token_provision_command_has_no_bearer_fields" in host, "HOST_RESEARCH_SECRET_WIRE_WITNESS_REQUIRED"
     assert "control_bridge_denies_research_mutations_before_network" in host, "HOST_BRIDGE_MUTATION_DENIAL_WITNESS_REQUIRED"
     research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  required_windows:\n", 1)[0]
-    assert "if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
+    assert "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
     for witness in (
         "research_token_validation_is_bounded_and_ascii_only",

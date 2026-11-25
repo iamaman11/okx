@@ -1,10 +1,29 @@
 import {RuntimeSession} from "./runtime_session.js";
-import {FRAME_SCHEMA} from "./shared.js";
+import {FRAME_SCHEMA,MAX_BODY_BYTES} from "./shared.js";
 import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,label:string){if(!v)throw Error(label);}
 const generation=4;
 const attachment={runtimeId:"windows-primary",sessionId:"session_test_012345",generation,hello:true,
  runtimeProfile:"engine",connectedAtMs:Date.now(),lastPongAtMs:Date.now()};
+// A 42 Ki-character Cyrillic JSON frame fits the old UTF-16 length check but
+// exceeds the native 64 KiB UTF-8 WSS limit. Reject it before parsing or
+// dispatch, independent of whether the sender claims Engine or Research.
+{
+ const oversize=JSON.stringify({type:"ping",schema:FRAME_SCHEMA,nonce:"я".repeat(40_000)});
+ check(oversize.length<MAX_BODY_BYTES&&new TextEncoder().encode(oversize).byteLength>MAX_BODY_BYTES,
+  "negative Unicode frame must exceed UTF-8 limit without exceeding UTF-16 count");
+ for(const profile of ["engine","research"]){
+  let closedCode=0,closedReason="";
+  const ws={close:(code:number,reason:string)=>{closedCode=code;closedReason=reason;},
+   deserializeAttachment:()=>{throw Error("oversize frame reached session owner");}};
+  const runtime=new RuntimeSession({getWebSockets:()=>{throw Error("oversize frame queried sockets");}} as any,{} as any);
+  await runtime.webSocketMessage(ws,oversize);
+  check(closedCode===1009&&closedReason==="frame too large",`${profile} Unicode oversize rejected`);
+ }
+ let binaryCode=0;
+ await new RuntimeSession({} as any,{} as any).webSocketMessage({close:(code:number)=>{binaryCode=code;}},new ArrayBuffer(5));
+ check(binaryCode===1003,"binary native frame rejected independently of byte size");
+}
 async function fixture(mode:"before_ack"|"after_ack"|"complete"|"stale"|"ping_send_failure"|"request_send_failure"|"duplicate"|"paused_complete"){
  const map=new Map<string,unknown>([["account_access_v1",{...initial,revision:1,accounts:[mode==="paused_complete"?{...account,explicit_pause:true}:account]}]]);
  let owner:any;

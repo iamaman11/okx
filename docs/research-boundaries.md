@@ -3,6 +3,49 @@
 This is a source map, not another execution model. The authoritative boundaries
 are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 
+## Acceptance state and migration debt
+
+At the read-only source baseline `78b63c3097a3d98e8aa647453cc1bbc7b7bfb7dc`
+(2026-11-25), the normal/build Engine → Research Cargo boundary and the
+Research-owned Edge/process paths are **implemented in code**. This is not a
+claim that the current candidate passed CI or that a Windows installation
+has been upgraded. **S1 DEV DEBT is unresolved; S2 installed/physical is
+NOT_PROVEN.** Rerun source/closure tests and attach exact HEAD/tree, Windows
+CI receipts and physical observations to the final candidate, rather than
+reusing an earlier PASS.
+
+The precise remaining test-only exceptions are:
+
+- `crates/okx-trading-engine/Cargo.toml`: dev-only
+  `okx-ipc-contracts/legacy-research-test`,
+  `okx-market-runtime/legacy-research-test` and direct
+  `okx-research-protocol`.
+- `crates/okx-ipc-contracts/Cargo.toml`: optional Research protocol
+  feature; `crates/okx-market-runtime/Cargo.toml`: legacy Research source
+  adapter feature. Unified Cargo test features may reintroduce them into
+  a non-test library target during `--all-targets`; this is **not** an
+  acceptable strict dev-closure PASS.
+- Engine's `research_client.rs`, `research_dispatch_tests.rs`,
+  `research_test_support.rs`, mixed `query_dispatch_tests.rs` and
+  `accounts_native_engine_research_contract_tests.rs` still provide
+  historical Research child IPC and mandatory T06–T10/T11–T12 evidence.
+  `scripts/check_p0.py` and Windows CI require exact test names and measured
+  receipts. In particular the Native + MCP load tests must retain real
+  two-Grid CPU overlap/disconnect, 100 read-only samples per measured path,
+  p95 ≤100 ms, no exchange POST, real MCP HTTP → DO → WSS, and the
+  `T11_T12_NATIVE_ISOLATION_JSON` / `T10_MCP_NATIVE_LOAD_JSON` receipts.
+
+The next safe migration puts Research commands, source/decision replay,
+cancel and installed-image tests in Research-owned integration suites,
+then replaces the mixed Engine-private native-load fixture with a separately
+run cross-owner process acceptance. Only after equivalent Windows receipts
+can Engine's test-only child client and the three Cargo dev edges be removed.
+The native financial collector's **62/62 properties and 107 witnesses** are
+independent mandatory acceptance and must not be weakened by this move.
+`python scripts/check_architecture.py` checks normal/build boundaries;
+`--strict-component-test-boundary` should still fail as
+`ARCHITECTURE_TEST_BOUNDARY=DEBT_UNRESOLVED` at this baseline.
+
 ## Ownership
 
 | Responsibility | Production entrypoint / owner |
@@ -207,15 +250,30 @@ Admission freshness remains independently enforced and negatively tested.
 ## Direct checks after building
 
 ```powershell
+# Research-owned tests: production singleton, no Engine child fixture.
 cargo build --locked -p okx-research-service --bin okx-research-service
-$env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path target/debug/okx-research-service.exe).Path
-cargo test --locked -p okx-research-service
+cargo test --locked -p okx-research-service --lib
+cargo test --locked -p okx-research-service --test ipc_process -- --test-threads 1
+cargo test --locked -p okx-research-service --test causal_release_smoke
+# Explicitly ignored by default: requires Node, installed Miniflare and loopback.
+cargo test --locked -p okx-research-service --lib standalone_catalog_reopens_through_real_mcp_do_websocket -- --ignored --nocapture
+cargo test --locked -p okx-research-service --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency
+
+# Temporary historical Engine child acceptance: an explicitly non-shipping
+# debug Research executable with test-only per-root singleton namespaces.
+cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
+Copy-Item target/debug/okx-research-service.exe target/debug/okx-research-service-test-isolated.exe
+$env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path target/debug/okx-research-service-test-isolated.exe).Path
 cargo test --locked -p okx-trading-engine --lib research_dispatch_tests::
 cargo test --locked -p okx-trading-engine --lib research_client::
 cargo test --locked -p okx-trading-engine --lib query::public_dispatch_tests::
 cargo test --locked -p okx-trading-engine --lib cloudflare_transport::session_tests::
 cargo test --locked -p okx-trading-engine --lib finance_startup::
 cargo test --locked -p okx-market-runtime --lib public::reference_refresh::tests::
+python scripts/check_architecture.py --self-test
+python scripts/check_architecture.py
+# Expected failure until T06–T10/T11–T12 migration is accepted:
+python scripts/check_architecture.py --strict-component-test-boundary
 ```
 
 The dedicated Engine-under-Research-load check runs in its own test process so
@@ -247,10 +305,20 @@ operator/replay registry and its direct tests, then connect it through the worke
 planner. Financial state and CONTROL do not belong to that calculation change.
 
 Research-only Cargo tests run without rebuilding the financial Engine even if
-the accepted binary base is unavailable. Deployable **Research-only packaging**
-still needs a previously successful, accepted and **merged** complete base,
-an unexpired exact GitHub bundle and its explicit
-`.github/research-release-base.json` selection; otherwise Ready fails closed.
+the accepted binary base is unavailable. The separately specified
+`okx.windows.research-component/v1` artifact contains exactly three files:
+`Cargo.lock`, `manifest.json` and `okx-research-service.exe`. Its manifest
+binds the exact repository head/tree, Rust 1.100.0, the complete Cargo lock
+SHA-256, executable SHA-256/byte length, protocol and storage versions.
+This byte/schema proof is **component-only**, not evidence of a four-binary
+installed application, an authenticated GitHub source, or an authorized
+update. Its producer/consumer and negative controls require their own CI
+verification before stating CODE PASS.
+
+Deployable **Research-only packaging** still needs a previously successful,
+accepted and **merged** complete base, an unexpired exact GitHub bundle and
+its explicit `.github/research-release-base.json` selection; otherwise
+Ready fails closed.
 The first full-build PR has no
 such prior merged base, so its skipped `research-service-tests-windows` step does not
 prove the next independent update. The separate Worker Cargo build, scope

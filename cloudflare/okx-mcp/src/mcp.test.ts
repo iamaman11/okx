@@ -540,6 +540,36 @@ for(const [transportStatus,connected,sessionFresh] of [
     data.verification.next_action!==(verifiedEdge?'inspect_control_research_status':'inspect_research_connection'))
   throw Error('deployment must report Edge observation and unavailable CONTROL evidence');
 }
+// Two stopped native applications are a valid installation state: both
+// read-only diagnostics must remain available and must not attempt a hidden
+// dispatch, start, credential lookup, or fallback to the other owner.
+{
+ const observed:string[]=[];
+ const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(url:string,init?:RequestInit)=>{
+  observed.push(url);
+  if(init?.method==='POST'||url.includes('/dispatch'))throw Error('status started a native owner');
+  const research=url.includes('owner=research');
+  return Response.json({schema:'okx.direct-transport.status/v1',owner:research?'research':'engine',
+   status:'OFFLINE',connected:false,session_fresh:false});
+ }})}};
+ const read=async(args:unknown)=>{
+  const response:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+   jsonrpc:'2.0',id:142,method:'tools/call',params:{name:'diagnostics',arguments:args}
+  })}),env,ctx)).json();
+  if(response.error)throw Error('stopped owner diagnostic rejected');
+  return response.result.structuredContent;
+ };
+ const engine=await read({action:'runtime'});
+ const research=await read({action:'explain',view:'research',reference:'deployment'});
+ if(engine.status!=='partial'||engine.data.transport.connected!==false||
+    engine.data.transport.status!=='OFFLINE'||research.status!=='partial'||
+    research.data.verification.edge_authenticated_session!=='UNVERIFIED'||
+    research.data.verification.first_unproven_stage!=='EDGE_AUTHENTICATED_SESSION'||
+    research.data.control.evidence!=='NOT_PERFORMED'||
+    observed.length!==2||!observed[0].includes('/status?probe=1')||
+    !observed[1].includes('/status?probe=1&owner=research'))
+  throw Error('both native owners stopped: read-only diagnostic must be honest and side-effect free');
+}
 const deploymentRead={action:'explain',view:'research',reference:'deployment'};
 const wrongOwner=await mcpResponse('diagnostics',deploymentRead,
  {schema:'okx.direct-transport.status/v1',owner:'engine',runtime_profile:'engine',
