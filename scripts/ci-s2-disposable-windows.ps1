@@ -108,7 +108,10 @@ try {
         $testLog = Join-Path $evidenceDir "$shortName.log"
         # One exact, explicitly ignored #[cfg(test)] in-crate Win32 proof per
         # cargo invocation. `--ignored` without `--exact` is not sufficient.
-        & cargo test --locked -p okx-host-controller --lib $testName -- --ignored --exact --nocapture --test-threads 1 2>&1 |
+        # `--show-output` preserves the ordinary anchored `test NAME ... ok`
+        # line while retaining successful-test stdout below it. `--nocapture`
+        # could interleave the witness println! into that result line.
+        & cargo test --locked -p okx-host-controller --lib $testName -- --ignored --exact --show-output --test-threads 1 2>&1 |
             Tee-Object -FilePath $testLog
         $testExit = $LASTEXITCODE
         $log = Get-Content -LiteralPath $testLog -Raw

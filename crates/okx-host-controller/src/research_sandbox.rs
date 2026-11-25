@@ -84,7 +84,7 @@ fn startup_frame(bearer: &str) -> Option<Zeroizing<Vec<u8>>> {
 mod native {
     use std::{
         ffi::{OsStr, c_void},
-        fs::{self, File},
+        fs::{self, File, OpenOptions},
         io::{Read, Write},
         mem::{size_of, zeroed},
         os::windows::{
@@ -660,13 +660,16 @@ mod native {
         let runner_temp = std::env::var_os("RUNNER_TEMP")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
-        let temp = fs::canonicalize(runner_temp)
-            .map_err(|_| denied("disposable_runner_temp_invalid"))?;
+        let temp =
+            fs::canonicalize(runner_temp).map_err(|_| denied("disposable_runner_temp_invalid"))?;
         let root = fs::canonicalize(declared_root)
             .map_err(|_| denied("disposable_runner_root_invalid"))?;
         if !root.starts_with(&temp)
             || root == temp
-            || root.to_string_lossy().to_ascii_lowercase().starts_with(r"c:\okx\")
+            || root
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with(r"c:\okx\")
         {
             return Err(denied("disposable_runner_root_unsafe"));
         }

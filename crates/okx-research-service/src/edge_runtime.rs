@@ -39,8 +39,13 @@ use tokio_tungstenite::{
 };
 use zeroize::Zeroizing;
 
-#[cfg(all(feature = "s2-disposable-windows", any(not(windows), not(debug_assertions))))]
-compile_error!("s2-disposable-windows is permitted only for disposable Windows debug Research binaries");
+#[cfg(all(
+    feature = "s2-disposable-windows",
+    any(not(windows), not(debug_assertions))
+))]
+compile_error!(
+    "s2-disposable-windows is permitted only for disposable Windows debug Research binaries"
+);
 
 #[cfg(all(windows, feature = "s2-disposable-windows", debug_assertions))]
 const S2_DISPOSABLE_EDGE_WSS: &str = "wss://127.0.0.1:9/s2-disposable";
@@ -89,8 +94,8 @@ const STARTUP_MAX_BYTES: usize = 1536;
 /// A post-bearer origin check alone would let a fixture misreport success.
 #[cfg(windows)]
 pub fn preflight_edge_origin_before_ready() -> Result<(), String> {
-    let url = std::env::var("OKX_RESEARCH_EDGE_WSS_URL")
-        .map_err(|_| "RESEARCH_EDGE_ORIGIN_UNTRUSTED")?;
+    let url =
+        std::env::var("OKX_RESEARCH_EDGE_WSS_URL").map_err(|_| "RESEARCH_EDGE_ORIGIN_UNTRUSTED")?;
     if url == "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime" {
         // This preserves the production-only fixed endpoint, while CONTROL's
         // compiled test separately forbids it under a disposable marker.
@@ -907,8 +912,14 @@ mod tests {
         let a = "a".repeat(32);
         assert!(valid_s2_disposable_nonce_pair(&a, &a));
         assert!(!valid_s2_disposable_nonce_pair(&a, &"b".repeat(32)));
-        assert!(!valid_s2_disposable_nonce_pair(&"A".repeat(32), &"A".repeat(32)));
-        assert!(!valid_s2_disposable_nonce_pair(&"a".repeat(31), &"a".repeat(31)));
+        assert!(!valid_s2_disposable_nonce_pair(
+            &"A".repeat(32),
+            &"A".repeat(32)
+        ));
+        assert!(!valid_s2_disposable_nonce_pair(
+            &"a".repeat(31),
+            &"a".repeat(31)
+        ));
         assert!(!valid_s2_disposable_nonce_pair(
             &format!("{}g", "a".repeat(31)),
             &format!("{}g", "a".repeat(31))

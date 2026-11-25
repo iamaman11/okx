@@ -180,7 +180,8 @@ function validate(yaml, fileNames, runnerScript = disposableScript) {
   assert.match(runnerScript, /research_worker_build_feature = 's2-disposable-windows'/,
     'S2_RECEIPT_MUST_DISCLOSE_NON_SHIPPING_WORKER_BUILD_FEATURE');
   assert.match(runnerScript, /\$env:OKX_DISPOSABLE_RESEARCH_EXE = /);
-  assert.match(runnerScript, /cargo test --locked -p okx-host-controller --lib \$testName -- --ignored --exact --nocapture --test-threads 1/);
+  assert.match(runnerScript, /cargo test --locked -p okx-host-controller --lib \$testName -- --ignored --exact --show-output --test-threads 1/,
+    'S2_CAPTURED_SUCCESS_STDOUT_MUST_KEEP_NAMED_RESULT_LINE_ATOMIC');
   assert.match(runnerScript, /\$namedPass = \$log -cmatch/);
   assert.match(runnerScript, /test result: ok\\\. 1 passed; 0 failed; 0 ignored; 0 measured; \[1-9\]\[0-9\]\* filtered out;/);
   assert.match(runnerScript, /\$hasWitness = \$log\.Contains\(\$witness\)/);
@@ -1093,7 +1094,9 @@ for (const [before, after, reason] of [
     'S2_WORKER_MUST_NOT_USE_PRODUCTION_ORIGIN_PINNING'],
   ["research_worker_build_feature = 's2-disposable-windows'", "research_worker_build_feature = 'none'",
     'S2_FEATURE_MUST_BE_ATTESTED_IN_SMOKE_RECEIPT'],
-  ['-- --ignored --exact --nocapture --test-threads 1', '-- --nocapture', 'S2_IGNORED_EXACT_ONLY'],
+  ['-- --ignored --exact --show-output --test-threads 1', '-- --show-output', 'S2_IGNORED_EXACT_ONLY'],
+  ['-- --ignored --exact --show-output --test-threads 1', '-- --ignored --exact --nocapture --test-threads 1',
+    'S2_UNCAPTURED_STDOUT_MAY_INTERLEAVE_NAMED_PASS_LINE'],
   ['$namedPass = $log -cmatch', '$namedPass = $true #', 'S2_NAMED_PASS_REQUIRED'],
   ['$hasWitness = $log.Contains($witness)', '$hasWitness = $true #', 'S2_NATIVE_WITNESS_REQUIRED'],
   ['1 passed; 0 failed;', '0 passed; 0 failed;', 'S2_NONZERO_EXECUTED_CASE_REQUIRED'],
