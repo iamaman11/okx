@@ -94,16 +94,17 @@ RiskBook, финансовый SQLite/WAL, допуск и исполнение 
 
 | Изменение Ready PR | Маршрут и результат |
 | --- | --- |
-| Только `crates/okx-strategy-core/src/time_series.rs`, возможно с документацией | `RESEARCH_OWNER_ONLY` → `research-service-tests-windows`. Engine/Execution отсутствуют в Cargo-запусках. `okx-agent.exe`, `okx-host-control.exe` и `okx-host-launcher.exe` берутся из принятой Windows-базы |
-| Только Rust-код `crates/okx-host-protocol/src/` или `crates/okx-host-controller/src/` | `HOST_WINDOWS_OWNER_AND_CONSUMER`, scope `host-controller` → `host-controller-launcher-checks`. Clippy и тесты охватывают новый протокол, Launcher, Controller и Rust Bridge; артефакт проверки содержит хэши двух host-бинарников |
+| Только `crates/okx-strategy-core/src/time_series.rs`, возможно с документацией | `RESEARCH_OWNER_ONLY` → `research-windows`. Engine/Execution не компилируются; выпускается самостоятельный Research EXE и трёхфайловый архив без Engine/Host |
+| Только Rust-код `crates/okx-host-protocol/src/` или `crates/okx-host-controller/src/` | `HOST_WINDOWS_OWNER_AND_CONSUMER`, scope `host-controller` → `host-windows`. Clippy и тесты охватывают новый протокол, Launcher, Controller и Rust Bridge; артефакт проверки содержит хэши двух host-бинарников |
 | Только Rust-код `crates/okx-host-launcher/src/` | Тот же Windows job и набор проверок, scope `host-launcher` |
 | Только Rust-код Research и Host в одном PR | `research-host`: обе проверки владельцев параллельно. Свежие бинарники Research и Host сохраняются с SHA и деревом исходников. Принятый Engine сверяется с опубликованной базой и Windows Cargo-графом, включая тесты |
 | Только документация или только Cloudflare MCP | Существующий маршрут соответствующего компонента, без запуска Windows-сборки |
 | Общий IPC, Domain Core, Engine/Execution, корневой Cargo, манифест нового Host-протокола, CI или неполный diff | Полный маршрут с финансовыми проверками. Для разрешённых манифестов Research или Host Controller/Launcher есть отдельный допуск по совпадению Windows Cargo closures |
 
 Единый [workflow](../.github/workflows/ci.yml) выдаёт один целевой обязательный
-статус `ci`. Внутренние `classify`, `linux-core` и `windows-native`
-сохранены для проверки происхождения артефактов установленным CONTROL.
+статус `ci`. `select-checks` выбирает владельцев; промежуточные
+агрегаторы `linux-core` и `windows-native` удалены. Проверка происхождения
+Research использует отдельную строгую policy v3 установленного CONTROL.
 Узкие Rust-маршруты задают
 явные пакеты для `cargo test`, `cargo clippy` и `cargo build`.
 [`check_ci_native_scope.py`](../scripts/check_ci_native_scope.py)
@@ -134,7 +135,7 @@ RiskBook, финансовый SQLite/WAL, допуск и исполнение 
    проверить отдельные Ready PR с одиночной правкой
    `okx-strategy-core/src/time_series.rs` и `okx-host-protocol/src/lib.rs`.
    Зафиксировать SHA и scope, успех обязательных проверок, пропуск
-   `trading-engine-acceptance-windows`,
+   `engine-windows`,
    всех исполнителей `trading-engine-regressions-windows (suite)` и
    `trading-engine-build-windows`. В Cargo-логах проверить отсутствие
    Engine/Execution. Для Research сравнить SHA-256 `okx-agent.exe` с

@@ -1,11 +1,11 @@
 # Native CI ownership and build boundaries (#537)
 
-The target branch-protection rule requires only `ci`. It fails closed unless
-`classify`, `linux-core` and `windows-native` all succeed. The three legacy
-display names remain in the workflow for installed CONTROL Research-v1
-provenance and publisher checks; GitHub branch protection must be migrated
-after `ci` appears on a successful Ready PR. Skipped financial tests are never
-reported as an executed financial test run.
+Branch protection requires only `ci`. `select-checks` classifies changed
+owners; `ci` directly verifies every applicable owner job and dependency,
+architecture, portable Rust and Edge check, including expected `skipped`
+results on routes that must not build Engine. There are no separate
+`linux-core` / `windows-native` aggregators or synthetic success aliases.
+Skipped financial tests are never reported as executed financial tests.
 
 **One automatic CI for `main`:** `.github/workflows/ci.yml` runs the protected
 checks and, only after their success, the optional Native-base publication job.
@@ -18,12 +18,12 @@ jobs were removed from the main workflow.
 
 | Changed files (complete GitHub diff) | Direct owner and consumers | Ready CI | Native release artifact |
 | --- | --- | --- | --- |
-| Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus Host Controller consumer | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None: host identities are not an installable four-component bundle |
-| Only `crates/okx-host-controller/src/**/*.rs` and optional Launcher Rust source (+ docs) | Host Controller and Launcher | `host-controller-launcher-checks`; no Trading Engine/SQL compilation | None |
-| Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory financial `trading-engine-acceptance-windows`, independent `trading-engine-regressions-windows`, parallel `trading-engine-build-windows`, B1 and Linux financial regressions | Full verified Windows bundle on qualifying PR |
+| Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus Host Controller consumer | `host-windows`; no Trading Engine/SQL compilation | None: host identities are not an installable four-component bundle |
+| Only `crates/okx-host-controller/src/**/*.rs` and optional Launcher Rust source (+ docs) | Host Controller and Launcher | `host-windows`; no Trading Engine/SQL compilation | None |
+| Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory financial `engine-windows`, independent `trading-engine-regressions-windows`, parallel `trading-engine-build-windows` and portable Rust checks | Full verified Windows bundle on qualifying PR |
 | Shared `okx-api`, `okx-market-runtime`, `okx-ipc-contracts`, root Cargo files, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
 | Narrow Research/Host `Cargo.toml` with optional `Cargo.lock` | Only that owner and its actual consumers | Scoped **only after exact before/after Windows Cargo closure proof**, including versions/features/dev dependencies; otherwise full Native | Research-only standalone three-file component when its exact owner scope qualifies; host-only nondeployable evidence otherwise |
-| Research-only owner changes; unchanged Engine/Host release closure | Research/IPC consumers | Standalone Research Windows gate and independently verified Cargo closure, exact Ready PR attempt and required aggregate jobs | Raw `okx-research-component-<PR_HEAD_SHA>` CI artifact: only `Cargo.lock`, `manifest.json` (`okx.windows.research-component/v1`), `okx-research-service.exe`; append-only `research-component-<MERGE_SHA>` after verified merge, no Engine files |
+| Research-only owner changes; unchanged Engine/Host release closure | Research/IPC consumers | `research-windows` and independently verified Cargo closure, exact Ready PR attempt and `ci` | Raw `okx-research-component-<PR_HEAD_SHA>` CI artifact: only `Cargo.lock`, `manifest.json` (`okx.windows.research-component/v3`), `okx-research-service.exe`; append-only `research-component-<MERGE_SHA>` after verified merge, no Engine files |
 | Documentation only / Cloudflare-only | Documentation / MCP | Existing scoped gates | No fresh Native build |
 | Mixed host + Research or Cloudflare, unknown paths, renames, incomplete diff | Unknown/shared impact | Full Native matrix | Only if accepted |
 
@@ -32,7 +32,7 @@ implementation files inside the two host crates. A Host or Research manifest
 change takes the corresponding scoped route **only if a separate resolver proof
 establishes** that all protected Windows dependency closures are identical.
 Unverified dependency changes and installation contracts stay full. The
-`classify` job verifies the complete comparison of the immutable event
+`select-checks` verifies the complete comparison of the immutable event
 base and head. A failed, capped or ambiguous comparison selects full impact.
 Draft executes the checks emitted by this same job without fetching Git
 history or classifying the diff again. Ready can narrow a manifest candidate
@@ -48,7 +48,7 @@ protocol. The financial SQLite owner remains in `okx-trade-execution` and its
 TradeService/Engine consumers remain in `okx-trading-engine`; this stage does **not**
 claim separate financial SQL and Engine release cycles.
 
-For a full Native change, `windows-native` requires financial acceptance,
+For a full Native change, `ci` requires financial acceptance,
 all Windows regression suites and the Windows release build to succeed.
 The complete budgeted financial collector and isolated OS/SQL/process fixtures
 remain on one runner. The `okx-native-finance-check` CI tool builds and tests
@@ -102,13 +102,28 @@ Acceptance controls:
    that job compiles both host owner/consumer crates, never Agent/Execution.
 2. A shared IPC, Cargo manifest, SQL or Engine diff selects full financial CI.
 3. A mixed host and non-host diff cannot inherit the cheap host path.
-4. Existing provenance aggregate names remain, and the host-only branch fails
-   if its specific Windows job fails or is skipped.
+4. `ci` directly rejects failed or unexpectedly skipped `host-windows`,
+   with no extra aggregate job.
 5. Changes to these classifier/workflow/architecture rules themselves select
    `full`; the first adoption therefore requires existing full acceptance.
 
 Measured elapsed times and the possible future separation of Engine vs SQL
 test jobs remain open acceptance work, not completed by this routing change.
+
+### First-attempt baseline before removing the two aggregators (#599)
+
+| Existing Ready run | Workflow elapsed | Successful job runner time (sum) | Critical Windows owner |
+| --- | ---: | ---: | --- |
+| [Full #598](https://github.com/iamaman11/okx/actions/runs/45713166028) | 7m 08s | ~28.4 runner-min | `trading-engine-acceptance-windows`: 6m 46s |
+| [Research #597](https://github.com/iamaman11/okx/actions/runs/45710343540) | 6m 39s | ~7.8 runner-min | `research-service-tests-windows`: 6m 20s |
+
+Those figures come from the immutable run and individual GitHub job
+`started_at`/`completed_at` timestamps; skipped jobs contribute no runner time.
+The baseline contains `linux-core` and `windows-native` aggregation (2–3s
+each), so deleting them primarily removes scheduling hops and two Ubuntu
+runner allocations; it cannot by itself remove the Windows compilation on the
+critical path. Compare first-attempt owner routes on the **same code scope**
+after this change before claiming a measured wall-clock or cost improvement.
 
 ## Cargo consumer inventory (#560, diagnostic phase)
 
@@ -131,7 +146,7 @@ all Windows binaries. An unavailable push diff is also explicitly unverified.
 **The inventory is diagnostic-only, not a skip authorization.** The existing
 fail-closed classifier and immutable-release checks still select tests and
 builds. Narrow manifest candidates pass through a *separate* pre/post resolver
-in the existing `classify` job: both Cargo versions use the same pinned toolchain,
+in the existing `select-checks` job: both Cargo versions use the same pinned toolchain,
 `--locked`, and `--filter-platform x86_64-pc-windows-msvc`. The proof compares
 the resolved package identities, checksums, enabled and declared features,
 dependency aliases/kinds/targets and crate target definitions across complete
@@ -142,7 +157,7 @@ No separate workflow or Windows runner is added to classify the change.
 
 For a **Research-only** change, no Native-base ZIP is fetched or composed.
 The standalone Windows owner job builds the Research executable only, checks
-the strict three-file `okx.windows.research-component/v1` manifest and uploads
+the strict three-file `okx.windows.research-component/v3` manifest and uploads
 the raw `okx-research-component-<PR_HEAD_SHA>` PR CI artifact. CONTROL accepts
 it only after checking the exact successful Ready run **attempt**, required
 job results, non-expired artifact digest, and equal GitHub tested/main trees.

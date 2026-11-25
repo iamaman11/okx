@@ -6,11 +6,11 @@ For an invalid plan, start with `cargo test --locked -p okx-strategy-core --lib 
 
 On a Draft PR the same selector runs on Linux as `draft-owner-feedback` (YAML job ID `draft-component-tests`). A change to shared configuration, the workflow or an unknown/deleted path expands the Linux checks. The editable loop does not start the Windows release matrix. Ready-for-review, protected checks, verified Research-only releases and exact-tree main reuse remain integration decisions; a successful Draft by itself cannot authorize reuse. Compare cache state, queue and job wall time separately.
 
-Current Ready CI emits one target required status `ci` and retains the three
-legacy provenance display names `classify`, `linux-core` and `windows-native`.
-The branch-protection rule must be switched after the new check is observed.
+Ready CI emits one required status `ci`, with `select-checks` routing affected
+owners. The former `classify` display name and `linux-core`/`windows-native`
+aggregators have been removed after the versioned CONTROL provenance migration.
 For applicable Rust changes,
-`dependency-audit` must succeed before `linux-core` and `ci` can succeed;
+`dependency-audit` must succeed before `ci` can succeed;
 docs-only and Edge-only changes require the audit job to be explicitly
 **skipped**. Full Native/Engine changes retain a separate Windows financial
 collector, release builder and four Windows regression suites: `engine`,
@@ -18,9 +18,9 @@ collector, release builder and four Windows regression suites: `engine`,
 `--all-targets` Clippy with `-D warnings` after Host tests; there is no
 standalone `clippy` matrix cell. No finance witness, K9 scenario or
 clock-sensitive Engine/Execution runner is replaced by Clippy's relocation.
-The two publisher jobs still require exact first-attempt Ready PR provenance,
-while installed CONTROL also verifies its existing seven-job Research roster;
-do not rename those jobs without a versioned installed-verifier migration.
+The two publisher jobs still require exact first-attempt Ready PR provenance.
+Compatible CONTROL verifies Research v3's six exact Ready statuses; legacy
+v1/v2 archives retain their seven-status provenance policy.
 Automatic accepted-`main` pushes reuse exact already-tested PR source trees
 and artifacts without rebuilding Engine or claiming fresh financial tests.
 The reduced
