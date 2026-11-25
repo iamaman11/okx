@@ -80,7 +80,8 @@ function validate(yaml, fileNames) {
   const classify = job('component_impact');
   assert.match(classify, /^    name: classify$/m);
   assert.match(classify, /component_scope: \$\{\{ steps.proven_scope.outputs.scope \}\}/);
-  assert.match(classify, /--dependency-candidate < "\$RUNNER_TEMP\/ci-files.json"/);
+  assert.match(classify, /python3 -B scripts\/check_ci_native_scope\.py --github-plan/);
+  assert.match(classify, /plan_args\+=\(--allow-dependency-candidate\)/);
   assert.match(classify, /if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'/);
   assert.match(classify, /git fetch --no-tags --depth=1 origin "\$BASE_SHA"/);
   assert.match(classify, /git worktree add --detach "\$base" "\$BASE_SHA"/);
@@ -94,6 +95,12 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(classify, /pulls\/\$PR_NUMBER\/files|prepare-research-release\.ps1/);
   assert.match(classify, /"research_only=true" >> "\$GITHUB_OUTPUT"/);
   assert.match(classify, /native_proof=RESEARCH_OWNER_ONLY/);
+  const draft = job('draft-component-tests');
+  assert.match(draft, /needs: component_impact/);
+  assert.match(draft, /DRAFT_CHECKS: \$\{\{ needs\.component_impact\.outputs\.draft_checks \}\}/);
+  assert.match(draft, /check_p0\.py --checks "\$DRAFT_CHECKS"/);
+  assert.doesNotMatch(draft, /check_p0\.py --base|fetch-depth: 0/);
+  assert.match(job('dependency-audit'), /if: \(github.event_name != 'pull_request' \|\| github.event.pull_request.draft != true\)/);
   const research = job('research_service_tests_windows');
   assert.match(research, /base_head: \$\{\{ steps\.package\.outputs\.base_head \}\}/);
   assert.equal((research.match(/prepare-research-release\.ps1 -Dist/g) || []).length, 1);
@@ -295,8 +302,8 @@ function validate(yaml, fileNames) {
 }
 
 validate(source, workflows);
-// A Research-owned OS resource policy can change native Finance latency even
-// without touching Engine source while the Engine-hosted Worker still exists.
+// Research's OS resource policy can change the measured Native Finance latency
+// without touching Engine source.
 // Route that rare change through the real Windows financial acceptance gate.
 function scopeFor(filename) {
   const python = process.platform === 'win32' ? 'python' : 'python3';

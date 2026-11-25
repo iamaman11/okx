@@ -3,9 +3,9 @@ from unittest.mock import patch
 from pathlib import Path
 import re
 
-from check_ci_native_scope import classify as ready_classify
+from check_ci_native_scope import classify as ready_classify, github_plan, select_draft
 from check_p0 import (check_counts, local_component, measured_mcp_native_under_research,
-                      measured_native_under_research, measured_t10, execute, select)
+                      measured_native_under_research, measured_t10, execute)
 
 
 class FeedbackTests(unittest.TestCase):
@@ -84,34 +84,32 @@ class FeedbackTests(unittest.TestCase):
             "full_scale_execution": "not_attempted", "side_effects": "none"}}
 
     def test_kernel_and_boundaries(self):
-        self.assertEqual(select("M", "crates/okx-research-domain/src/lib.rs"), {"expanded"})
-        self.assertEqual(select("M", "crates/okx-strategy-core/src/time_series.rs"),
+        self.assertEqual(select_draft("modified", "crates/okx-research-domain/src/lib.rs"), {"expanded"})
+        self.assertEqual(select_draft("modified", "crates/okx-strategy-core/src/time_series.rs"),
                          {"strategy", "research", "worker", "analysis"})
-        self.assertEqual(select("M", "crates/okx-strategy-core/src/operators.rs"), {"strategy", "research", "worker", "analysis"})
-        self.assertEqual(select("M", "crates/okx-research-protocol/src/strategy_contract.rs"),
+        self.assertEqual(select_draft("modified", "crates/okx-strategy-core/src/operators.rs"), {"strategy", "research", "worker", "analysis"})
+        self.assertEqual(select_draft("modified", "crates/okx-research-protocol/src/strategy_contract.rs"),
                          {"wire", "ipc", "worker", "mcp", "strategy", "research", "analysis"})
-        self.assertEqual(select("M", "crates/okx-research-service/src/analytics/jobs.rs"), {"worker"})
-        self.assertEqual(select("M", "crates/okx-research-protocol/src/research_ipc.rs"), {"wire", "worker", "ipc", "mcp"})
-        self.assertFalse(select("M", "docs/testing.md"))
+        self.assertEqual(select_draft("modified", "crates/okx-research-service/src/analytics/jobs.rs"), {"worker"})
+        self.assertEqual(select_draft("modified", "crates/okx-research-protocol/src/research_ipc.rs"), {"wire", "worker", "ipc", "mcp"})
+        self.assertFalse(select_draft("modified", "docs/testing.md"))
 
     def test_worker_internal_changes_never_select_agent(self):
         for path in ("source_io.rs", "source_api.rs", "producer.rs", "invocation.rs", "process_memory.rs"):
             source = f"crates/okx-research-service/src/{path}"
-            self.assertEqual(select("M", source), {"worker"})
+            self.assertEqual(select_draft("modified", source), {"worker"})
             with (patch("check_p0.tests", return_value="") as run_tests,
                   patch("check_p0.measured_t10", return_value={}),
                   patch("check_p0.report_t10")):
-                execute(select("M", source))
+                execute(select_draft("modified", source))
             packages = [call.args[0] for call in run_tests.call_args_list]
             self.assertEqual(set(packages), {"okx-research-service"})
 
-    def test_shared_ipc_and_worker_transport_select_both_sides(self):
+    def test_shared_ipc_and_process_entrypoint_select_both_sides(self):
         for path in ("crates/okx-research-protocol/src/research_ipc.rs",
-                     "crates/okx-research-service/src/ipc.rs",
-                     "crates/okx-research-service/src/ipc/correlation_tests.rs",
                      "crates/okx-research-service/src/main.rs"):
-            self.assertIn("ipc", select("M", path))
-            self.assertIn("worker", select("M", path))
+            self.assertIn("ipc", select_draft("modified", path))
+            self.assertIn("worker", select_draft("modified", path))
             with (patch("check_p0.tests", return_value="") as run_tests,
                   patch("check_p0.measured_t10", return_value={}),
                   patch("check_p0.report_t10"),
@@ -119,10 +117,56 @@ class FeedbackTests(unittest.TestCase):
                   patch("check_p0.report_native_under_research"),
                   patch("check_p0.subprocess.check_output", return_value='{"target_directory":"/tmp/no-exec"}'),
                   patch.dict("check_p0.os.environ")):
-                execute(select("M", path) - {"mcp"})
+                execute(select_draft("modified", path) - {"mcp"})
             packages = [call.args[0] for call in run_tests.call_args_list]
             self.assertIn("okx-research-service", packages)
             self.assertIn("okx-trading-engine", packages)
+
+    def test_one_plan_routes_research_transport_without_engine(self):
+        pages = [[{"filename": "crates/okx-research-service/src/ipc/correlation_tests.rs",
+                   "status": "modified"}]]
+        draft = github_plan(pages, allow_dependency_candidate=False)
+        self.assertEqual(draft, github_plan(pages, allow_dependency_candidate=True))
+        self.assertEqual(draft["scope"], "research")
+        self.assertEqual(draft["draft_checks"], "worker,worker-ipc")
+        with (patch("check_p0.tests", return_value="") as run_tests,
+              patch("check_p0.measured_t10", return_value={}),
+              patch("check_p0.report_t10")):
+            execute(set(draft["draft_checks"].split(",")))
+        self.assertEqual({call.args[0] for call in run_tests.call_args_list}, {"okx-research-service"})
+        self.assertIn(("okx-research-service", ("--test", "ipc_process")),
+                      [call.args for call in run_tests.call_args_list])
+
+    def test_incomplete_diff_retains_expanded_feedback_and_full_acceptance(self):
+        for pages in (None, [[]], [[{"filename": "docs/a.md", "status": "renamed"}]]):
+            plan = github_plan(pages, allow_dependency_candidate=True)
+            self.assertEqual(plan["scope"], "full")
+            self.assertEqual(plan["draft_checks"], "expanded")
+            self.assertEqual(plan["diff_verified"], "false")
+
+    def test_manifest_narrowing_requires_the_separate_ready_cargo_proof(self):
+        pages = [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "modified"}]]
+        draft = github_plan(pages, allow_dependency_candidate=False)
+        ready = github_plan(pages, allow_dependency_candidate=True)
+        self.assertEqual(draft["scope"], "full")
+        self.assertEqual(ready["scope"], "full")
+        self.assertEqual(ready["draft_checks"], draft["draft_checks"])
+        self.assertEqual(draft["manifest_candidate"], "none")
+        self.assertEqual(ready["manifest_candidate"], "research")
+
+    def test_plan_keeps_edge_consumer_checks_and_preserves_full_finance(self):
+        for names, expected in (
+            (["docs/testing.md"], ("docs", "", "false")),
+            (["cloudflare/okx-mcp/src/mcp.ts"], ("cloudflare", "mcp,wire,worker", "true")),
+            (["crates/okx-host-launcher/src/main.rs", "cloudflare/okx-mcp/src/mcp.ts"],
+             ("host-launcher", "host,mcp,wire,worker", "true")),
+            (["crates/okx-trade-execution/src/lib.rs", "crates/okx-analysis/src/lib.rs"],
+             ("full", "expanded", "false")),
+        ):
+            with self.subTest(files=names):
+                plan = github_plan([[{"filename": name, "status": "modified"} for name in names]],
+                                   allow_dependency_candidate=True)
+                self.assertEqual((plan["scope"], plan["draft_checks"], plan["edge_changed"]), expected)
 
     def test_host_source_uses_owner_and_consumer_not_expanded(self):
         for path in (
@@ -132,9 +176,9 @@ class FeedbackTests(unittest.TestCase):
             "crates/okx-host-launcher/src/main.rs",
             "crates/okx-host-launcher/src/stdio_capture.rs",
         ):
-            self.assertEqual(select("M", path), {"host"})
-            self.assertEqual(select("A", path), {"host"})
-            self.assertEqual(select("D", path), {"expanded"})
+            self.assertEqual(select_draft("modified", path), {"host"})
+            self.assertEqual(select_draft("added", path), {"host"})
+            self.assertEqual(select_draft("removed", path), {"expanded"})
         for path in (
             "crates/okx-host-controller/Cargo.toml",
             "crates/okx-host-launcher/build.rs",
@@ -142,11 +186,11 @@ class FeedbackTests(unittest.TestCase):
             "crates/okx-trading-engine/src/trade_service/mod.rs",
             "crates/okx-ipc-contracts/src/lib.rs",
         ):
-            self.assertNotEqual(select("M", path), {"host"})
+            self.assertNotEqual(select_draft("modified", path), {"host"})
 
     def test_host_protocol_feedback_runs_bridge_without_engine_or_finance(self):
         with patch("check_p0.tests", return_value="") as run_tests:
-            execute(select("M", "crates/okx-host-protocol/src/lib.rs"))
+            execute(select_draft("modified", "crates/okx-host-protocol/src/lib.rs"))
         packages = [call.args[0] for call in run_tests.call_args_list]
         self.assertEqual(packages, [
             "okx-host-protocol", "okx-host-launcher", "okx-host-controller", "okx-bridge-mcp",
@@ -155,8 +199,8 @@ class FeedbackTests(unittest.TestCase):
     def test_expand_uncertain_impact(self):
         for path in ("Cargo.lock", "crates/okx-research-domain/Cargo.toml", "rust-toolchain.toml",
                      "crates/okx-research-service/build.rs", ".github/workflows/ci.yml", "unknown"):
-            self.assertEqual(select("M", path), {"expanded"})
-        self.assertEqual(select("D", "crates/okx-research-domain/src/lib.rs"), {"expanded"})
+            self.assertEqual(select_draft("modified", path), {"expanded"})
+        self.assertEqual(select_draft("removed", "crates/okx-research-domain/src/lib.rs"), {"expanded"})
 
     def test_one_strategy_primitive_selects_owner_and_ready_research(self):
         def ready_scope(path):
@@ -165,7 +209,7 @@ class FeedbackTests(unittest.TestCase):
         for primitive in ("operators.rs", "query_plan.rs", "stream.rs", "time_series.rs"):
             path = f"crates/okx-strategy-core/src/{primitive}"
             self.assertEqual(ready_scope(path), "research")
-            draft_scope = select("M", path)
+            draft_scope = select_draft("modified", path)
             self.assertEqual(draft_scope, {"strategy", "analysis", "research", "worker"})
             with (patch("check_p0.tests", return_value="") as run_tests,
                   patch("check_p0.measured_t10", return_value={}),
@@ -184,7 +228,7 @@ class FeedbackTests(unittest.TestCase):
                      "crates/okx-trade-execution/src/lib.rs",
                      "crates/okx-strategy-core/Cargo.toml", "Cargo.lock"):
             self.assertEqual(ready_classify([[{"filename": path, "status": "modified"}]]), "full")
-            self.assertEqual(select("M", path), {"expanded"})
+            self.assertEqual(select_draft("modified", path), {"expanded"})
 
     def test_missing_or_filtered_out_test_is_a_failure(self):
         self.assertEqual(check_counts("test one ... ok\ntest two ... ignored", ["one"]), 1)

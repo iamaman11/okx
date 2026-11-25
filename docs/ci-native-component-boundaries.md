@@ -28,9 +28,13 @@ The host-only source exception remains intentionally **narrow**: just Rust
 implementation files inside the two host crates. A Host or Research manifest
 change takes the corresponding scoped route **only if a separate resolver proof
 establishes** that all protected Windows dependency closures are identical.
-Unverified dependency changes and installation contracts stay full. The classifier reads every
-GitHub diff page, rejects renames and ambiguous paths, and has negative tests
-in `scripts/check_ci_native_scope.py --self-test`.
+Unverified dependency changes and installation contracts stay full. The
+`classify` job verifies the complete comparison of the immutable event
+base and head. A failed, capped or ambiguous comparison selects full impact.
+Draft executes the checks emitted by this same job without fetching Git
+history or classifying the diff again. Ready can narrow a manifest candidate
+only after the separate Cargo closure proof.
+The job summary records the selected scope and reason.
 The same self-test checks that the shell scope guard accepts exactly the
 classifier's output tokens; it runs on Draft PRs before Rust compilation.
 
@@ -81,9 +85,10 @@ Cargo profile. PR jobs restore caches from trusted main and compile their
 own source tree with Cargo.
 
 Draft PRs with only host Rust sources run direct Launcher and CONTROL Cargo
-tests of library and binary targets via `scripts/check_p0.py`, reusing the
-same host path classifier. Manifest, shared-code and CI changes retain the
-expanded Draft checks; no host exception covers them.
+tests of library and binary targets via `scripts/check_p0.py`. Research-owned
+IPC implementation changes run Research tests and its child-process contracts.
+Shared wire changes still exercise the consumers. Manifest and CI changes
+retain the expanded Draft checks.
 
 Acceptance controls:
 

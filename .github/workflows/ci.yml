@@ -76,7 +76,7 @@ jobs:
   dependency-audit:
     name: dependency-audit
     needs: component_impact
-    if: needs.component_impact.outputs.component_scope != '' && !contains(fromJSON('["docs","cloudflare"]'), needs.component_impact.outputs.component_scope)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft != true) && needs.component_impact.outputs.component_scope != '' && !contains(fromJSON('["docs","cloudflare"]'), needs.component_impact.outputs.component_scope)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,17 +156,16 @@ jobs:
       component_scope: ${{ steps.proven_scope.outputs.scope }}
       research_only: ${{ steps.classify.outputs.research_only }}
       edge_required: ${{ steps.classify.outputs.edge_required }}
+      draft_checks: ${{ steps.file_scope.outputs.draft_checks }}
+      draft_mcp: ${{ steps.file_scope.outputs.draft_mcp }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Reject unsafe component classifications
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
         run: python3 -B scripts/check_ci_native_scope.py --self-test
       - name: Classify complete changed-file impact
         id: file_scope
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -176,11 +175,13 @@ jobs:
           CHECKED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          scope=full
-          candidate=none
-          edge=false
+          files='null'
+          plan_args=()
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base="$PR_BASE"
+            if [[ "${{ github.event.pull_request.draft }}" != "true" ]]; then
+              plan_args+=(--allow-dependency-candidate)
+            fi
           elif [[ "$FORCED_PUSH" != true ]]; then
             base="$BEFORE_SHA"
           else
@@ -198,18 +199,9 @@ jobs:
                  and (.files | type == "array" and length > 0 and length < 300)
                ' "$RUNNER_TEMP/ci-compare.json" >/dev/null; then
             jq -c '[.files]' "$RUNNER_TEMP/ci-compare.json" > "$RUNNER_TEMP/ci-files.json"
-            scope="$(python3 -B scripts/check_ci_native_scope.py < "$RUNNER_TEMP/ci-files.json")"
-            edge="$(python3 -B scripts/check_ci_native_scope.py --edge-changed < "$RUNNER_TEMP/ci-files.json")"
-            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-              candidate="$(python3 -B scripts/check_ci_native_scope.py --dependency-candidate < "$RUNNER_TEMP/ci-files.json")"
-            fi
+            files="$(cat "$RUNNER_TEMP/ci-files.json")"
           fi
-          case "$scope" in docs|cloudflare|research|research-host|host-controller|host-launcher|full) ;; *) exit 1;; esac
-          case "$candidate" in none|research|host-controller|host-launcher) ;; *) exit 1;; esac
-          echo "scope=$scope" >> "$GITHUB_OUTPUT"
-          echo "manifest_candidate=$candidate" >> "$GITHUB_OUTPUT"
-          echo "edge_changed=$edge" >> "$GITHUB_OUTPUT"
-          echo "FILE_SCOPE=$scope; MANIFEST_CANDIDATE=$candidate"
+          python3 -B scripts/check_ci_native_scope.py --github-plan "${plan_args[@]}" <<<"$files"
       # Only a narrow manifest+optional lock candidate incurs an extra Cargo
       # resolver check. Every other Ready PR keeps its existing fast selector.
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
@@ -265,7 +257,6 @@ jobs:
           fi
       - name: Select only proven component scope
         id: proven_scope
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
         shell: bash
         run: |
           set -euo pipefail
@@ -290,7 +281,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.draft }}" == "true" ]]; then
             echo "build_required=false" >> "$GITHUB_OUTPUT"
             echo "native_required=false" >> "$GITHUB_OUTPUT"
-            echo "reason=draft PR; defer release build until ready" >> "$GITHUB_OUTPUT"
+            echo "reason=draft PR; run owner feedback and defer acceptance and release" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -374,59 +365,69 @@ jobs:
 
       - name: Classification
         run: |
-          echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
-          echo "REASON=${{ steps.classify.outputs.reason }}"
+          {
+            echo '### CI plan'
+            echo 'Verified event diff: ${{ steps.file_scope.outputs.diff_verified }}'
+            echo 'Component scope: ${{ steps.proven_scope.outputs.scope }}'
+            echo 'Cargo closure candidate: ${{ steps.file_scope.outputs.manifest_candidate }}'
+            echo 'Reason: ${{ steps.classify.outputs.reason }}'
+            echo 'Draft checks: ${{ steps.file_scope.outputs.draft_checks }}'
+            echo 'Mandatory checks enabled: ${{ steps.classify.outputs.build_required }}'
+            echo 'Trading Engine acceptance: ${{ steps.classify.outputs.native_required }}'
+            echo 'Cloudflare contracts: ${{ steps.classify.outputs.edge_required }}'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   draft-component-tests:
     name: draft-component-tests
+    needs: component_impact
     if: github.event_name == 'pull_request' && github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      DRAFT_CHECKS: ${{ needs.component_impact.outputs.draft_checks }}
       CARGO_PROFILE_TEST_DEBUG: 0
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
           persist-credentials: false
-      - name: Select checks from the complete PR diff
-        id: scope
+      - name: Verify CI routing contracts
         run: |
-          python3 -B scripts/check_ci_native_scope.py --self-test
+          if [[ -z "$DRAFT_CHECKS" && '${{ needs.component_impact.outputs.component_scope }}' != docs ]]; then
+            echo 'Draft check list is missing for a code change'
+            exit 1
+          fi
           python3 -B scripts/test_check_p0.py
           node scripts/test-ci-main-routing.cjs
           node scripts/test-ci-component-impact.cjs
-          python3 scripts/check_p0.py --base "$BASE_SHA" --plan
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
-        if: steps.scope.outputs.code == 'true'
+        if: env.DRAFT_CHECKS != ''
         with:
           toolchain: 1.100.0
           components: rustfmt
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: steps.scope.outputs.mcp == 'true'
+        if: needs.component_impact.outputs.draft_mcp == 'true'
         with:
           node-version-file: cloudflare/okx-mcp/.node-version
           cache: npm
           cache-dependency-path: cloudflare/okx-mcp/package-lock.json
       - name: Verify Rust formatting before compilation
-        if: steps.scope.outputs.code == 'true'
+        if: env.DRAFT_CHECKS != ''
         run: cargo fmt --all -- --check
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-        if: steps.scope.outputs.code == 'true'
+        if: env.DRAFT_CHECKS != ''
         id: cache
         with:
           shared-key: draft-component-tests
           cache-workspace-crates: true
       - name: Run selected owner and consumer checks
-        if: steps.scope.outputs.code == 'true'
+        if: env.DRAFT_CHECKS != ''
         env:
           CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
           echo "Cargo cache exact hit: $CACHE_HIT" >> "$GITHUB_STEP_SUMMARY"
-          python3 scripts/check_p0.py --base "$BASE_SHA"
+          python3 -B scripts/check_p0.py --checks "$DRAFT_CHECKS"
 
   architecture_contracts:
     name: architecture-contracts

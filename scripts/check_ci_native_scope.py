@@ -10,6 +10,7 @@ data always require the full native financial gate.
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -36,10 +37,12 @@ _HOST_MANIFESTS = {
     "crates/okx-host-controller/Cargo.toml",
     "crates/okx-host-launcher/Cargo.toml",
 }
-# The legacy Engine still launches this Research Worker inside its trading
-# process tree. Its Windows CPU/memory Job policy therefore changes the actual
-# Finance-vs-Research scheduling contract, even though Cargo does not link it.
-# Keep mandatory Engine load acceptance until the old child is retired.
+DRAFT_CHECKS = frozenset({
+    "kernel", "strategy", "analysis", "research", "worker", "worker-ipc",
+    "wire", "ipc", "mcp", "host", "expanded",
+})
+# Research starts separately, but the Windows resource policy and process
+# entrypoint can still affect the measured Finance-vs-Research load boundary.
 _ENGINE_RESEARCH_RUNTIME_POLICY = {
     "crates/okx-research-service/src/process_memory.rs",
     "crates/okx-research-service/src/main.rs",
@@ -117,18 +120,14 @@ def classify(pages):
     files = verified_entries(pages)
     if files is None:
         return "full"
-    categories = set()
-    for item in files:
-        path = item["filename"]
-        kind = category(path)
-        if kind == "full":
-            return "full"
-        categories.add(kind)
+    return _scope({category(item["filename"]) for item in files})
+
+
+def _scope(categories):
+    if "full" in categories:
+        return "full"
     if "research" in categories:
         if categories & {"host-controller", "host-launcher"}:
-            if any(category(path) == "research" and not _research_source(path) for path in
-                   (entry["filename"] for entry in files)):
-                return "full"
             return "research-host"
         return "research"
     if categories & {"host-controller", "host-launcher"}:
@@ -145,6 +144,66 @@ def _research_source(path):
         path.startswith(root + owner) for root in _RESEARCH_DIRS
         for owner in ("src/", "tests/")
     )
+
+
+def draft_checks(path, kind):
+    """Map the classified owner to its short Draft checks."""
+    if kind == "docs":
+        return set()
+    if kind == "cloudflare":
+        return {"mcp", "wire", "worker"}
+    if kind in {"host-controller", "host-launcher"}:
+        return {"host"}
+    if kind == "research":
+        if path.startswith("crates/okx-strategy-core/src/"):
+            return {"strategy", "research", "worker", "analysis"}
+        if path.startswith("crates/okx-analysis/src/"):
+            return {"analysis", "kernel"}
+        if path.startswith("crates/okx-research/src/"):
+            return {"research", "worker"}
+        if path.startswith(("crates/okx-research-service/src/ipc/", "crates/okx-research-service/tests/")) or (
+            path == "crates/okx-research-service/src/ipc.rs"
+        ):
+            return {"worker", "worker-ipc"}
+        if path.startswith("crates/okx-research-service/src/"):
+            return {"worker"}
+    if path == "crates/okx-research-service/src/main.rs":
+        return {"ipc", "worker"}
+    if path == "crates/okx-research-service/src/process_memory.rs":
+        return {"worker"}
+    if path == "crates/okx-research-protocol/src/strategy_contract.rs":
+        return {"wire", "ipc", "worker", "mcp", "strategy", "research", "analysis"}
+    if path.startswith(("crates/okx-ipc-contracts/src/", "crates/okx-research-protocol/src/")) and path.endswith(".rs"):
+        return {"wire", "ipc", "worker", "mcp"}
+    return {"expanded"}
+
+
+def select_draft(status, path):
+    return draft_checks(path, category(path)) if status in {"added", "modified"} else {"expanded"}
+
+
+def github_plan(pages, *, allow_dependency_candidate):
+    files = verified_entries(pages)
+    scope, candidate, edge, checks = "full", "none", False, {"expanded"}
+    if files is not None:
+        owners = [(entry, category(entry["filename"])) for entry in files]
+        scope = _scope({kind for _, kind in owners})
+        candidate = dependency_candidate(pages) if allow_dependency_candidate else "none"
+        edge = any(kind == "cloudflare" for _, kind in owners)
+        checks = set()
+        for entry, kind in owners:
+            checks.update(draft_checks(entry["filename"], kind)
+                          if entry["status"] != "removed" else {"expanded"})
+        if "expanded" in checks:
+            checks = {"expanded"}
+    return {
+        "scope": scope,
+        "manifest_candidate": candidate,
+        "edge_changed": str(edge).lower(),
+        "draft_checks": ",".join(sorted(checks)),
+        "draft_mcp": str(bool(checks & {"mcp", "expanded"})).lower(),
+        "diff_verified": str(files is not None).lower(),
+    }
 
 
 def edge_changed(pages):
@@ -234,11 +293,8 @@ def _self_test() -> None:
     # source changes before their dedicated short Windows job could start.
     expected_scopes = {"docs", "cloudflare", "research", "research-host", "host-controller", "host-launcher", "full"}
     scope_guards = re.findall(r'case "\$scope" in ([a-z|-]+)\)', workflow)
-    assert len(scope_guards) == 2, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
-    for entry in scope_guards:  # raw file scope and final Cargo-proven scope
-        guard_scopes = entry.split("|")
-        assert len(guard_scopes) == len(set(guard_scopes))
-        assert set(guard_scopes) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
+    assert len(scope_guards) == 1, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
+    assert set(scope_guards[0].split("|")) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
     assert "component_scope: ${{ steps.proven_scope.outputs.scope }}" in workflow
     assert 'research_only: ${{ steps.classify.outputs.research_only }}' in workflow
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
@@ -379,6 +435,8 @@ def main() -> int:
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--dependency-candidate", action="store_true")
     output.add_argument("--edge-changed", action="store_true")
+    output.add_argument("--github-plan", action="store_true")
+    parser.add_argument("--allow-dependency-candidate", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         _self_test()
@@ -386,8 +444,15 @@ def main() -> int:
     try:
         pages = json.load(sys.stdin)
     except (ValueError, UnicodeError):
-        return 1
-    if args.edge_changed:
+        if not args.github_plan:
+            return 1
+        pages = None
+    if args.github_plan:
+        plan = github_plan(pages, allow_dependency_candidate=args.allow_dependency_candidate)
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output_file:
+            for name, value in plan.items():
+                print(f"{name}={value}", file=output_file)
+    elif args.edge_changed:
         print("true" if edge_changed(pages) else "false")
     else:
         print(dependency_candidate(pages) if args.dependency_candidate else classify(pages))
