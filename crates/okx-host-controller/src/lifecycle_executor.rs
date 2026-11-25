@@ -2143,16 +2143,33 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn direct_research_keyring_target_is_separate_and_readback_matches() {
+        use keyring::api::CredentialStoreApi;
+
         let mock = keyring::mock::Store::new().unwrap();
         let entry = research_credential_entry(mock.as_ref()).unwrap();
-        assert!(
-            format!("{entry:?}")
-                .contains("runtime-token.iamaman11.okx-research-service.cloudflare")
+        assert_eq!(
+            RESEARCH_CREDENTIAL_SERVICE,
+            "iamaman11.okx-research-service.cloudflare"
         );
-        assert!(!format!("{entry:?}").contains("iamaman11.okx-agent.cloudflare"));
+        assert_eq!(RESEARCH_CREDENTIAL_ACCOUNT, "runtime-token");
         write_and_verify_research_credential(&entry, b"0123456789abcdef0123456789abcdef").unwrap();
-        let readback = Zeroizing::new(entry.get_secret().unwrap());
+        let exact_research_target = mock
+            .build(
+                RESEARCH_CREDENTIAL_SERVICE,
+                RESEARCH_CREDENTIAL_ACCOUNT,
+                None,
+            )
+            .unwrap();
+        let readback = Zeroizing::new(exact_research_target.get_secret().unwrap());
         assert_eq!(&readback[..], b"0123456789abcdef0123456789abcdef");
+        let engine_target = mock
+            .build(
+                "iamaman11.okx-agent.cloudflare",
+                RESEARCH_CREDENTIAL_ACCOUNT,
+                None,
+            )
+            .unwrap();
+        assert!(engine_target.get_secret().is_err());
     }
 
     #[cfg(windows)]
