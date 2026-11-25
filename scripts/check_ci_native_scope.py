@@ -330,19 +330,20 @@ def _self_test() -> None:
     # classifier. A stale host-control spelling once rejected host-controller
     # source changes before their dedicated short Windows job could start.
     expected_scopes = {"docs", "cloudflare", "engine", "research", "research-host", "host-controller", "host-launcher", "full"}
-    scope_guards = re.findall(r'case "\$scope" in ([a-z|-]+)\)', workflow)
+    selector = workflow.split("\n  component_impact:\n", 1)[1].split("\n  draft-component-tests:\n", 1)[0]
+    scope_guards = re.findall(r'case "\$scope" in ([a-z|-]+)\)', selector)
     assert len(scope_guards) == 1, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
     assert set(scope_guards[0].split("|")) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
     assert "component_scope: ${{ steps.proven_scope.outputs.scope }}" in workflow
     assert 'research_only: ${{ steps.classify.outputs.research_only }}' in workflow
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
     assert "--filter-platform x86_64-pc-windows-msvc" in workflow
-    windows = workflow.split("\n  required_windows:\n", 1)[1].split("\n  trading_engine_build_windows:\n", 1)[0]
-    assert "needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows," in windows
-    assert 'test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"' in windows
-    assert 'test "${{ needs.trading_engine_regressions_windows.result }}" = "success"' in windows
-    assert windows.count('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"') == 5
-    assert 'test "${{ needs.trading_engine_build_windows.result }}" = "success"' in windows
+    protected = workflow.split("\n  required_ci:\n", 1)[1].split("\n  trading_engine_build_windows:\n", 1)[0]
+    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows]" in protected
+    for owner in ("trading_engine_acceptance_windows", "trading_engine_regressions_windows", "trading_engine_build_windows"):
+        assert f"check_result '${{{{ needs.{owner}.result }}}}' success" in protected, f"CI_FINANCE_GATE_MISSING:{owner}"
+        assert protected.count(f"check_result '${{{{ needs.{owner}.result }}}}' skipped") == 2, f"CI_SCOPE_EXCLUSION_MISSING:{owner}"
+    assert "['dependency-audit'].result }}\" success dependency-audit" in protected
     host = workflow.split("\n  host_controller_launcher_checks:\n", 1)[1].split("\n  trading_engine_acceptance_windows:\n", 1)[0]
     assert "needs.component_impact.outputs.component_scope == 'host-controller'" in host
     assert "needs.component_impact.outputs.component_scope == 'host-launcher'" in host
@@ -358,7 +359,7 @@ def _self_test() -> None:
     assert "standalone_research_status_is_typed_and_does_not_claim_edge_online" in host, "HOST_RESEARCH_STATUS_TYPED_WITNESS_REQUIRED"
     assert "research_token_provision_command_has_no_bearer_fields" in host, "HOST_RESEARCH_SECRET_WIRE_WITNESS_REQUIRED"
     assert "control_bridge_denies_research_mutations_before_network" in host, "HOST_BRIDGE_MUTATION_DENIAL_WITNESS_REQUIRED"
-    research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  required_windows:\n", 1)[0]
+    research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  required_ci:\n", 1)[0]
     assert "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
     for witness in (

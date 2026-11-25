@@ -106,8 +106,8 @@ jobs:
           retention-days: 14
 
   component_impact:
-    # This is the protected classifier itself; no redundant alias job.
-    name: classify
+    # Single immutable changed-owner selector, not another required status.
+    name: select-checks
     runs-on: ubuntu-latest
     outputs:
       build_required: ${{ steps.classify.outputs.build_required }}
@@ -280,7 +280,7 @@ jobs:
             ' <<<"$prs_json")"
 
             # A successful Draft run can share this SHA. Only a completed Ready
-            # run has successful Linux and Windows aggregate jobs in the same attempt.
+            # run has the sole ci gate plus its exact selector in the same attempt.
             successful_pr_ci=0
             if [[ -n "$head_sha" ]]; then
               candidates="$(gh api --paginate --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
@@ -289,7 +289,7 @@ jobs:
               while read -r run attempt; do
                 [[ -n "$run" ]] || continue
                 jobs="$(gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/actions/runs/$run/attempts/$attempt/jobs?per_page=100")"
-                if jq -e '[.[].jobs[] | select(.conclusion == "success") | .name] | index("ci") != null and index("linux-core") != null and index("windows-native") != null' <<<"$jobs" >/dev/null; then
+                if jq -e '[.[].jobs[] | select(.conclusion == "success") | .name] | index("ci") != null and index("select-checks") != null' <<<"$jobs" >/dev/null; then
                   successful_pr_ci=1
                   break
                 fi
@@ -523,7 +523,7 @@ jobs:
       # suite; current financial authority is the exact Windows 62/107 gate.
 
   cloudflare_mcp_contracts:
-    name: cloudflare-mcp-contracts
+    name: cloudflare-mcp
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.edge_required == 'true'
     runs-on: ubuntu-latest
@@ -566,65 +566,12 @@ jobs:
 
 
 
-  required_linux:
-    # Legacy required-check name is kept until branch protection is migrated.
-    name: linux-core
-    needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, research_service_tests_windows]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Aggregate required Linux, architecture and Cloudflare gates
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "${{ needs.component_impact.result }}" = "success"
-          # Dependency policy is mandatory for every Ready/main Rust scope,
-          # including a main merge reusing the exact successful PR tree.
-          case "${{ needs.component_impact.outputs.component_scope }}" in
-            docs|cloudflare) test "${{ needs['dependency-audit'].result }}" = "skipped" ;;
-            *) test "${{ needs['dependency-audit'].result }}" = "success" ;;
-          esac
-          if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
-            echo "REUSED_SUCCESSFUL_PR_CI=true"
-            exit 0
-          fi
-          case "${{ needs.component_impact.outputs.component_scope }}" in
-            docs|cloudflare) test "${{ needs.architecture_contracts.result }}" = "skipped" ;;
-            *) test "${{ needs.architecture_contracts.result }}" = "success" ;;
-          esac
-          if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" || "${{ needs.component_impact.outputs.component_scope }}" == "research-host" ]]; then
-            test "${{ needs.rust_tests_linux.result }}" = "skipped"
-            test "${{ needs.research_service_tests_windows.result }}" = "success"
-            if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
-              echo "LINUX_RESEARCH_COMPONENT_SHA=${{ needs.research_service_tests_windows.outputs.research_component_sha256 }}"
-            else
-              echo "LINUX_ENGINE_CLOSURE_REUSED_BASE=${{ needs.research_service_tests_windows.outputs.mixed_base_head }}"
-            fi
-          elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.rust_tests_linux.result }}" = "skipped"
-            test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
-            echo "LINUX_FINANCE_UNCHANGED_HOST_SOURCE_ONLY=true"
-          elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
-            test "${{ needs.rust_tests_linux.result }}" = "skipped"
-            test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
-            echo "LINUX_FINANCE_UNCHANGED_NATIVE_SOURCE=true"
-          else
-            test "${{ needs.rust_tests_linux.result }}" = "success"
-          fi
-          if [[ "${{ needs.component_impact.outputs.edge_required }}" == "true" ]]; then
-            test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
-          else
-            test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
-          fi
-          echo "REPOSITORY_GUARD_AND_LINUX=PASS"
-
-
   host_controller_launcher_checks:
     # Source-only lifecycle changes never compile a new trading Engine or SQL
     # owner. Every host change tests CONTROL and Launcher together because
     # CONTROL is a real consumer of the Launcher crate. This is NOT a complete
     # four-EXE release; publishing a new Native base still requires full CI.
-    name: host-controller-launcher-checks
+    name: host-windows
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.component_scope == 'host-controller' || needs.component_impact.outputs.component_scope == 'host-launcher' || needs.component_impact.outputs.component_scope == 'research-host')
     runs-on: windows-latest
@@ -714,7 +661,7 @@ jobs:
           retention-days: 14
 
   trading_engine_acceptance_windows:
-    name: trading-engine-acceptance-windows
+    name: engine-windows
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
@@ -1035,7 +982,7 @@ jobs:
           # accepts only explicit immutable Witness + CONTRACTS syntax.
           # Parallel acceptance independently proves FULL_PASS and compares
           # this set to every current-tree executed witness; any difference
-          # keeps the protected windows-native gate RED.
+          # keeps the protected ci gate RED.
           $manifestJson = & node scripts/ci-finance-witness-manifest.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $covered = @(($manifestJson | ConvertFrom-Json).witnesses)
@@ -1219,7 +1166,7 @@ jobs:
           retention-days: 14
 
   research_service_tests_windows:
-    name: research-service-tests-windows
+    name: research-windows
     needs: component_impact
     # A successful, identical PR tree is already accepted; main must reuse it.
     # Only an accepted PR run may mint component bytes. An unreviewed main
@@ -1332,10 +1279,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Installed CONTROL v1 requires the *existing* seven Ready display
-          # names and this v1 archive schema. A future v2 policy must arrive
-          # through a versioned manifest and verified consumer rollout, never
-          # by renaming a job or by minting a synthetic green alias.
+          # Only accepted CONTROL with the explicit v3 policy may install this
+          # component. The old v1/v2 seven-job provenance remains distinct.
           $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
           $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
           $dist = Join-Path $env:RUNNER_TEMP 'okx-research-component'
@@ -1357,12 +1302,13 @@ jobs:
           Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'release\okx-research-service.exe') (Join-Path $dist 'okx-research-service.exe')
           Copy-Item 'Cargo.lock' (Join-Path $dist 'Cargo.lock')
           [ordered]@{
-            schema = 'okx.windows.research-component/v1'
+            schema = 'okx.windows.research-component/v3'
             repository_id = 1388071566
             source_head_sha = $sourceHead
             source_tree = $sourceTree
             rust_version = (rustc --version).Trim()
             cargo_lock_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dist 'Cargo.lock')).Hash.ToLowerInvariant()
+            ci_status_policy = 'okx.github.actions.research-ready/v3'
             worker = [ordered]@{
               sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dist 'okx-research-service.exe')).Hash.ToLowerInvariant()
               size = (Get-Item -LiteralPath (Join-Path $dist 'okx-research-service.exe')).Length
@@ -1376,9 +1322,9 @@ jobs:
           $component = $proof | ConvertFrom-Json
           if ($component.research_component_sha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'RESEARCH_COMPONENT_SHA_UNVERIFIED' }
           "research_component_sha256=$($component.research_component_sha256)" >> $env:GITHUB_OUTPUT
-          "RESEARCH_READY_STATUS_POLICY=okx.github.actions.research-ready/v1" >> $env:GITHUB_STEP_SUMMARY
-          "RESEARCH_READY_STATUS_NAMES=classify,architecture-contracts,dependency-audit,cloudflare-mcp-contracts,research-service-tests-windows,linux-core,windows-native" >> $env:GITHUB_STEP_SUMMARY
-          "RESEARCH_COMPONENT_MANIFEST_SCHEMA=okx.windows.research-component/v1" >> $env:GITHUB_STEP_SUMMARY
+          "RESEARCH_READY_STATUS_POLICY=okx.github.actions.research-ready/v3" >> $env:GITHUB_STEP_SUMMARY
+          "RESEARCH_READY_STATUS_NAMES=select-checks,architecture-contracts,dependency-audit,cloudflare-mcp,research-windows,ci" >> $env:GITHUB_STEP_SUMMARY
+          "RESEARCH_COMPONENT_MANIFEST_SCHEMA=okx.windows.research-component/v3" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload isolated Research release evidence
         if: github.event_name == 'pull_request' && needs.component_impact.outputs.research_only == 'true'
@@ -1444,107 +1390,108 @@ jobs:
           retention-days: 14
 
 
-  required_windows:
-    # Legacy provenance and branch-protection name during the single-ci rollout.
-    # It succeeds
-    # on a real Windows gate or on the narrowly proven identical native tree;
-    # it never reports a newly executed 26/26 on the reuse path.
-    name: windows-native
-    needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows, host_controller_launcher_checks, cloudflare_mcp_contracts, research_service_tests_windows]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Enforce native gate or exact accepted evidence reuse
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "${{ needs.component_impact.result }}" = "success"
-          if [[ "${{ needs.component_impact.outputs.build_required }}" == "true" && "${{ needs.component_impact.outputs.edge_required }}" == "true" ]]; then
-            test "${{ needs.cloudflare_mcp_contracts.result }}" = "success"
-          else
-            test "${{ needs.cloudflare_mcp_contracts.result }}" = "skipped"
-          fi
-          if [[ "${{ needs.component_impact.outputs.build_required }}" == "false" ]]; then
-            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
-            test "${{ needs.component_impact.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
-            echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
-          elif [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
-            # Research is a separately releasable component. The accepted
-            # archive contains only its own EXE, manifest and Cargo.lock;
-            # Engine/CONTROL/Launcher bytes and finance jobs are untouched.
-            test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_OWNER_ONLY"
-            [[ "${{ needs.research_service_tests_windows.outputs.research_component_sha256 }}" =~ ^[0-9a-f]{64}$ ]]
-            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
-            test "${{ needs.research_service_tests_windows.result }}" = "success"
-            echo "WINDOWS_NATIVE_PROOF=RESEARCH_COMPONENT_VERIFIED_${{ needs.research_service_tests_windows.outputs.research_component_sha256 }}"
-            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
-          elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "research-host" ]]; then
-            test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_HOST_OWNER_CHECKS"
-            [[ "${{ needs.research_service_tests_windows.outputs.mixed_base_head }}" =~ ^[0-9a-f]{40}$ ]]
-            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
-            test "${{ needs.host_controller_launcher_checks.result }}" = "success"
-            test "${{ needs.research_service_tests_windows.result }}" = "success"
-            echo "WINDOWS_NATIVE_PROOF=MIXED_OWNER_CHECKS_WITH_VERIFIED_ENGINE"
-            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
-          elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
-            test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
-            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
-            test "${{ needs.host_controller_launcher_checks.result }}" = "success"
-            test "${{ needs.research_service_tests_windows.result }}" = "skipped"
-            echo "WINDOWS_NATIVE_PROOF=HOST_COMPONENTS_TESTED_NO_ENGINE_REBUILD"
-            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
-          elif [[ "${{ needs.component_impact.outputs.native_required }}" == "false" ]]; then
-            test "${{ needs.component_impact.outputs.native_proof }}" = "COMPONENT_SCOPED_UNCHANGED_NATIVE"
-            scope="${{ needs.component_impact.outputs.component_scope }}"
-            [[ "$scope" == "docs" || "$scope" == "cloudflare" ]]
-            test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
-            test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
-            test "${{ needs.research_service_tests_windows.result }}" = "skipped"
-            echo "WINDOWS_NATIVE_PROOF=COMPONENT_${scope}_NO_NATIVE_SOURCE_CHANGED"
-            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
-          elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "engine" ]]; then
-            test "${{ needs.component_impact.outputs.native_proof }}" = "ENGINE_OWNER_ONLY"
-            test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
-            test "${{ needs.trading_engine_regressions_windows.result }}" = "success"
-            test "${{ needs.trading_engine_build_windows.result }}" = "success"
-            echo "WINDOWS_NATIVE_PROOF=FRESH_ENGINE_AND_FULL_FINANCIAL_SUCCESS"
-            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
-          else
-            test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
-            test "${{ needs.trading_engine_regressions_windows.result }}" = "success"
-            test "${{ needs.trading_engine_build_windows.result }}" = "success"
-            echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
-            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
-          fi
-
   required_ci:
-    # The only *target* main branch-protection check. Keep the old Linux and
-    # Windows result jobs for the installed CONTROL's versioned Research-v1
-    # artifact verifier and the first-attempt release provenance contract.
-    # GitHub treats a skipped dependency as success in some branch rules, so
-    # the result is explicit and fails closed on missing/cancelled checks.
+    # The sole required status checks owner jobs directly. A skipped job may
+    # satisfy a GitHub branch rule, so require each expected result explicitly.
     name: ci
-    needs: [component_impact, required_linux, required_windows]
+    needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
-      - name: Require successful scoped CI and both provenance gates
+      - name: Require all and only affected owner and consumer checks
         shell: bash
         run: |
           set -euo pipefail
           test "${{ needs.component_impact.result }}" = "success"
-          test "${{ needs.required_linux.result }}" = "success"
-          test "${{ needs.required_windows.result }}" = "success"
-          echo "CI=PASS; only scoped owner checks were executed"
+          scope='${{ needs.component_impact.outputs.component_scope }}'
+          build='${{ needs.component_impact.outputs.build_required }}'
+          case "$scope" in docs|cloudflare|engine|research|research-host|host-controller|host-launcher|full) ;; *) exit 1 ;; esac
+          case "$build" in true|false) ;; *) exit 1 ;; esac
+          check_result() {
+            local actual="$1" expected="$2" name="$3"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error title=CI owner gate::$name expected $expected, observed $actual"
+              exit 1
+            fi
+          }
+          case "$scope" in
+            docs|cloudflare) check_result "${{ needs['dependency-audit'].result }}" skipped dependency-audit ;;
+            *) check_result "${{ needs['dependency-audit'].result }}" success dependency-audit ;;
+          esac
+          if [[ "$build" == false ]]; then
+            test '${{ needs.component_impact.outputs.reason }}' = 'merged tree exactly matches successful PR head tree'
+            for item in \
+              '${{ needs.architecture_contracts.result }}' \
+              '${{ needs.rust_tests_linux.result }}' \
+              '${{ needs.cloudflare_mcp_contracts.result }}' \
+              '${{ needs.host_controller_launcher_checks.result }}' \
+              '${{ needs.trading_engine_acceptance_windows.result }}' \
+              '${{ needs.trading_engine_regressions_windows.result }}' \
+              '${{ needs.trading_engine_build_windows.result }}' \
+              '${{ needs.research_service_tests_windows.result }}'; do
+              check_result "$item" skipped accepted-main-reuse
+            done
+            echo 'CI=PASS; exact accepted Ready tree reused without compilation'
+            exit 0
+          fi
+          case "$scope" in
+            docs|cloudflare) check_result "${{ needs.architecture_contracts.result }}" skipped architecture-contracts ;;
+            *) check_result "${{ needs.architecture_contracts.result }}" success architecture-contracts ;;
+          esac
+          if [[ '${{ needs.component_impact.outputs.edge_required }}' == true ]]; then
+            check_result '${{ needs.cloudflare_mcp_contracts.result }}' success cloudflare-mcp
+          else
+            check_result '${{ needs.cloudflare_mcp_contracts.result }}' skipped cloudflare-mcp
+          fi
+          case "$scope" in
+            docs|cloudflare)
+              test '${{ needs.component_impact.outputs.native_proof }}' = COMPONENT_SCOPED_UNCHANGED_NATIVE
+              check_result '${{ needs.rust_tests_linux.result }}' skipped portable-rust
+              check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
+              check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
+              check_result '${{ needs.trading_engine_acceptance_windows.result }}' skipped engine-windows
+              check_result '${{ needs.trading_engine_regressions_windows.result }}' skipped engine-regressions
+              check_result '${{ needs.trading_engine_build_windows.result }}' skipped engine-build
+              ;;
+            research|research-host|host-controller|host-launcher)
+              check_result '${{ needs.rust_tests_linux.result }}' skipped portable-rust
+              check_result '${{ needs.trading_engine_acceptance_windows.result }}' skipped engine-windows
+              check_result '${{ needs.trading_engine_regressions_windows.result }}' skipped engine-regressions
+              check_result '${{ needs.trading_engine_build_windows.result }}' skipped engine-build
+              case "$scope" in
+                research)
+                  test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_OWNER_ONLY
+                  [[ '${{ needs.research_service_tests_windows.outputs.research_component_sha256 }}' =~ ^[0-9a-f]{64}$ ]]
+                  check_result '${{ needs.research_service_tests_windows.result }}' success research-windows
+                  check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
+                  ;;
+                research-host)
+                  test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_HOST_OWNER_CHECKS
+                  [[ '${{ needs.research_service_tests_windows.outputs.mixed_base_head }}' =~ ^[0-9a-f]{40}$ ]]
+                  check_result '${{ needs.research_service_tests_windows.result }}' success research-windows
+                  check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows
+                  ;;
+                *)
+                  test '${{ needs.component_impact.outputs.native_proof }}' = HOST_WINDOWS_OWNER_AND_CONSUMER
+                  check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
+                  check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows
+                  ;;
+              esac
+              ;;
+            engine|full)
+              check_result '${{ needs.rust_tests_linux.result }}' success portable-rust
+              check_result '${{ needs.trading_engine_acceptance_windows.result }}' success engine-windows
+              check_result '${{ needs.trading_engine_regressions_windows.result }}' success engine-regressions
+              check_result '${{ needs.trading_engine_build_windows.result }}' success engine-build
+              check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
+              check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
+              case "$scope" in
+                engine) test '${{ needs.component_impact.outputs.native_proof }}' = ENGINE_OWNER_ONLY ;;
+                full) test '${{ needs.component_impact.outputs.native_proof }}' = NONE ;;
+              esac
+              ;;
+          esac
+          echo "CI=PASS; scope=$scope; no redundant Linux/Windows aggregators"
 
   # Build the four-component Windows artifact in parallel with acceptance.
   trading_engine_build_windows:
@@ -1816,7 +1763,7 @@ jobs:
   # Successful protected main checks publish the verified PR artifact here.
   publish_accepted_windows_release:
     name: publish-accepted-windows-release
-    needs: [dependency-audit, component_impact, required_linux, required_windows, required_ci]
+    needs: [dependency-audit, component_impact, required_ci]
     permissions:
       contents: write
       actions: read
@@ -1824,8 +1771,8 @@ jobs:
     concurrency:
       group: native-base-publication
       cancel-in-progress: false
-    # Explicit status guard is required: the protected aggregators succeed
-    # even when intentionally skipped component jobs appear in their ancestry.
+    # Explicit status guard is required: the sole protected ci job succeeds
+    # even when intentionally skipped component jobs appear in its ancestry.
     # GitHub's implicit success() would otherwise skip publication on main.
     if: >-
       ${{
@@ -1837,8 +1784,6 @@ jobs:
         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree' &&
         needs['dependency-audit'].result == 'success' &&
         needs.component_impact.result == 'success' &&
-        needs.required_linux.result == 'success' &&
-        needs.required_windows.result == 'success' &&
         needs.required_ci.result == 'success'
       }}
     runs-on: ubuntu-latest
@@ -1885,12 +1830,12 @@ jobs:
               ([.jobs[].name] | unique | length) == .total_count and
               all(.jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1) and
               ([.jobs[] | select(.conclusion == "success") | .name] as $ok |
-                all(["classify", "dependency-audit", "architecture-contracts",
-                     "cloudflare-mcp-contracts", "rust-tests-linux",
-                     "trading-engine-acceptance-windows", "trading-engine-regressions-windows (engine)",
+                all(["select-checks", "dependency-audit", "architecture-contracts",
+                     "cloudflare-mcp", "rust-tests-linux",
+                     "engine-windows", "trading-engine-regressions-windows (engine)",
                      "trading-engine-regressions-windows (host)", "trading-engine-regressions-windows (execution)",
                      "trading-engine-regressions-windows (research)",
-                     "trading-engine-build-windows", "linux-core", "windows-native", "ci"][];
+                     "trading-engine-build-windows", "ci"][];
                     . as $name | $ok | index($name) != null))
             ' <<<"$jobs" >/dev/null; then
               continue
@@ -2010,7 +1955,7 @@ jobs:
   # native-base lookup, or ZIP repack is permitted on main.
   publish_accepted_research_component:
     name: publish-accepted-research-component
-    needs: [dependency-audit, component_impact, required_linux, required_windows, required_ci]
+    needs: [dependency-audit, component_impact, required_ci]
     permissions:
       contents: write
       actions: read
@@ -2028,8 +1973,6 @@ jobs:
         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree' &&
         needs['dependency-audit'].result == 'success' &&
         needs.component_impact.result == 'success' &&
-        needs.required_linux.result == 'success' &&
-        needs.required_windows.result == 'success' &&
         needs.required_ci.result == 'success'
       }}
     runs-on: ubuntu-latest
@@ -2069,16 +2012,16 @@ jobs:
             jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/attempts/$attempt/jobs?per_page=100")"
             # The same Ready attempt must contain every authentic required
             # owner/gate success. Draft composition cannot satisfy this. The
-            # v1 roster is also installed CONTROL's accepted origin policy;
-            # no display-name migrations or green aliases are recognized.
+            # Research Ready v3 is the only roster for new publications;
+            # no legacy display aliases or green placeholders are accepted.
             if ! jq -e --arg head "$head" --argjson run "$candidate" '
               .total_count == (.jobs | length) and .total_count < 100 and
               ([.jobs[].name] | unique | length) == .total_count and
               all(.jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1) and
               ([.jobs[] | select(.conclusion == "success") | .name] as $ok |
-                all(["classify", "dependency-audit", "architecture-contracts",
-                     "research-service-tests-windows", "cloudflare-mcp-contracts",
-                     "linux-core", "windows-native", "ci"][]; . as $needed | $ok | index($needed) != null))
+                all(["select-checks", "dependency-audit", "architecture-contracts",
+                     "research-windows", "cloudflare-mcp", "ci"][];
+                    . as $needed | $ok | index($needed) != null))
             ' <<<"$jobs" >/dev/null; then
               continue
             fi

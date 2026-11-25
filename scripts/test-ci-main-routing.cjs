@@ -1,7 +1,7 @@
 'use strict';
 
-// One intended branch-protection status (ci), with legacy job names retained
-// for installed CONTROL provenance until its separately versioned migration.
+// One required status (`ci`) checks scoped owners directly. Research Ready v3
+// preserves exact provenance after the separately staged CONTROL migration.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
 const fs = require('node:fs');
@@ -22,9 +22,9 @@ const selectedCacheMatrix = "        profile: ${{ fromJSON(inputs.cache_profile 
 // separately accepted matrix result, but it remains a required -D warnings
 // command inside the host cell.
 const regressionSuites = ['engine', 'host', 'execution', 'research'];
-const releaseGates = ['trading-engine-acceptance-windows',
+const releaseGates = ['engine-windows',
   ...regressionSuites.map(suite => `trading-engine-regressions-windows (${suite})`),
-  'trading-engine-build-windows', 'linux-core', 'windows-native'];
+  'trading-engine-build-windows'];
 // GitHub REST currently returns the bare workflow path; some GitHub response
 // forms append @ref. Both are canonical, but another workflow is never one.
 const acceptedWorkflowPath = String.raw`test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")`;
@@ -61,10 +61,10 @@ function validate(yaml, fileNames) {
   assert.equal(map.size, entries.length, 'DUPLICATE_JOB_ID');
   // Finance, independent regressions and release share a single workflow.
   // The only cache-only job primes exact accepted main, outside the PR gate.
-  assert.ok(map.size <= 18, 'OBSOLETE_JOB_GRAPH_REGRESSION');
+  assert.ok(map.size <= 16, 'OBSOLETE_JOB_GRAPH_REGRESSION');
   for (const unused of ['required_classify', 'research_package_proof', 'draft-trading-migration-512',
     'draft-riskbook-migration-510', 'trading_safety_acceptance_windows', 'cloudflare_deploy', 'readonly_observer',
-    'production_recovery_promote', 'named_validate', 'all26_windows_targeted']) {
+    'production_recovery_promote', 'named_validate', 'all26_windows_targeted', 'required_linux', 'required_windows']) {
     assert.ok(!map.has(unused), `UNNECESSARY_CI_JOB:${unused}`);
   }
   function job(id) {
@@ -91,9 +91,9 @@ function validate(yaml, fileNames) {
     }
   }
 
-  // Keep the existing branch-protection display name without an alias runner.
+  // Short stable job display names are the only accepted Ready-v3 status roster.
   const classify = job('component_impact');
-  assert.match(classify, /^    name: classify$/m);
+  assert.match(classify, /^    name: select-checks$/m);
   assert.match(classify, /component_scope: \$\{\{ steps.proven_scope.outputs.scope \}\}/);
   assert.match(classify, /python3 -B scripts\/check_ci_native_scope\.py --github-plan/);
   assert.match(classify, /plan_args\+=\(--allow-dependency-candidate\)/);
@@ -109,8 +109,8 @@ function validate(yaml, fileNames) {
   assert.ok(classify.includes(acceptedWorkflowPath), 'MAIN_REUSE_MUST_MATCH_EXACT_CI_WORKFLOW_PATH');
   assert.match(classify, /\.run_attempt == 1\) \| \[\.id, \.run_attempt\] \| @tsv/,
     'UNREVIEWED_RERUN_CANNOT_AUTHORIZE_MAIN_REUSE');
-  assert.ok(classify.includes('index("ci") != null and index("linux-core") != null and index("windows-native") != null'),
-    'MAIN_REUSE_MUST_REQUIRE_SINGLE_CI_AND_LEGACY_PROVENANCE');
+  assert.ok(classify.includes('index("ci") != null and index("select-checks") != null'),
+    'MAIN_REUSE_MUST_REQUIRE_CI_AND_EXACT_SELECTOR');
   assert.match(classify, /host-controller\|host-launcher\) edge_required="\$\{\{ steps\.file_scope\.outputs\.edge_changed \}\}"/);
   assert.doesNotMatch(classify, /pulls\/\$PR_NUMBER\/files|prepare-research-release\.ps1/);
   assert.match(classify, /"research_only=true" >> "\$GITHUB_OUTPUT"/);
@@ -126,14 +126,15 @@ function validate(yaml, fileNames) {
   assert.match(research, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true'/,
     'MAIN_MUST_NOT_BUILD_UNREVIEWED_RESEARCH_ORIGIN');
   assert.match(research, /research_component_sha256: \$\{\{ steps\.package\.outputs\.research_component_sha256 \}\}/);
-  assert.match(research, /RESEARCH_READY_STATUS_POLICY=okx\.github\.actions\.research-ready\/v1/,
-    'ACTIVE_RESEARCH_READY_POLICY_MUST_RETAIN_ACCEPTED_V1_NAMES');
-  assert.doesNotMatch(research, /RESEARCH_READY_STATUS_POLICY=okx\.github\.actions\.research-ready\/v2/,
-    'UNACCEPTED_RESEARCH_V2_STATUS_POLICY_CANNOT_REPLACE_V1');
+  assert.match(research, /RESEARCH_READY_STATUS_POLICY=okx\.github\.actions\.research-ready\/v3/,
+    'RESEARCH_READY_V3_POLICY_REQUIRED_AFTER_CONTROL_MIGRATION');
+  assert.doesNotMatch(research, /RESEARCH_READY_STATUS_POLICY=okx\.github\.actions\.research-ready\/v[12]/,
+    'LEGACY_RESEARCH_STATUS_POLICY_CANNOT_REPLACE_V3');
   assert.doesNotMatch(research, /prepare-research-release\.ps1 -Dist/,
     'RESEARCH_ONLY_MUST_NOT_DOWNLOAD_NATIVE_BASE_OR_COPY_ENGINE_BYTES');
   assert.match(research, /Build self-contained Research-only Windows component/);
-  assert.match(research, /schema = 'okx\.windows\.research-component\/v1'/);
+  assert.match(research, /schema = 'okx\.windows\.research-component\/v3'/);
+  assert.match(research, /ci_status_policy = 'okx\.github\.actions\.research-ready\/v3'/);
   assert.match(research, /cargo_lock_sha256 = \(Get-FileHash/);
   assert.match(research, /node scripts\/research-component-artifact\.cjs \$dist \$sourceHead \$sourceTree/);
   assert.match(research, /RESEARCH_COMPONENT_EXACT_THREE_FILE_PROOF_FAILED/);
@@ -166,32 +167,13 @@ function validate(yaml, fileNames) {
   assert.match(host, /cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
   assert.match(host, /cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
   assert.doesNotMatch(host, /cargo build --locked --release -p okx-trading-engine/);
-  for (const [id, display] of [['required_linux', 'linux-core'],
-    ['required_windows', 'windows-native']]) {
-    assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'));
-    assert.match(job(id), /needs: \[component_impact,/);
-  }
-  // Cargo advisories/license/source policy must participate in the protected
-  // PR merge decision, not merely in post-merge release publication. GitHub
-  // treats conditional skipped jobs as successful required checks; the always
-  // running aggregate must explicitly require a real audit on Rust scopes.
-  const requiredLinux = job('required_linux');
-  assert.match(requiredLinux, /^    needs: \[component_impact, dependency-audit, /m,
-    'LINUX_AGGREGATE_MUST_WAIT_FOR_DEPENDENCY_AUDIT');
-  assert.match(requiredLinux,
-    /case "\$\{\{ needs\.component_impact\.outputs\.component_scope \}\}" in\n\s+docs\|cloudflare\) test "\$\{\{ needs\['dependency-audit'\]\.result \}\}" = "skipped" ;;\n\s+\*\) test "\$\{\{ needs\['dependency-audit'\]\.result \}\}" = "success" ;;\n\s+esac/,
-    'RUST_READY_MUST_NOT_ACCEPT_SKIPPED_OR_FAILED_DEPENDENCY_AUDIT');
-  assert.match(requiredLinux, /if: always\(\) && \(github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.draft != true\)/);
-  const auditGate = requiredLinux.indexOf('docs|cloudflare) test "${{ needs[\'dependency-audit\'].result }}" = "skipped"');
-  const mainReuseExit = requiredLinux.indexOf('REUSED_SUCCESSFUL_PR_CI=true');
-  assert.ok(auditGate >= 0 && mainReuseExit > auditGate,
-    'MAIN_EXACT_TREE_REUSE_MUST_NOT_SKIP_FRESH_DEPENDENCY_AUDIT');
   const names = {
     rust_tests_linux: 'rust-tests-linux',
-    trading_engine_acceptance_windows: 'trading-engine-acceptance-windows',
+    trading_engine_acceptance_windows: 'engine-windows',
     trading_engine_build_windows: 'trading-engine-build-windows',
-    research_service_tests_windows: 'research-service-tests-windows',
-    host_controller_launcher_checks: 'host-controller-launcher-checks',
+    research_service_tests_windows: 'research-windows',
+    host_controller_launcher_checks: 'host-windows',
+    cloudflare_mcp_contracts: 'cloudflare-mcp',
   };
   for (const [id, display] of Object.entries(names)) {
     assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'),
@@ -399,46 +381,70 @@ function validate(yaml, fileNames) {
     assert.match(release, directive);
     assert.match(prime, directive);
   }
-  const windows = job('required_windows');
-  assert.match(windows, /needs: \[component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows,/);
-  assert.match(windows, /test "\$\{\{ needs\.component_impact\.outputs\.native_proof \}\}" = "RESEARCH_OWNER_ONLY"/);
-  assert.match(windows, /research_component_sha256.*\^\[0-9a-f\]\{64\}\$/);
-  assert.match(windows, /WINDOWS_NATIVE_PROOF=RESEARCH_COMPONENT_VERIFIED_/);
-  assert.doesNotMatch(windows, /REUSED_ACCEPTED_BASE_\$\{\{ needs\.research_service_tests_windows/);
-  assert.match(windows, /test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "success"/);
-  assert.match(windows, /native_proof \}\}" = "ENGINE_OWNER_ONLY"/);
-  assert.match(windows, /WINDOWS_NATIVE_PROOF=FRESH_ENGINE_AND_FULL_FINANCIAL_SUCCESS/);
-  assert.equal((windows.match(/test "\$\{\{ needs\.trading_engine_regressions_windows\.result \}\}" = "skipped"/g) || []).length, 5,
-    'REGRESSION_JOB_MUST_BE_SKIPPED_ON_EVERY_NON_FINANCE_PATH');
-  const mixed = windows.slice(windows.indexOf('= "RESEARCH_HOST_OWNER_CHECKS"'),
-    windows.indexOf('WINDOWS_NATIVE_PROOF=MIXED_OWNER_CHECKS_WITH_VERIFIED_ENGINE'));
-  assert.ok(mixed.length > 0);
-  assert.match(mixed, /mixed_base_head.*\^\[0-9a-f\]\{40\}\$/);
-  for (const job of ['acceptance', 'regressions', 'build'])
-    assert.ok(mixed.includes('needs.trading_engine_' + job + '_windows.result }}" = "skipped"'));
-  for (const job of ['host_controller_launcher_checks', 'research_service_tests_windows'])
-    assert.ok(mixed.includes('needs.' + job + '.result }}" = "success"'));
-  assert.match(windows, /test "\$\{\{ needs.trading_engine_build_windows.result \}\}" = "success"/);
-  // The single merge requirement conjoins the existing component gates.
-  // Old displayed names remain for installed Research-v1 CONTROL provenance.
+  // The sole protected merge status directly validates all owner job results;
+  // GitHub's implicit success() cannot be trusted for skipped jobs.
   const requiredCi = job('required_ci');
   assert.match(requiredCi, /^    name: ci$/m);
-  assert.ok(requiredCi.includes('needs: [component_impact, required_linux, required_windows]'));
+  const directOwners = ['component_impact', 'dependency-audit', 'architecture_contracts',
+    'rust_tests_linux', 'cloudflare_mcp_contracts', 'host_controller_launcher_checks',
+    'trading_engine_acceptance_windows', 'trading_engine_regressions_windows',
+    'trading_engine_build_windows', 'research_service_tests_windows'];
+  assert.ok(requiredCi.includes('needs: [' + directOwners.join(', ') + ']'),
+    'CI_MUST_WAIT_FOR_EVERY_OWNER_DIRECTLY');
   assert.ok(requiredCi.includes("if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)"));
-  for (const owner of ['component_impact', 'required_linux', 'required_windows'])
-    assert.ok(requiredCi.includes('test "$' + '{{ needs.' + owner + '.result }}" = "success"'),
-      'SINGLE_CI_MUST_FAIL_CLOSED_ON:' + owner);
+  assert.ok(requiredCi.includes('test "${{ needs.component_impact.result }}" = "success"'),
+    'CI_MUST_FAIL_CLOSED_WITHOUT_CLASSIFIER');
+  for (const owner of directOwners.filter(id => id !== 'component_impact' && id !== 'dependency-audit')) {
+    assert.ok(requiredCi.includes('needs.' + owner + '.result'),
+      'CI_MUST_EXPLICITLY_CHECK_OWNER_RESULT:' + owner);
+  }
+  for (const marker of [
+    'docs|cloudflare) check_result "${{ needs[\'dependency-audit\'].result }}" skipped dependency-audit',
+    '*) check_result "${{ needs[\'dependency-audit\'].result }}" success dependency-audit',
+    "check_result '${{ needs.trading_engine_regressions_windows.result }}' success engine-regressions",
+    "check_result '${{ needs.trading_engine_regressions_windows.result }}' skipped engine-regressions",
+    "check_result '${{ needs.trading_engine_build_windows.result }}' success engine-build",
+    "check_result '${{ needs.trading_engine_build_windows.result }}' skipped engine-build",
+    "check_result '${{ needs.research_service_tests_windows.result }}' success research-windows",
+    "check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows",
+    'test \'${{ needs.component_impact.outputs.reason }}\' = \'merged tree exactly matches successful PR head tree\'',
+    "test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_OWNER_ONLY",
+    "test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_HOST_OWNER_CHECKS",
+    "test '${{ needs.component_impact.outputs.native_proof }}' = HOST_WINDOWS_OWNER_AND_CONSUMER",
+    "test '${{ needs.component_impact.outputs.native_proof }}' = ENGINE_OWNER_ONLY",
+  ]) assert.ok(requiredCi.includes(marker), 'CI_MUST_KEEP_EXACT_RESULT_OR_PROOF:' + marker);
+  // One occurrence per scoped branch matters: removing only one branch's
+  // guard must not be masked by an identical guard in another branch.
+  for (const [owner, result, count] of [
+    ['trading_engine_regressions_windows', 'skipped', 2],
+    ['trading_engine_build_windows', 'skipped', 2],
+    ['trading_engine_acceptance_windows', 'skipped', 2],
+    ['research_service_tests_windows', 'success', 2],
+    ['research_service_tests_windows', 'skipped', 3],
+    ['host_controller_launcher_checks', 'success', 2],
+    ['host_controller_launcher_checks', 'skipped', 3],
+  ]) {
+    const check = `check_result '${'${{ needs.' + owner + '.result }}'}' ${result} `;
+    assert.equal(requiredCi.split(check).length - 1, count,
+      `CI_MUST_CHECK_EACH_${owner.toUpperCase()}_${result.toUpperCase()}_BRANCH`);
+  }
+  const auditGate = requiredCi.indexOf('docs|cloudflare) check_result "${{ needs[\'dependency-audit\'].result }}" skipped dependency-audit');
+  const mainReuseExit = requiredCi.indexOf('CI=PASS; exact accepted Ready tree reused without compilation');
+  assert.ok(auditGate >= 0 && mainReuseExit > auditGate,
+    'MAIN_EXACT_TREE_REUSE_MUST_NOT_SKIP_FRESH_DEPENDENCY_AUDIT');
+  assert.match(requiredCi, /research_component_sha256.*\^\[0-9a-f\]\{64\}\$/);
+  assert.match(requiredCi, /mixed_base_head.*\^\[0-9a-f\]\{40\}\$/);
   const publish = job('publish_accepted_windows_release');
   assert.match(publish, /^    name: publish-accepted-windows-release$/m);
   assert.match(publish,
-    /needs: \[dependency-audit, component_impact, required_linux, required_windows, required_ci\]/);
+    /needs: \[dependency-audit, component_impact, required_ci\]/);
   assert.match(publish, /if: >-\n\s+\$\{\{\n\s+always\(\)/,
     'MAIN_PUBLICATION_MUST_IGNORE_TRANSITIVE_SKIPS');
   assert.match(publish, /github\.event_name == 'push' &&/);
   assert.match(publish, /github\.ref == 'refs\/heads\/main' &&/);
   assert.match(publish, /needs\.component_impact\.outputs\.build_required == 'false' &&/);
   assert.match(publish, /needs\.component_impact\.outputs\.reason == 'merged tree exactly matches successful PR head tree'/);
-  for (const name of ["['dependency-audit']", '.component_impact', '.required_linux', '.required_windows', '.required_ci']) {
+  for (const name of ["['dependency-audit']", '.component_impact', '.required_ci']) {
     assert.ok(publish.includes(`needs${name}.result == 'success'`),
       `PUBLICATION_NEEDS_SUCCESS:${name}`);
   }
@@ -458,8 +464,8 @@ function validate(yaml, fileNames) {
   assert.match(publish, /\.workflow_run\.head_repository_id == 1388071566/);
   assert.match(publish, /\.workflow_run\.head_sha == \$head/);
   assert.match(publish, /NO_EXACT_FIRST_ATTEMPT_FULL_NATIVE_READY_PR_ARTIFACT/);
-  for (const name of [...releaseGates, 'ci', 'classify', 'dependency-audit',
-    'architecture-contracts', 'cloudflare-mcp-contracts', 'rust-tests-linux'])
+  for (const name of [...releaseGates, 'ci', 'select-checks', 'dependency-audit',
+    'architecture-contracts', 'cloudflare-mcp', 'rust-tests-linux'])
     assert.ok(publish.includes(`"${name}"`), `NATIVE_PUBLICATION_MISSING_READY_GATE:${name}`);
 
   const researchPublish = job('publish_accepted_research_component');
@@ -470,13 +476,11 @@ function validate(yaml, fileNames) {
   assert.match(researchPublish, /needs.component_impact.outputs.component_scope == 'research' &&/);
   assert.match(researchPublish, /needs.component_impact.outputs.build_required == 'false' &&/);
   assert.match(researchPublish, /needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree'/);
-  assert.match(researchPublish, /needs.required_linux.result == 'success'/);
-  assert.match(researchPublish, /needs.required_windows.result == 'success'/);
   assert.match(researchPublish, /needs.required_ci.result == 'success'/);
   assert.match(researchPublish, /\.merge_commit_sha == \$main and \.base.ref == "main"/);
   assert.match(researchPublish, /test "\$main_tree" = "\$head_tree"/);
-  for (const name of ['classify', 'dependency-audit', 'architecture-contracts',
-    'research-service-tests-windows', 'cloudflare-mcp-contracts', 'linux-core', 'windows-native', 'ci'])
+  for (const name of ['select-checks', 'dependency-audit', 'architecture-contracts',
+    'research-windows', 'cloudflare-mcp', 'ci'])
     assert.ok(researchPublish.includes(`"${name}"`), `RESEARCH_PUBLICATION_MISSING_READY_GATE:${name}`);
   assert.match(researchPublish, /runs\/\$candidate\/attempts\/\$attempt\/jobs\?per_page=100/);
   assert.match(researchPublish, /"\$attempt" == 1/);
@@ -627,13 +631,33 @@ assert.equal(scopeFor('crates/okx-host-controller/src/lifecycle_executor.rs'), '
 assert.equal(scopeFor('crates/okx-host-controller/src/research_supervisor.rs'), 'host-controller');
 assert.throws(() => validate(source, [...workflows, 'publish-native-base.yml']));
 assert.throws(() => validate(source.replace(
-  'needs: [dependency-audit, component_impact, required_linux, required_windows, required_ci]',
+  'needs: [dependency-audit, component_impact, required_ci]',
   'needs: [component_impact]'), workflows));
-for (const owner of ['component_impact', 'required_linux', 'required_windows'])
-  assert.throws(() => validate(changeJobInput(source, 'required_ci',
-    'test "$' + '{{ needs.' + owner + '.result }}" = "success"', 'true'), workflows),
-    'SINGLE_CI_CANNOT_IGNORE_' + owner);
-assert.throws(() => validate(source.replace('name: classify', 'name: impact-only'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'required_ci',
+  'needs: [component_impact, dependency-audit, architecture_contracts,',
+  'needs: [component_impact, architecture_contracts,'), workflows),
+  'SINGLE_CI_CANNOT_DROP_AUDIT_DEPENDENCY');
+for (const [old, replacement, reason] of [
+  ['test "${{ needs.component_impact.result }}" = "success"', 'true', 'SELECTOR'],
+  ['*) check_result "${{ needs[\'dependency-audit\'].result }}" success dependency-audit',
+    '*) true ;;', 'EXECUTED_AUDIT'],
+  ['docs|cloudflare) check_result "${{ needs[\'dependency-audit\'].result }}" skipped dependency-audit',
+    'docs|cloudflare) true ;;', 'SCOPED_AUDIT_SKIP'],
+  ["check_result '${{ needs.trading_engine_regressions_windows.result }}' success engine-regressions",
+    'true', 'ENGINE_REGRESSIONS'],
+  ["check_result '${{ needs.trading_engine_build_windows.result }}' success engine-build",
+    'true', 'RELEASE_BUILD'],
+  ["check_result '${{ needs.trading_engine_regressions_windows.result }}' skipped engine-regressions",
+    'true', 'SKIPPED_REGRESSIONS'],
+  ["check_result '${{ needs.research_service_tests_windows.result }}' success research-windows",
+    'true', 'RESEARCH_OWNER'],
+  ["check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows",
+    'true', 'HOST_OWNER'],
+]) {
+  assert.throws(() => validate(changeJobInput(source, 'required_ci', old, replacement), workflows),
+    'SINGLE_CI_CANNOT_IGNORE_' + reason);
+}
+assert.throws(() => validate(source.replace('name: select-checks', 'name: impact-only'), workflows));
 assert.throws(() => validate(source.replace('component_scope: ${{ steps.proven_scope.outputs.scope }}',
   'component_scope: ${{ steps.file_scope.outputs.scope }}'), workflows));
 assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.outputs.scope }}\' ]]; then',
@@ -641,24 +665,9 @@ assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.
 assert.throws(() => validate(source.replace('git fetch --no-tags --depth=1 origin "$BASE_SHA"',
   'git fetch --no-tags --depth=1 origin main'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
-assert.throws(() => validate(source.replace('name: research-service-tests-windows',
-  'name: research-owner-v2-windows'), workflows),
-  'RESEARCH_READY_V2_DISPLAY_RENAME_CANNOT_REPLACE_ACCEPTED_V1_JOB');
-assert.throws(() => validate(changeJobInput(source, 'required_linux',
-  'needs: [component_impact, dependency-audit,', 'needs: [component_impact,'), workflows),
-  'DEPENDENCY_AUDIT_CANNOT_BE_DROPPED_FROM_PROTECTED_LINUX_NEEDS');
-assert.throws(() => validate(changeJobInput(source, 'required_linux',
-  "            *) test \"${{ needs['dependency-audit'].result }}\" = \"success\" ;;",
-  '            *) true ;;'), workflows),
-  'RUST_DEPENDENCY_AUDIT_FAILURE_CANNOT_BE_BYPASSED');
-assert.throws(() => validate(changeJobInput(source, 'required_linux',
-  "            *) test \"${{ needs['dependency-audit'].result }}\" = \"success\" ;;",
-  "            *) test \"${{ needs['dependency-audit'].result }}\" = \"skipped\" ;;"), workflows),
-  'RUST_SCOPE_MUST_REQUIRE_EXECUTED_AUDIT_NOT_SKIPPED');
-assert.throws(() => validate(changeJobInput(source, 'required_linux',
-  "            docs|cloudflare) test \"${{ needs['dependency-audit'].result }}\" = \"skipped\" ;;",
-  '            docs|cloudflare) true ;;'), workflows),
-  'DOCS_EDGE_SCOPE_MUST_NOT_HIDE_UNEXPECTED_AUDIT_EXECUTION');
+assert.throws(() => validate(source.replace('name: research-windows',
+  'name: research-owner-v3-windows'), workflows),
+  'RESEARCH_V3_DISPLAY_RENAME_CANNOT_REPLACE_ACCEPTED_JOB');
 assert.throws(() => validate(source.replace('      - name: Format\n        run: cargo fmt --all -- --check',
   '      - name: Format\n        run: echo skipped-format'), workflows));
 assert.throws(() => validate(source.replace('cargo test --locked --workspace --exclude okx-trading-engine --exclude okx-host-controller --exclude okx-research-service', 'echo skipped-portable-tests'), workflows));
@@ -708,9 +717,6 @@ assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
 assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
   "github.event_name == 'workflow_dispatch' &&", "github.event_name == 'push' &&"), workflows),
   'MAIN_PUSH_MUST_NOT_TRIGGER_COMPILER_CACHE_PRIME');
-assert.throws(() => validate(source.replaceAll('test "${{ needs.trading_engine_build_windows.result }}" = "success"', 'true'), workflows));
-assert.throws(() => validate(source.replaceAll('test "${{ needs.trading_engine_regressions_windows.result }}" = "success"', 'true'), workflows));
-assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"', 'true'), workflows));
 assert.throws(() => validate(source.replace('"research_only=true" >> "$GITHUB_OUTPUT"', 'true'), workflows));
 assert.throws(() => validate(source.replace('RESEARCH_COMPONENT_EXACT_THREE_FILE_PROOF_FAILED', 'BYPASS'), workflows));
 assert.throws(() => validate(source.replace(acceptedWorkflowPath,
@@ -746,12 +752,12 @@ assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_c
   'all(.jobs[]; .run_id == $run and .head_sha == $head)'), workflows),
   'RESEARCH_PUBLISHER_REJECTS_MIXED_FIRST_AND_RERUN_JOB_EVIDENCE');
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
-  '"research-service-tests-windows"', '"research-owner-v2-windows"'), workflows),
-  'RESEARCH_PUBLISHER_CANNOT_ACCEPT_UNPROVEN_V2_JOB_ALIAS');
+  '"research-windows"', '"research-owner-v3-windows"'), workflows),
+  'RESEARCH_PUBLISHER_CANNOT_ACCEPT_UNPROVEN_V3_JOB_ALIAS');
 assert.throws(() => validate(source.replace(
-  'RESEARCH_READY_STATUS_POLICY=okx.github.actions.research-ready/v1',
-  'RESEARCH_READY_STATUS_POLICY=okx.github.actions.research-ready/v2'), workflows),
-  'UNACCEPTED_RESEARCH_V2_READY_POLICY_CANNOT_HIDE_V1_PROTECTED_NAMES');
+  'RESEARCH_READY_STATUS_POLICY=okx.github.actions.research-ready/v3',
+  'RESEARCH_READY_STATUS_POLICY=okx.github.actions.research-ready/v1'), workflows),
+  'RESEARCH_V3_READY_POLICY_CANNOT_REVERT_TO_V1_PROTECTED_NAMES');
 assert.throws(() => validate(source.replace('"$attempt" == 1', '"$attempt" =~ ^[1-9]'), workflows),
   'NATIVE_PUBLISHER_MUST_REJECT_SECOND_ATTEMPT');
 assert.throws(() => validate(source.replace('runs/$candidate/attempts/$attempt/jobs?per_page=100',
@@ -761,7 +767,7 @@ assert.throws(() => validate(changeJobInput(source, 'publish_accepted_windows_re
   '.head_sha == $head and .run_attempt == 1 and', '.head_sha == $head and .run_attempt > 0 and'),
   workflows), 'NATIVE_PUBLISHER_REQUIRES_FIRST_ATTEMPT_RUN');
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_windows_release',
-  '"trading-engine-acceptance-windows"', '"trading-engine-acceptance-SKIPPED"'),
+  '"engine-windows"', '"engine-windows-SKIPPED"'),
   workflows), 'NATIVE_PUBLISHER_MUST_REQUIRE_REAL_FINANCIAL_ACCEPTANCE');
 assert.throws(() => validate(source.replace('.workflow_run.head_repository_id == 1388071566 and',
   'true and'), workflows),
@@ -864,7 +870,8 @@ assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_c
 assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
   '.head_repository.id == 1388071566) |', 'true) |'), workflows));
 assert.throws(() => validate(source.replace('.commits[-1].sha == $head', 'true'), workflows));
-assert.throws(() => validate(source.replace('test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_OWNER_ONLY"', 'true'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'required_ci',
+  "test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_OWNER_ONLY", 'true'), workflows));
 assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-manifest.cjs --verify-report', 'echo skipped'), workflows));
 assert.throws(() => validate(changeJobInput(source, 'trading_engine_acceptance_windows',
   'cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture',
@@ -922,7 +929,10 @@ rejectFinanceDenialMutation(
   "(?m)^test ' + [regex]::Escape($testName) + ' \\.\\.\\. ok$') -and",
   'ENGINE_FINANCE_DENIAL_MUST_REQUIRE_BOTH_NAMED_TEST_AND_RESULT');
 assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-native-finance-check -- --list'), workflows));
-assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'required_ci',
+  'trading_engine_acceptance_windows, trading_engine_regressions_windows,',
+  'trading_engine_acceptance_windows,'), workflows),
+  'SINGLE_CI_MUST_WAIT_FOR_ALL_FOUR_REGRESSION_CELLS');
 assert.throws(() => validate(source.replace('"trading-engine-regressions-windows (engine)",', ''), workflows));
 assert.throws(() => validate(source.replace('suite: [engine, host, execution, research]', 'suite: [engine, host, execution]'), workflows),
   'RESEARCH_REGRESSION_MATRIX_CANNOT_BE_DROPPED');
