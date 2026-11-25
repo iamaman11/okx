@@ -10,6 +10,7 @@ pub mod job;
 pub mod legacy_bootstrap;
 pub mod lifecycle_executor;
 pub mod provenance;
+pub(crate) mod research_acl;
 pub mod research_sandbox;
 pub mod research_supervisor;
 pub mod root_migration;
