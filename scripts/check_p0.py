@@ -23,6 +23,9 @@ WORKER_TESTS = (
     "analytics::market::tests::c20_rolling_mean_reuses_existing_market_pipeline_without_new_routing",
     "edge_runtime::market_tests::public_market_operations_work_from_research_owner_and_cursor_reads_persisted_job",
 )
+STANDALONE_MCP_TEST = (
+    "edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket",
+)
 SCOPES = {"kernel", "strategy", "analysis", "research", "worker", "wire", "ipc", "mcp", "host", "expanded"}
 LOCAL_COMPONENTS = {
     "strategy": "okx-strategy-core",
@@ -103,18 +106,20 @@ def check_counts(output, required):
     return len(passed)
 
 
-def test_command(package, target=("--lib",), required=(), exact=False, show_output=False):
+def test_command(package, target=("--lib",), required=(), exact=False, show_output=False, ignored=False):
     cmd = ["cargo", "test", "--locked", "-p", package, *target, "--message-format=json-render-diagnostics"]
     cmd.extend(["--", "--test-threads", "2"])
     if exact:
         cmd.extend(["--exact", *required])
     if show_output:
         cmd.append("--show-output")
+    if ignored:
+        cmd.append("--ignored")
     return cmd
 
 
-def tests(package, target=("--lib",), required=(), exact=False, show_output=False, extra_env=None):
-    cmd = test_command(package, target, required, exact, show_output)
+def tests(package, target=("--lib",), required=(), exact=False, show_output=False, extra_env=None, ignored=False):
+    cmd = test_command(package, target, required, exact, show_output, ignored)
     print(shlex.join(cmd), flush=True)
     started = time.monotonic()
     run = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, text=True,
@@ -401,6 +406,8 @@ def execute(scopes):
         # The exact Agent IPC test below spawns a separate, actual Miniflare
         # process. Install its existing locked dependencies before that test.
         subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
+        if "worker" in scopes:
+            tests("okx-research-service", required=STANDALONE_MCP_TEST, exact=True, ignored=True)
     if "ipc" in scopes:
         tests("okx-research-service", ("--test", "ipc_process"))
         # Binary renaming must preserve content-addressed legacy installations
@@ -495,6 +502,7 @@ def main():
     if args.plan and os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
             out.write(f"code={'true' if scopes else 'false'}\n")
+            out.write(f"mcp={'true' if scopes & {'mcp', 'expanded'} else 'false'}\n")
     if not args.plan:
         execute(scopes)
 

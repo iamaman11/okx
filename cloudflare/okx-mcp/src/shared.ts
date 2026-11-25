@@ -29,7 +29,8 @@ export interface Env {
   OAUTH_KV: any;
   RUNTIME: any;
   MCP_OWNER_SECRET: string;
-  RUNTIME_TOKEN_SHA256: string;
+  /** Engine bearer fingerprint, absent in an installation with only Research. */
+  RUNTIME_TOKEN_SHA256?: string;
   /** Optional independent Research bearer fingerprint; never a finance credential. */
   RESEARCH_RUNTIME_TOKEN_SHA256?: string;
   /** Immutable source tree of this exact Worker deployment, set only by deploy CI. */

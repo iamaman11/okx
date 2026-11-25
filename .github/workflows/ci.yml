@@ -405,6 +405,12 @@ jobs:
         with:
           toolchain: 1.100.0
           components: rustfmt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.scope.outputs.mcp == 'true'
+        with:
+          node-version-file: cloudflare/okx-mcp/.node-version
+          cache: npm
+          cache-dependency-path: cloudflare/okx-mcp/package-lock.json
       - name: Verify Rust formatting before compilation
         if: steps.scope.outputs.code == 'true'
         run: cargo fmt --all -- --check
@@ -762,6 +768,18 @@ jobs:
         run: |
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Previous Research catalog through MCP with Engine absent
+        if: needs.component_impact.outputs.edge_required == 'true'
+        shell: pwsh
+        run: |
+          $output = & cargo test --locked -p okx-research-service --lib edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 1 passed; 0 failed;') {
+            throw 'STANDALONE_RESEARCH_MCP_WITNESS_NOT_RUN'
+          }
 
       # The JavaScript Native/Worker finance scenario driver is retired with
       # its separate financial owner. Its driver-only PID/cleanup tests do not

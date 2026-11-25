@@ -35,7 +35,27 @@ function researchOnlyPermits(request: any): boolean {
     researchOwnedOperation(request);
 }
 
+function credentialFingerprint(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
+}
+
 type RuntimeOwner = "engine" | "research" | "legacy_research";
+type ReadWaiter = {
+  resolve: (admitted: boolean) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+class OwnerAdmission {
+  inflight = 0;
+  readonlyInflight = 0;
+  normalInflight = 0;
+  readonlyWaiters: ReadWaiter[] = [];
+  activeRequests = new Set<string>();
+}
+
+function pendingKey(generation: number, key: string): string {
+  return `${generation}:${key}`;
+}
 
 function socketOwner(attachment: SocketAttachment | null): RuntimeOwner | null {
   if (!attachment?.hello) return null;
@@ -57,16 +77,9 @@ export class RuntimeSession {
   private state: any;
   private env: Env;
   private pending = new Map<string, Pending>();
-  private inflight = 0;
-  private readonlyInflight = 0;
-  // All ordinary work, including costly research mutations, shares seven slots.
-  private normalInflight = 0;
-  // Transient bounded queue, not durable financial/business storage.
-  private readonlyWaiters: Array<{
-    resolve: (admitted: boolean) => void;
-    timer: ReturnType<typeof setTimeout>;
-  }> = [];
-  private activeRequests=new Set<string>();
+  // The old Engine-owned Research path retains Engine's admission policy
+  // during cutover. Standalone Research cannot consume an Engine slot.
+  private admissions = { engine: new OwnerAdmission(), research: new OwnerAdmission() };
 
   constructor(state: any, env: Env) {
     this.state = state;
@@ -194,22 +207,20 @@ export class RuntimeSession {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return new Response("websocket required", { status: 426 });
     }
-    const configuredHash = this.env.RUNTIME_TOKEN_SHA256;
-    if (!/^[0-9a-f]{64}$/.test(configuredHash)) {
+    const engineHash = credentialFingerprint(this.env.RUNTIME_TOKEN_SHA256);
+    const researchHash = credentialFingerprint(this.env.RESEARCH_RUNTIME_TOKEN_SHA256);
+    // An absent or invalid credential for one application cannot take down
+    // the other. A duplicated fingerprint authorizes the Engine alone.
+    if (engineHash === null && researchHash === null) {
       return new Response("runtime credential fingerprint invalid", { status: 503 });
-    }
-    const researchHash = this.env.RESEARCH_RUNTIME_TOKEN_SHA256;
-    if (researchHash !== undefined && (!/^[0-9a-f]{64}$/.test(researchHash) ||
-        sameHex(researchHash, configuredHash))) {
-      return new Response("research credential fingerprint invalid", { status: 503 });
     }
     const authorization = request.headers.get("authorization") ?? "";
     if (!authorization.startsWith("Bearer ")) {
       return new Response("unauthorized", { status: 401 });
     }
     const presentedHash = await sha256Hex(authorization.slice("Bearer ".length));
-    const credentialOwner = sameHex(configuredHash, presentedHash) ? "engine" :
-      researchHash !== undefined && sameHex(researchHash, presentedHash) ? "research" : null;
+    const credentialOwner = engineHash !== null && sameHex(engineHash, presentedHash) ? "engine" :
+      researchHash !== null && sameHex(researchHash, presentedHash) ? "research" : null;
     if (!credentialOwner) {
       return new Response("unauthorized", { status: 401 });
     }
@@ -417,33 +428,33 @@ export class RuntimeSession {
     return nonce;
   }
 
-  private grantWaitingReads():void {
+  private grantWaitingReads(admission: OwnerAdmission): void {
     // A reserved WSS slot is never consumed by ordinary read-only work.
-    while(this.readonlyWaiters.length && this.normalInflight<MAX_READ_INFLIGHT &&
-          this.inflight<MAX_INFLIGHT){
-      const next=this.readonlyWaiters.shift()!;
+    while(admission.readonlyWaiters.length && admission.normalInflight<MAX_READ_INFLIGHT &&
+          admission.inflight<MAX_INFLIGHT){
+      const next=admission.readonlyWaiters.shift()!;
       clearTimeout(next.timer);
-      this.readonlyInflight++;
-      this.normalInflight++;
-      this.inflight++;
+      admission.readonlyInflight++;
+      admission.normalInflight++;
+      admission.inflight++;
       next.resolve(true);
     }
   }
 
-  private admitReadOnly():Promise<boolean>{
-    if(this.readonlyWaiters.length===0 && this.normalInflight<MAX_READ_INFLIGHT &&
-       this.inflight<MAX_INFLIGHT){
-      this.readonlyInflight++;this.normalInflight++;this.inflight++;
+  private admitReadOnly(admission: OwnerAdmission): Promise<boolean> {
+    if(admission.readonlyWaiters.length===0 && admission.normalInflight<MAX_READ_INFLIGHT &&
+       admission.inflight<MAX_INFLIGHT){
+      admission.readonlyInflight++;admission.normalInflight++;admission.inflight++;
       return Promise.resolve(true);
     }
-    if(this.readonlyWaiters.length>=MAX_READ_WAITERS)return Promise.resolve(false);
+    if(admission.readonlyWaiters.length>=MAX_READ_WAITERS)return Promise.resolve(false);
     return new Promise<boolean>(resolve=>{
       const waiter={resolve,timer:null as unknown as ReturnType<typeof setTimeout>};
       waiter.timer=setTimeout(()=>{
-        const index=this.readonlyWaiters.indexOf(waiter);
-        if(index>=0){this.readonlyWaiters.splice(index,1);resolve(false);}
+        const index=admission.readonlyWaiters.indexOf(waiter);
+        if(index>=0){admission.readonlyWaiters.splice(index,1);resolve(false);}
       },READ_QUEUE_WAIT_MS);
-      this.readonlyWaiters.push(waiter);
+      admission.readonlyWaiters.push(waiter);
     });
   }
 
@@ -484,7 +495,8 @@ export class RuntimeSession {
       return transportFailure("RESEARCH_OPERATION_FORBIDDEN", false);
     }
 
-    if(this.activeRequests.has(request.request_id))
+    const admission = this.admissions[owner === "research" ? "research" : "engine"];
+    if(admission.activeRequests.has(request.request_id))
       return transportFailure("REQUEST_ALREADY_IN_FLIGHT",false);
     // Keep protective trading commands and exact-intent status above both
     // read-only traffic AND ordinary research/strategy/new-risk mutations.
@@ -495,19 +507,19 @@ export class RuntimeSession {
       (action==="execute"&&["reduce","close"].includes(String(request.operation?.request?.operation))))) ||
       (type==="strategies"&&action==="stop");
     const queuedRead=!protective&&!isExecutionMutation(type,action);
-    this.activeRequests.add(request.request_id);
+    admission.activeRequests.add(request.request_id);
     let admitted=false;
     try {
       if(queuedRead){
-        admitted=await this.admitReadOnly();
+        admitted=await this.admitReadOnly(admission);
         if(!admitted)return transportFailure("TRANSPORT_BUSY");
       }else if(protective){
-        if(this.inflight>=MAX_INFLIGHT)return transportFailure("TRANSPORT_BUSY");
-        this.inflight++;admitted=true;
+        if(admission.inflight>=MAX_INFLIGHT)return transportFailure("TRANSPORT_BUSY");
+        admission.inflight++;admitted=true;
       }else{
-        if(this.normalInflight>=MAX_READ_INFLIGHT||this.inflight>=MAX_INFLIGHT)
+        if(admission.normalInflight>=MAX_READ_INFLIGHT||admission.inflight>=MAX_INFLIGHT)
           return transportFailure("TRANSPORT_BUSY");
-        this.normalInflight++;this.inflight++;admitted=true;
+        admission.normalInflight++;admission.inflight++;admitted=true;
       }
       // A waiting reader must never cross a native session generation.
       const current=this.activeSocket(owner);
@@ -586,12 +598,12 @@ export class RuntimeSession {
       return transportFailure(error instanceof Error ? error.message : "TRANSPORT_FAILURE");
     } finally {
       if(admitted){
-        this.inflight--;
-        if(!protective)this.normalInflight--;
-        if(queuedRead)this.readonlyInflight--;
-        this.grantWaitingReads();
+        admission.inflight--;
+        if(!protective)admission.normalInflight--;
+        if(queuedRead)admission.readonlyInflight--;
+        this.grantWaitingReads(admission);
       }
-      this.activeRequests.delete(request.request_id);
+      admission.activeRequests.delete(request.request_id);
       this.clearPending(`ack:${request.request_id}`,active.attachment.generation);
       this.clearPending(`response:${request.request_id}`,active.attachment.generation);
     }
@@ -599,6 +611,7 @@ export class RuntimeSession {
 
   private async status(probe: boolean, owner: "engine" | "research" = "engine"): Promise<Record<string,Json>> {
     const active = this.activeSocket(owner);
+    const admission = this.admissions[owner];
     if (!active) {
       return {
         schema: "okx.direct-transport.status/v1",
@@ -607,10 +620,10 @@ export class RuntimeSession {
         owner,
         connected: false,
         session_fresh: false,
-        inflight: this.inflight,
-        readonly_inflight: this.readonlyInflight,
-        normal_inflight: this.normalInflight,
-        readonly_queue_depth: this.readonlyWaiters.length,
+        inflight: admission.inflight,
+        readonly_inflight: admission.readonlyInflight,
+        normal_inflight: admission.normalInflight,
+        readonly_queue_depth: admission.readonlyWaiters.length,
         readonly_queue_capacity: MAX_READ_WAITERS,
       };
     }
@@ -637,10 +650,10 @@ export class RuntimeSession {
       connected: true,
       session_fresh: fresh,
       connection_generation: active.attachment.generation,
-      inflight: this.inflight,
-      readonly_inflight: this.readonlyInflight,
-      normal_inflight: this.normalInflight,
-      readonly_queue_depth: this.readonlyWaiters.length,
+      inflight: admission.inflight,
+      readonly_inflight: admission.readonlyInflight,
+      normal_inflight: admission.normalInflight,
+      readonly_queue_depth: admission.readonlyWaiters.length,
       readonly_queue_capacity: MAX_READ_WAITERS,
       connected_at_ms: active.attachment.connectedAtMs,
       installation_id: active.attachment.installationId ?? null,
@@ -651,32 +664,35 @@ export class RuntimeSession {
   }
 
   private waitFor(key: string, generation: number, timeoutMs: number): Promise<any> {
-    if(this.pending.has(key))return Promise.reject(new Error("REQUEST_ALREADY_IN_FLIGHT"));
+    const handle = pendingKey(generation, key);
+    if(this.pending.has(handle))return Promise.reject(new Error("REQUEST_ALREADY_IN_FLIGHT"));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        const current = this.pending.get(key);
+        const current = this.pending.get(handle);
         if (current?.generation === generation) {
-          this.pending.delete(key);
+          this.pending.delete(handle);
         }
         reject(new Error(key.startsWith("pong:") ? "SESSION_STALE" : key.startsWith("ack:") ? "DELIVERY_FAILED" : "RESPONSE_TIMEOUT"));
       }, timeoutMs);
-      this.pending.set(key, { generation, resolve, reject, timer });
+      this.pending.set(handle, { generation, resolve, reject, timer });
     });
   }
 
   private resolvePending(key: string, generation: number, value: any): void {
-    const pending = this.pending.get(key);
-    if (!pending || pending.generation !== generation) return;
+    const handle = pendingKey(generation, key);
+    const pending = this.pending.get(handle);
+    if (!pending) return;
     clearTimeout(pending.timer);
-    this.pending.delete(key);
+    this.pending.delete(handle);
     pending.resolve(value);
   }
 
   private clearPending(key: string,generation:number): void {
-    const pending = this.pending.get(key);
-    if (!pending||pending.generation!==generation) return;
+    const handle = pendingKey(generation, key);
+    const pending = this.pending.get(handle);
+    if (!pending) return;
     clearTimeout(pending.timer);
-    this.pending.delete(key);
+    this.pending.delete(handle);
     pending.reject(new Error("REQUEST_FINISHED"));
   }
 

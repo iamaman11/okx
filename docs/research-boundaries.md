@@ -91,6 +91,14 @@ The standalone mode now has an **opt-in CONTROL code path**:
   authenticated Edge session, loaded job catalog, or successful market read.
   `EXISTING_SCOPED` reports the selected catalog binding. Verify a successful
   Research status/result read on an existing job before switching routing.
+- Edge authenticates each runtime against its own bearer fingerprint.
+  Standalone Research uses its own delivery limit and read queue. Pending ACKs
+  and responses are matched by socket generation and request ID.
+- `standalone_catalog_reopens_through_real_mcp_do_websocket` uses the actual
+  MCP router, local workerd Durable Object, and Rust Research session. It
+  checks the original job status, result bytes, decision replay and the offline
+  response with only Research configured. The local harness supplies a test
+  MCP scope. The deployed OAuth and installed Windows checks remain required.
 
 This opt-in code path is subject to Windows CI and subsequent physical
 acceptance, **not** an assertion that the installed product has changed mode.

@@ -149,6 +149,8 @@ function validate(yaml, fileNames) {
   assert.match(engine, /node scripts\/ci-finance-witness-manifest\.cjs --verify-report/);
   assert.match(engine, /Isolated Native pending-fill crash recovery/);
   assert.match(engine, /MCP DO WSS Native finance under isolated Research load/);
+  assert.match(engine, /standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture/);
+  assert.match(engine, /STANDALONE_RESEARCH_MCP_WITNESS_NOT_RUN/);
   assert.doesNotMatch(engine, /K9 worker two-heavy cancellation latency evidence/);
   const regression = job('trading_engine_regressions_windows');
   assert.match(regression, /needs: component_impact/);

@@ -19,7 +19,7 @@ async function fixture(mode:"before_ack"|"after_ack"|"complete"|"stale"|"ping_se
     if(mode==="after_ack"){void owner.webSocketClose(ws);return;}
     if(mode==="stale"){
       owner.resolvePending(`response:${frame.request.request_id}`,generation-1,{status:"WRONG"});
-      check(owner.pending.has(`response:${frame.request.request_id}`),"old_generation_cannot_complete_new_request");
+      check(owner.pending.has(`${generation}:response:${frame.request.request_id}`),"old_generation_cannot_complete_new_request");
     }
     owner.resolvePending(`response:${frame.request.request_id}`,generation,{status:"completed"});
    });
@@ -31,7 +31,7 @@ async function fixture(mode:"before_ack"|"after_ack"|"complete"|"stale"|"ping_se
  const running=owner.dispatch(request);
  if(mode==="duplicate")check((await owner.dispatch(request)).reason==="REQUEST_ALREADY_IN_FLIGHT","duplicate request rejected before async freshness");
  const result=await running;
- check(owner.pending.size===0&&owner.inflight===0,"all stages settle and capacity is released");
+ check(owner.pending.size===0&&owner.admissions.engine.inflight===0,"all stages settle and capacity is released");
  return result;
 }
 const before=await fixture("before_ack");

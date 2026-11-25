@@ -19,6 +19,7 @@ const storage={
  }
 };
 let session:any;
+let sockets: unknown[];
 let readActive=0,maxReadActive=0,totalActive=0,maxTotalActive=0;
 let sentReads=0,sentPriority=0,maxQueued=0,policyPublished=0,stopDuringLoad=false;
 const identifiers=new Set<string>();
@@ -53,8 +54,9 @@ const ws={
    totalActive--;if(!privileged)readActive--;
   },delayMs);
  }};
+sockets=[ws];
 session=new RuntimeSession({
- storage,getWebSockets:()=>[ws],
+ storage,getWebSockets:()=>sockets,
 },{RUNTIME_TOKEN_SHA256:'a'.repeat(64)} as any);
 const rpc=(id:string,operation:any,accountKey?:string)=>
  session.fetch(new Request('https://fixture/dispatch',{method:'POST',
@@ -98,7 +100,7 @@ check(maxReadActive===MAX_READ_INFLIGHT && maxTotalActive===MAX_INFLIGHT,
  'reserved native slot was not demonstrated');
 const end:any=await(await session.fetch(new Request('https://fixture/status'))).json();
 check(end.inflight===0&&end.readonly_inflight===0&&end.readonly_queue_depth===0 &&
- session.activeRequests.size===0 && session.pending.size===0,'all waiters, active ids and ACK stages settled');
+ session.admissions.engine.activeRequests.size===0 && session.pending.size===0,'all waiters, active ids and ACK stages settled');
 const ordered=[...latency].sort((a,b)=>a-b);
 check(ordered.length===100,'exactly 100 timings');
 const report={schema:'okx.runtime-backpressure.fixture/v1',operations:100,
@@ -125,7 +127,7 @@ const succeeded=outcomes.filter((x:any)=>x.status==='completed');
 check(busy.length>=15&&succeeded.length<=MAX_READ_WAITERS+MAX_READ_INFLIGHT,
  'overflow must reject BEFORE any extra native delivery');
 check(sentReads-beforeSent===succeeded.length &&
- session.activeRequests.size===0 && session.pending.size===0,
+ session.admissions.engine.activeRequests.size===0 && session.pending.size===0,
  'full queue never dispatched rejected requests or leaked pending waiters');
 console.log('runtime_session_queue_overflow_fail_closed PASS '+JSON.stringify({
  requested:burst.length,completed:succeeded.length,busy:busy.length,
@@ -150,6 +152,57 @@ const observedResearch=await Promise.all(researchBurst);
 check(observedResearch.filter((x:any)=>x.status==='completed').length===7&&
  observedResearch.filter((x:any)=>x.reason==='TRANSPORT_BUSY').length===1,
  'research overflow must not consume protective slot');
-check(sentReads-beforeResearch===7 && session.inflight===0 && session.normalInflight===0,
+check(sentReads-beforeResearch===7 && session.admissions.engine.inflight===0 && session.admissions.engine.normalInflight===0,
  'heavy research did not drain and release all normal capacity');
 console.log('runtime_session_research_cannot_starve_protective_close PASS seven heavy jobs + one protected WSS close, overflow refused before send');
+
+// Standalone Research has its own budget and can use the same request ID in
+// another session. Hold its replies until Engine operations have completed.
+const researchGeneration=generation+1;
+const researchSession={...attachment,runtimeProfile:'research',credentialOwner:'research',
+ sessionMode:'research_only',sessionId:'session_research_pressure',generation:researchGeneration};
+const researchRequests:string[]=[];
+let allDelivered!:()=>void;
+const researchSaturated=new Promise<void>(resolve=>{allDelivered=resolve;});
+const answerResearch=(id:string)=>session.resolvePending('response:'+id,researchGeneration,{status:'completed',id,owner:'research'});
+sockets.push({
+ deserializeAttachment:()=>({...researchSession}),
+ send:(body:string)=>{
+  const frame=JSON.parse(body);
+  if(frame.type==='ping'){
+   queueMicrotask(()=>session.resolvePending('pong:'+frame.nonce,researchGeneration,{}));
+   return;
+  }
+  check(frame.type==='request'&&frame.request.operation.type==='research','Engine operation reached Research');
+  check(!('operator_governance' in frame),'Research received Engine governance');
+  const id=frame.request.request_id as string;
+  researchRequests.push(id);
+  queueMicrotask(()=>session.resolvePending('ack:'+id,researchGeneration,{}));
+  if(researchRequests.length===MAX_READ_INFLIGHT)allDelivered();
+ }
+});
+session.env.RESEARCH_RUNTIME_TOKEN_SHA256='b'.repeat(64);
+const researchOperation={type:'research',request:{action:'backtest'}};
+const standalone=Array.from({length:MAX_READ_INFLIGHT},(_,i)=>rpc('research_owner_'+i,researchOperation));
+await researchSaturated;
+const ownerStatus=async(owner:string)=>session.fetch(new Request('https://fixture/status?owner='+owner)).then((r:Response)=>r.json());
+try{
+ const researchCapacity=await ownerStatus('research');
+ const engineCapacity=await ownerStatus('engine');
+ check(researchCapacity.normal_inflight===MAX_READ_INFLIGHT && engineCapacity.normal_inflight===0,
+  'per-owner status must expose actual capacity');
+ check((await rpc('research_owner_overflow',researchOperation)).reason==='TRANSPORT_BUSY',
+  'Research must keep its own hard delivery bound');
+ check((await read('research_owner_0')).status==='completed',
+  'Engine read with the same request ID must complete while Research is saturated');
+ check((await rpc('engine_exit_with_standalone_research',{type:'trade',
+  request:{action:'close',reference:'intent_fixture'}},account.id)).status==='completed',
+  'Engine protection must complete while standalone Research replies are held');
+}finally{
+ for(const id of researchRequests)answerResearch(id);
+}
+check((await Promise.all(standalone)).every(a=>a.owner==='research'),'each Research reply must reach its original caller');
+check((await ownerStatus('research')).inflight===0 && (await ownerStatus('engine')).inflight===0 &&
+ session.admissions.research.activeRequests.size===0 && session.admissions.engine.activeRequests.size===0 &&
+ session.pending.size===0,'both owner budgets and pending responses must be cleaned up');
+console.log('runtime_session_standalone_research_and_engine_admission_are_isolated PASS');

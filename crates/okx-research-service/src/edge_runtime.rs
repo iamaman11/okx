@@ -880,3 +880,7 @@ mod tests {
 #[cfg(test)]
 #[path = "edge_market_tests.rs"]
 mod market_tests;
+
+#[cfg(test)]
+#[path = "edge_runtime/standalone_mcp_tests.rs"]
+mod standalone_mcp_tests;
