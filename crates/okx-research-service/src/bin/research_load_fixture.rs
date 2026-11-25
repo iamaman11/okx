@@ -6,6 +6,7 @@
 #[cfg(not(debug_assertions))]
 compile_error!("okx-research-load-fixture must never be built in release mode");
 
+use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use okx_research_protocol::{
     analytics::{EmaParameters, FundingMode, ResearchCosts, ResearchDataMode, ResearchRequest},
@@ -134,16 +135,15 @@ impl WorkerClient {
         let mut input = FramedWrite::new(child.stdin.take().unwrap(), codec());
         let mut output = FramedRead::new(child.stdout.take().unwrap(), codec());
         input
-            .send(
+            .send(Bytes::from(
                 serde_json::to_vec(&HostFrame::Hello {
                     protocol: PROTOCOL_VERSION,
                     storage: STORAGE_VERSION,
                     session: session.clone(),
                     scope: scope.clone(),
                 })
-                .map_err(|_| "RESEARCH_FRAME_INVALID")?
-                .into(),
-            )
+                .map_err(|_| "RESEARCH_FRAME_INVALID")?,
+            ))
             .await
             .map_err(|_| "RESEARCH_HELLO_WRITE_FAILED")?;
         let hello = tokio::time::timeout(Duration::from_secs(10), output.next())
@@ -182,7 +182,7 @@ impl WorkerClient {
                                     command: Box::new(command),
                                 };
                                 let ok = match serde_json::to_vec(&wire) {
-                                    Ok(bytes) => input.send(bytes.into()).await.is_ok(),
+                                    Ok(bytes) => input.send(Bytes::from(bytes)).await.is_ok(),
                                     Err(_) => false,
                                 };
                                 if ok {
@@ -215,7 +215,7 @@ impl WorkerClient {
                                     id, session: session.clone(), result,
                                 };
                                 match serde_json::to_vec(&wire) {
-                                    Ok(bytes) if input.send(bytes.into()).await.is_ok() => {},
+                                    Ok(bytes) if input.send(Bytes::from(bytes)).await.is_ok() => {},
                                     _ => break,
                                 }
                             }
@@ -503,7 +503,9 @@ impl Fixture {
                     .iter()
                     .any(|value| matches!(value, Some("completed" | "failed" | "cancelled")))
                 {
-                    return Err("RESEARCH_LOAD_FINISHED_BEFORE_FINANCE".into());
+                    return Err::<(Value, Value), String>(
+                        "RESEARCH_LOAD_FINISHED_BEFORE_FINANCE".into(),
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -594,7 +596,7 @@ async fn write_json(value: &Value) -> Result<(), String> {
     output
         .flush()
         .await
-        .map_err(|_| "FIXTURE_STDOUT_FLUSH_FAILED")
+        .map_err(|_| "FIXTURE_STDOUT_FLUSH_FAILED".to_owned())
 }
 
 async fn run() -> Result<(), String> {
