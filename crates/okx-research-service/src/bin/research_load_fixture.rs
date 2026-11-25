@@ -489,38 +489,74 @@ impl Fixture {
         if first == second {
             return Err("RESEARCH_GRID_IDENTITY_COLLISION".into());
         }
-        let (first_status, second_status) = tokio::time::timeout(Duration::from_secs(30), async {
+        // Match the protected T10 process criterion: both independently
+        // admitted jobs are RUNNING, and at least one has completed authentic
+        // candidate work units. The CPU budget may be one on a two-vCPU
+        // runner; requiring both jobs' candidates to complete simultaneously
+        // would make this witness impossible without weakening CPU isolation.
+        // The historical readiness deadline is 90s; the Engine JSONL caller
+        // gives startup/boundary admission separate transport headroom.
+        let mut last_observation = json!({"status":"not_yet_sampled"});
+        let readiness = tokio::time::timeout(Duration::from_secs(90), async {
             loop {
                 let left = self.status(&first).await?;
                 let right = self.status(&second).await?;
-                let valid = |value: &Value| {
-                    value["state"] == "running"
-                        && value["candidate_progress"]["completed_candidates"]
-                            .as_u64()
-                            .is_some_and(|count| count > 0)
+                let (successful_requests, returned_rows) = self.counts();
+                last_observation = json!({
+                    "first":{
+                        "state":left["state"],
+                        "candidate_progress":left["candidate_progress"]
+                    },
+                    "second":{
+                        "state":right["state"],
+                        "candidate_progress":right["candidate_progress"]
+                    },
+                    "successful_requests":successful_requests,
+                    "returned_rows":returned_rows
+                });
+                let completed_work_units = |value: &Value| {
+                    value["candidate_progress"]["completed_work_units"]
+                        .as_u64()
+                        .unwrap_or(0)
                 };
-                if valid(&left) && valid(&right) && self.counts().0 > 0 {
-                    return Ok((left, right));
+                if left["state"] == "running"
+                    && right["state"] == "running"
+                    && (completed_work_units(&left) > 0 || completed_work_units(&right) > 0)
+                    && successful_requests > 0
+                    && returned_rows > 0
+                {
+                    return Ok::<(Value, Value), String>((left, right));
                 }
                 if [left["state"].as_str(), right["state"].as_str()]
                     .iter()
                     .any(|value| matches!(value, Some("completed" | "failed" | "cancelled")))
                 {
-                    return Err::<(Value, Value), String>(
-                        "RESEARCH_LOAD_FINISHED_BEFORE_FINANCE".into(),
-                    );
+                    return Err("RESEARCH_LOAD_FINISHED_BEFORE_FINANCE".into());
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
-        .await
-        .map_err(|_| "RESEARCH_LOAD_START_TIMEOUT")??;
+        .await;
+        let (first_status, second_status) = match readiness {
+            Ok(Ok(statuses)) => statuses,
+            Ok(Err(error)) => {
+                eprintln!("RESEARCH_LOAD_START_DIAGNOSTIC:{last_observation}");
+                return Err(error);
+            }
+            Err(_) => {
+                eprintln!("RESEARCH_LOAD_START_DIAGNOSTIC:{last_observation}");
+                return Err("RESEARCH_LOAD_START_TIMEOUT".into());
+            }
+        };
+        let (successful_requests, returned_rows) = self.counts();
         self.started = true;
         Ok(json!({
             "first":first, "second":second,
             "first_status":first_status, "second_status":second_status,
             "worker_pid":self.client.as_ref().unwrap().pid,
             "research_jobs_actual":true,
+            "successful_requests_at_start":successful_requests,
+            "returned_rows_at_start":returned_rows,
             "boundary_evidence":boundary_evidence
         }))
     }
