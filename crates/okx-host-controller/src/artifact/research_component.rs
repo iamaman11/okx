@@ -1685,9 +1685,7 @@ mod tests {
             validate_research_ready_jobs_for_policy(policy, &run, &artifact, &old_jobs).is_err()
         );
         for old in [ReadyEvidencePolicy::LegacyV1, ReadyEvidencePolicy::NamedV2] {
-            assert!(
-                validate_research_ready_jobs_for_policy(old, &run, &artifact, &jobs).is_err()
-            );
+            assert!(validate_research_ready_jobs_for_policy(old, &run, &artifact, &jobs).is_err());
         }
         for changed in [
             {
@@ -1728,9 +1726,18 @@ mod tests {
         );
 
         for (schema, name) in [
-            (RESEARCH_COMPONENT_SCHEMA_V2, "okx.github.actions.research-ready/v3"),
-            (RESEARCH_COMPONENT_SCHEMA_V3, "okx.github.actions.research-ready/v2"),
-            (RESEARCH_COMPONENT_SCHEMA_V3, "okx.github.actions.research-ready/v1"),
+            (
+                RESEARCH_COMPONENT_SCHEMA_V2,
+                "okx.github.actions.research-ready/v3",
+            ),
+            (
+                RESEARCH_COMPONENT_SCHEMA_V3,
+                "okx.github.actions.research-ready/v2",
+            ),
+            (
+                RESEARCH_COMPONENT_SCHEMA_V3,
+                "okx.github.actions.research-ready/v1",
+            ),
         ] {
             let mut wrong = manifest.clone();
             wrong["schema"] = json!(schema);
