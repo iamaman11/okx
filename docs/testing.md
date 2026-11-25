@@ -4,7 +4,30 @@ Run `python3 scripts/check_p0.py --plan` from a checkout to list the scopes sele
 
 For an invalid plan, start with `cargo test --locked -p okx-strategy-core --lib query_plan::tests::k7_invalid_operator_bounds_or_parameter_fail_closed -- --exact`. For a missing candle, use `cargo test --locked -p okx-strategy-core --lib time_series::tests::c13_missing_internal_candle_not_healed_by_duplicate_or_unclosed -- --exact`. Both are Research-owned pure checks; the trading Engine does not compile their implementation. A mandatory test which is missing or ignored fails feedback.
 
-On a Draft PR the same selector runs on Linux as `draft-component-tests`. A change to shared configuration, the workflow or an unknown/deleted path expands the Linux checks. The editable loop does not start the Windows release matrix. Ready-for-review, protected checks, verified Research-only releases and exact-tree main reuse remain integration decisions; a successful Draft by itself cannot authorize reuse. Compare cache state, queue and job wall time separately.
+On a Draft PR the same selector runs on Linux as `draft-owner-feedback` (YAML job ID `draft-component-tests`). A change to shared configuration, the workflow or an unknown/deleted path expands the Linux checks. The editable loop does not start the Windows release matrix. Ready-for-review, protected checks, verified Research-only releases and exact-tree main reuse remain integration decisions; a successful Draft by itself cannot authorize reuse. Compare cache state, queue and job wall time separately.
+
+Current Ready CI keeps the three protected display names `classify`,
+`linux-core` and `windows-native`. For applicable Rust changes,
+`dependency-audit` must succeed before protected `linux-core` can succeed;
+docs-only and Edge-only changes require the audit job to be explicitly
+**skipped**. Full Native/Engine changes retain a separate Windows financial
+collector, release builder and four Windows regression suites: `engine`,
+`host`, `execution`, `research`. The Host suite now runs the same native
+`--all-targets` Clippy with `-D warnings` after Host tests; there is no
+standalone `clippy` matrix cell. No finance witness, K9 scenario or
+clock-sensitive Engine/Execution runner is replaced by Clippy's relocation.
+The two publisher jobs still require exact first-attempt Ready PR provenance,
+while installed CONTROL also verifies its existing seven-job Research roster;
+do not rename those jobs without a versioned installed-verifier migration.
+Automatic accepted-`main` pushes reuse exact already-tested PR source trees
+and artifacts without rebuilding Engine or claiming fresh financial tests.
+The reduced
+matrix removes one Windows runner setup, but any wall-clock improvement
+remains unmeasured until comparable Ready CI runs complete. Optional
+`workflow_dispatch` cache warming accepts `cache_profile=tests|release|both`
+(`both` by default); the first two options request one Windows compile job,
+and `both` requests two. These jobs are not protected acceptance or release
+evidence.
 
 ## #512 current navigation and evidence status (r15)
 

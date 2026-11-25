@@ -210,26 +210,28 @@ means proven reusable binary bytes, not a runtime library. Existing
 
 One `.github/workflows/ci.yml` contains **16 job definitions**. GitHub renders
 all of their names even when the selected component route correctly skips a
-job. Five Windows regression matrix cells and the optional two cache profiles
-can add displayed rows; they are **not extra application components**. The
-`on: push` trigger applies only to `main` (in addition to PR and manual runs).
+job. Four Windows regression matrix cells and at most two manual cache
+profiles can add displayed rows; they are **not extra application components**.
+The `on: push` trigger applies only to `main` (in addition to PR and manual runs).
+The GitHub job's YAML identifier may differ from its displayed name; branch
+protection and accepted-artifact verification use the **displayed names**.
 
 | Job displayed by GitHub | When it runs / what it verifies |
 | --- | --- |
 | `classify` | Every event, Ubuntu: immutable change scope, fail-closed owner routing and Windows Cargo closure |
-| `draft-component-tests` | Draft PR, Ubuntu: selected owner/consumer feedback; does **not** compile Windows-only code |
-| `dependency-audit` | Ready/main for Rust owners: locked dependency graph, advisories, licences and sources |
+| `draft-owner-feedback` | Draft PR, Ubuntu: selected owner/consumer feedback (`draft-component-tests` YAML ID); does **not** compile Windows-only code |
+| `dependency-audit` | Ready/main for Rust owners: locked dependency graph, advisories, licences and sources; an applicable failure makes protected `linux-core` fail |
 | `architecture-contracts` | Fresh non-Edge Rust changes: ownership, schema, product contracts and negative CI/release checks |
 | `rust-tests-linux` | Full/Engine route only: portable Rust Clippy, tests, Research IPC and dev-isolated dispatch; **not** a Windows runtime test |
 | `cloudflare-mcp-contracts` | Edge affected: TypeScript/MCP/DO/public-contract checks on Ubuntu |
-| `linux-core` | Non-Draft, Ubuntu: protected result aggregator, **not** another Rust build |
+| `linux-core` | Non-Draft, Ubuntu: protected result aggregator, **not** another Rust build; requires `dependency-audit` success for applicable Rust scopes, exact skipped status for docs/Edge-only |
 | `host-controller-launcher-checks` | Ready Host/CONTROL or mixed Host+Research, Windows: Clippy, tests and two Host EXE builds, no Engine build |
 | `trading-engine-acceptance-windows` | Fresh Full/Engine route, Windows: exact 62 financial contracts / 107 witnesses, recovery and resource proof |
-| `trading-engine-regressions-windows (suite)` | Fresh Full/Engine route: five parallel Windows suites for Engine, Host, Execution, Research and Clippy |
+| `trading-engine-regressions-windows (suite)` | Fresh Full/Engine route: four parallel Windows suites for Engine, Host, Execution and Research; Host also runs the unchanged native `--all-targets` Clippy with `-D warnings` after its tests |
 | `research-service-tests-windows` | Fresh Research-only or mixed Host+Research PR, Windows: Research owner/IPC/WSS tests and scoped Research release evidence; no Engine build on Research-only |
 | `windows-native` | Non-Draft, Ubuntu: protected aggregator of the **actual** required Windows jobs, not a Windows runner itself |
 | `trading-engine-build-windows` | Fresh Full/Engine route, Windows: Engine-only or full four-EXE release artifact with exact SHA/tree |
-| `trusted-main-windows-cache-prime (profile)` | **Manual** accepted-main cache seed, two Windows profiles; compilation only, never acceptance/publish |
+| `warm-windows-cargo-cache (profile)` | **Manual** accepted-main cache seed (`trusted_main_cache_prime` YAML ID); choose `tests`, `release` (one Windows runner) or `both` (two runners, default). Compilation only, never acceptance/publish |
 | `publish-accepted-windows-release` | Accepted Full main tree, isolated write permission: publish immutable verified four-EXE PR artifact without rebuilding or installing |
 | `publish-accepted-research-component` | Accepted Research-only main tree, isolated write permission: publish exact three-file Research artifact and origin/readback without rebuilding |
 
@@ -246,23 +248,58 @@ this is distinct from the Windows 62/107 financial acceptance and is not a
 Windows performance measurement. A missing 100-parallel SQL test filter that
 previously reported `0 passed` was also removed (no real test was skipped).
 
-The required check **display names** `classify`, `windows-native` and `linux-core`
-are retained for branch protection and accepted-CI reuse. `classify` is the
-actual `component_impact` job, without a redundant alias; the platform
-aggregators keep implementation IDs `required_windows` and `required_linux`.
-They require finance acceptance, independent regressions and release build on the
-full Native route; on reuse they verify the accepted exact tree instead. They
-never claim that skipped financial tests ran. The old branch-only Draft jobs for closed
-issues #510 and #512 have been removed; normal Draft owner tests remain.
+The required check **display names** `classify`, `linux-core` and `windows-native`
+are retained exactly as configured in GitHub `main` branch protection.
+`classify` is the actual `component_impact` job, without a redundant alias;
+the aggregators keep YAML IDs `required_linux` and `required_windows`.
+`linux-core` explicitly depends on `dependency-audit`: an applicable audit
+failure or cancellation is **not** compatible with protected success, including
+the accepted-`main` reuse route. Docs-only and Edge-only changes instead
+require that audit job to be **skipped**, not falsely report a passing Rust audit.
+Together, the protected aggregate statuses enforce the applicable Linux and
+Windows evidence. On a fresh Full Native route, `windows-native` requires
+finance acceptance, all four independent Windows regression suites (including
+Host Clippy) and release build; `linux-core` requires Linux Rust, architecture,
+dependency and Edge checks. On accepted-`main` reuse they verify the exact
+previously successful PR tree instead. Neither claims skipped financial tests ran.
+The old branch-only Draft jobs for closed issues #510 and #512 have been removed;
+normal Draft owner feedback remains under its new display name.
+
+Several additional job names are security contracts even though they are not
+direct branch-protection contexts. The two main publishers verify exact
+first-attempt Ready PR job rosters, including `dependency-audit` and all four
+regression suites; installed CONTROL independently requires the existing
+seven-job Research Ready roster (`classify`, `architecture-contracts`,
+`dependency-audit`, `cloudflare-mcp-contracts`,
+`research-service-tests-windows`, `linux-core`, `windows-native`). Removing or
+renaming these statuses requires a separately versioned provenance policy,
+negative controls and migration of the **installed** CONTROL verifier first.
+Adding synthetic green alias checks or accepting only a workflow conclusion
+would not be equivalent evidence.
 
 CI classifies the diff for the exact commits in the GitHub event. Docs-only
 changes use the protected classification and aggregate checks. Edge changes
 also run the Worker contract job. Both routes skip Rust setup, Cargo audit,
-Windows jobs and Native release publication. Research and Host changes run
-their owner jobs. A Host and Edge change runs their two component jobs without
+Windows jobs and Native release publication; the protected Linux aggregate
+checks these intentional skips. Research and Host changes run their owner
+jobs. A Host and Edge change runs its affected component checks without
 rebuilding the Engine. A Research-only PR builds its own three-file component;
-the accepted main publisher reuses those exact bytes without fetching or
-repackaging an Engine/Native base for the Research release.
+the accepted `main` publisher reuses those exact bytes without fetching or
+repackaging an Engine/Native base for the Research release. An automatic
+accepted-`main` push does not claim or perform fresh Engine tests or
+compilation. The separate, explicit manual cache-seed dispatch may compile
+Engine **for cache only**; it cannot authorize publication. A changed/unknown
+tree must take the appropriate fresh PR route; there is no
+publish-by-recompile fallback on `main`.
+
+Moving Clippy into the existing Host regression runner removes one Windows
+matrix cell and one runner setup. It does **not** prove a shorter total CI
+wall-clock: the Host tests and Clippy now execute sequentially on that runner.
+Compare equivalent Ready-run queue, cache, build and test timings before
+asserting any performance improvement. The optional manual cache seed is not
+part of Ready acceptance: selecting one profile avoids running the other
+Windows compiler job, while selecting `both` may start two. Cache warmup is
+neither a financial test nor release evidence.
 
 On the Windows production dependency graph, `okx-analysis` and
 `okx-strategy-core` are outside Trading Engine, and Research builds

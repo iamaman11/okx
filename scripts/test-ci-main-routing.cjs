@@ -15,7 +15,13 @@ const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
   'okx-research-service', 'tests', 'ipc_process.rs'), 'utf8').replaceAll('\r\n', '\n');
 const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
 const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}";
-const regressionSuites = ['engine', 'host', 'execution', 'research', 'clippy'];
+// Unknown/missing manual choices produce an empty matrix (hard CI failure),
+// never an implicit two-runner cache warmup.
+const selectedCacheMatrix = "        profile: ${{ fromJSON(inputs.cache_profile == 'tests' && '[\"tests\"]' || inputs.cache_profile == 'release' && '[\"release\"]' || inputs.cache_profile == 'both' && '[\"tests\",\"release\"]' || '[]') }}";
+// Windows Clippy runs on the existing host regression runner. It is not a
+// separately accepted matrix result, but it remains a required -D warnings
+// command inside the host cell.
+const regressionSuites = ['engine', 'host', 'execution', 'research'];
 const releaseGates = ['trading-engine-acceptance-windows',
   ...regressionSuites.map(suite => `trading-engine-regressions-windows (${suite})`),
   'trading-engine-build-windows', 'linux-core', 'windows-native'];
@@ -44,6 +50,8 @@ function validate(yaml, fileNames) {
   assert.match(header, /^  workflow_dispatch:$/m);
   assert.match(header, /^      prime_windows_cargo_cache:$/m);
   assert.match(header, /^        default: true$/m);
+  assert.match(header, /^      cache_profile:\n        description: 'Select which trusted main Windows Cargo cache to warm'\n        required: true\n        type: choice\n        options: \[tests, release, both\]\n        default: both$/m,
+    'MANUAL_CACHE_MUST_EXPOSE_ONE_OR_BOTH_PROFILES_WITH_SAFE_BOTH_DEFAULT');
   assert.doesNotMatch(header, /^  contents: write$/m);
   assert.match(header, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 
@@ -106,6 +114,7 @@ function validate(yaml, fileNames) {
   assert.match(classify, /"research_only=true" >> "\$GITHUB_OUTPUT"/);
   assert.match(classify, /native_proof=RESEARCH_OWNER_ONLY/);
   const draft = job('draft-component-tests');
+  assert.match(draft, /^    name: draft-owner-feedback$/m);
   assert.match(draft, /needs: component_impact/);
   assert.match(draft, /DRAFT_CHECKS: \$\{\{ needs\.component_impact\.outputs\.draft_checks \}\}/);
   assert.match(draft, /check_p0\.py --checks "\$DRAFT_CHECKS"/);
@@ -156,6 +165,21 @@ function validate(yaml, fileNames) {
     assert.match(job(id), new RegExp(`^    name: ${display}$`, 'm'));
     assert.match(job(id), /needs: \[component_impact,/);
   }
+  // Cargo advisories/license/source policy must participate in the protected
+  // PR merge decision, not merely in post-merge release publication. GitHub
+  // treats conditional skipped jobs as successful required checks; the always
+  // running aggregate must explicitly require a real audit on Rust scopes.
+  const requiredLinux = job('required_linux');
+  assert.match(requiredLinux, /^    needs: \[component_impact, dependency-audit, /m,
+    'LINUX_AGGREGATE_MUST_WAIT_FOR_DEPENDENCY_AUDIT');
+  assert.match(requiredLinux,
+    /case "\$\{\{ needs\.component_impact\.outputs\.component_scope \}\}" in\n\s+docs\|cloudflare\) test "\$\{\{ needs\['dependency-audit'\]\.result \}\}" = "skipped" ;;\n\s+\*\) test "\$\{\{ needs\['dependency-audit'\]\.result \}\}" = "success" ;;\n\s+esac/,
+    'RUST_READY_MUST_NOT_ACCEPT_SKIPPED_OR_FAILED_DEPENDENCY_AUDIT');
+  assert.match(requiredLinux, /if: always\(\) && \(github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.draft != true\)/);
+  const auditGate = requiredLinux.indexOf('docs|cloudflare) test "${{ needs[\'dependency-audit\'].result }}" = "skipped"');
+  const mainReuseExit = requiredLinux.indexOf('REUSED_SUCCESSFUL_PR_CI=true');
+  assert.ok(auditGate >= 0 && mainReuseExit > auditGate,
+    'MAIN_EXACT_TREE_REUSE_MUST_NOT_SKIP_FRESH_DEPENDENCY_AUDIT');
   const names = {
     rust_tests_linux: 'rust-tests-linux',
     trading_engine_acceptance_windows: 'trading-engine-acceptance-windows',
@@ -213,7 +237,7 @@ function validate(yaml, fileNames) {
   assert.ok(regression.includes('    name: trading-engine-regressions-windows (${{ matrix.suite }})'));
   assert.ok(regression.includes(`      fail-fast: false\n      matrix:\n        suite: [${regressionSuites.join(', ')}]`));
   for (const [name, scope] of [
-    ['Clippy native Windows crates', "matrix.suite == 'clippy'"],
+    ['Clippy native Windows crates', "matrix.suite == 'host'"],
     ['Strategy Core and Research owner regressions on full Windows', "matrix.suite == 'research'"],
     ['Build research worker for regression process contracts', "matrix.suite == 'engine'"],
     ['Remaining native regression tests for this suite', "matrix.suite == 'engine' || matrix.suite == 'host' || matrix.suite == 'execution'"],
@@ -224,6 +248,11 @@ function validate(yaml, fileNames) {
     ['K9 worker two-heavy cancellation latency evidence', "matrix.suite == 'research'"],
     ['Upload K9 native latency evidence', "matrix.suite == 'research'"],
   ]) assert.ok(regression.includes(`      - name: ${name}\n        if: ${scope}\n`), `NATIVE_REGRESSION_SUITE:${name}`);
+  assert.match(regression,
+    /cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings/,
+    'WINDOWS_CLIPPY_MUST_RETAIN_ALL_NATIVE_OWNERS_AND_DENY_WARNINGS');
+  assert.doesNotMatch(regression, /matrix\.suite == 'clippy'|suite: \[[^\]\n]*clippy/,
+    'RETIRED_CLIPPY_MATRIX_MUST_NOT_RETURN');
   assert.match(regression, /'host' \{ 'okx-host-controller'; 'okx-host-launcher'; 'okx-host-protocol'; 'okx-bridge-mcp' \}/);
   assert.match(regression, /FULL_HOST_RESEARCH_WITNESS_NOT_RUN_\$witness/);
   for (const witness of [
@@ -294,8 +323,9 @@ function validate(yaml, fileNames) {
   assert.match(build, /source_head_sha = \$sourceHead/);
   assert.doesNotMatch(build, /gh release|cargo run|cargo test --locked .* -- --nocapture/);
   const prime = job('trusted_main_cache_prime');
-  assert.ok(prime.includes("name: trusted-main-windows-cache-prime (${{ matrix.profile }})"));
-  assert.match(prime, /^        profile: \[tests, release\]$/m);
+  assert.ok(prime.includes("name: warm-windows-cargo-cache (${{ matrix.profile }})"));
+  assert.ok(prime.includes(selectedCacheMatrix), 'CACHE_MATRIX_MUST_CREATE_ONLY_REQUESTED_TRUSTED_MAIN_RUNNERS');
+  assert.doesNotMatch(prime, /^        profile: \[tests, release\]$/m);
   assert.match(prime, /github.event_name == 'workflow_dispatch' &&\n        inputs.prime_windows_cargo_cache == true &&/);
   assert.doesNotMatch(prime, /github.event_name == 'push'/,
     'ACCEPTED_MAIN_MUST_NOT_RECOMPILE_ENGINE_TO_WARM_WINDOWS_CACHE');
@@ -545,6 +575,21 @@ assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.
 assert.throws(() => validate(source.replace('git fetch --no-tags --depth=1 origin "$BASE_SHA"',
   'git fetch --no-tags --depth=1 origin main'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'required_linux',
+  'needs: [component_impact, dependency-audit,', 'needs: [component_impact,'), workflows),
+  'DEPENDENCY_AUDIT_CANNOT_BE_DROPPED_FROM_PROTECTED_LINUX_NEEDS');
+assert.throws(() => validate(changeJobInput(source, 'required_linux',
+  "            *) test \"${{ needs['dependency-audit'].result }}\" = \"success\" ;;",
+  '            *) true ;;'), workflows),
+  'RUST_DEPENDENCY_AUDIT_FAILURE_CANNOT_BE_BYPASSED');
+assert.throws(() => validate(changeJobInput(source, 'required_linux',
+  "            *) test \"${{ needs['dependency-audit'].result }}\" = \"success\" ;;",
+  "            *) test \"${{ needs['dependency-audit'].result }}\" = \"skipped\" ;;"), workflows),
+  'RUST_SCOPE_MUST_REQUIRE_EXECUTED_AUDIT_NOT_SKIPPED');
+assert.throws(() => validate(changeJobInput(source, 'required_linux',
+  "            docs|cloudflare) test \"${{ needs['dependency-audit'].result }}\" = \"skipped\" ;;",
+  '            docs|cloudflare) true ;;'), workflows),
+  'DOCS_EDGE_SCOPE_MUST_NOT_HIDE_UNEXPECTED_AUDIT_EXECUTION');
 assert.throws(() => validate(source.replace('      - name: Format\n        run: cargo fmt --all -- --check',
   '      - name: Format\n        run: echo skipped-format'), workflows));
 assert.throws(() => validate(source.replace('cargo test --locked --workspace --exclude okx-trading-engine --exclude okx-host-controller --exclude okx-research-service', 'echo skipped-portable-tests'), workflows));
@@ -553,6 +598,21 @@ assert.throws(() => validate(source.replace('      - name: Test portable crates'
 assert.throws(() => validate(source.replace('      - name: Test portable crates',
   '      - run: npm ci --ignore-scripts --no-audit --no-fund\n      - name: Test portable crates'), workflows));
 assert.throws(() => validate(source.replace('        default: true', '        default: false'), workflows));
+assert.throws(() => validate(source.replace('options: [tests, release, both]', 'options: [tests, release]'), workflows),
+  'MANUAL_CACHE_INPUT_MUST_RETAIN_BOTH_CHOICE');
+assert.throws(() => validate(source.replace('        default: both', '        default: tests'), workflows),
+  'MANUAL_CACHE_PROFILE_DEFAULT_MUST_WARM_BOTH');
+assert.throws(() => validate(source.replace(selectedCacheMatrix,
+  '        profile: [tests, release]'), workflows),
+  'MANUAL_SINGLE_PROFILE_MUST_NOT_LAUNCH_BOTH_RUNNERS');
+assert.throws(() => validate(source.replace("inputs.cache_profile == 'tests' && '[\"tests\"]'", 'false'), workflows),
+  'MANUAL_TESTS_CACHE_PROFILE_MUST_NOT_BE_IGNORED');
+assert.throws(() => validate(source.replace("inputs.cache_profile == 'release' && '[\"release\"]'", 'false'), workflows),
+  'MANUAL_RELEASE_CACHE_PROFILE_MUST_NOT_BE_IGNORED');
+assert.throws(() => validate(source.replace("inputs.cache_profile == 'both' && '[\"tests\",\"release\"]'", 'false'), workflows),
+  'MANUAL_BOTH_CACHE_PROFILE_MUST_INCLUDE_RELEASE');
+assert.throws(() => validate(source.replace("|| '[]') }}", "|| '[\"tests\",\"release\"]') }}"), workflows),
+  'UNKNOWN_MANUAL_CACHE_PROFILE_MUST_NOT_START_WINDOWS_RUNNERS');
 assert.throws(() => validate(source.replace('BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED',
   'WE_DID_NOT_VERIFY_THE_TWO_TESTS'), workflows));
 assert.throws(() => validate(source.replace('NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS',
@@ -721,7 +781,14 @@ assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-man
 assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-native-finance-check -- --list'), workflows));
 assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
 assert.throws(() => validate(source.replace('"trading-engine-regressions-windows (engine)",', ''), workflows));
-assert.throws(() => validate(source.replace('suite: [engine, host, execution, research, clippy]', 'suite: [engine, host, execution, research]'), workflows));
+assert.throws(() => validate(source.replace('suite: [engine, host, execution, research]', 'suite: [engine, host, execution]'), workflows),
+  'RESEARCH_REGRESSION_MATRIX_CANNOT_BE_DROPPED');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+  "if: matrix.suite == 'host'", "if: matrix.suite == 'clippy'"), workflows),
+  'WINDOWS_CLIPPY_MUST_RUN_IN_THE_HOST_MATRIX');
+assert.throws(() => validate(source.replace(
+  'cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings',
+  'echo skipped-windows-clippy'), workflows), 'WINDOWS_CLIPPY_CANNOT_BE_REMOVED');
 assert.throws(() => validate(changeJobInput(source, 'trading_engine_build_windows',
   'shared-key: trading-engine-release-windows', 'shared-key: trading-engine-tests-windows'), workflows));
 assert.throws(() => validate(changeJobInput(source, 'trading_engine_acceptance_windows',

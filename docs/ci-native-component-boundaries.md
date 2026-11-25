@@ -50,9 +50,10 @@ all Windows regression suites and the Windows release build to succeed.
 The complete budgeted financial collector and isolated OS/SQL/process fixtures
 remain on one runner. The `okx-native-finance-check` CI tool builds and tests
 its own validation code without linking Engine, then runs the actual Cargo
-test binaries for the verified source tree. The regression job runs five
-parallel suites for Engine, Host, Trade Execution, Research and Clippy. The
-three package suites derive their financial-witness exclusions from the
+test binaries for the verified source tree. The regression job runs four
+parallel suites for Engine, Host, Trade Execution and Research. Native Clippy
+with `--all-targets` and `-D warnings` runs after Host tests on that runner.
+The three package suites derive their financial-witness exclusions from the
 collector manifest. Engine's SQLite writer and source-frontier fixtures retain
 their serial test settings. Research runs its library tests, IPC process tests
 and K9 in its own suite. The release build uses the same source tree.
@@ -71,15 +72,17 @@ CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
 hashes are retained as **non-deployable** evidence. It never publishes a new
 Native base; `publish-accepted-windows-release` inside the **same** protected
 `.github/workflows/ci.yml` runs after successful main checks and continues
-to require fresh financial acceptance, all five regression suites and a complete
-four-component Windows artifact. It publishes a GitHub release but never
+to require fresh financial acceptance, all four regression suites (including
+Host Clippy) and a complete four-component Windows artifact. It publishes a
+GitHub release but never
 installs or restarts the Trading Engine.
 
-The default branch primes both Windows Cargo caches automatically after a full
-merge with an exact successful Ready tree. A manual `workflow_dispatch` on
-accepted `main` with `prime_windows_cargo_cache=true` triggers the same job.
-The two profile runners compile on a cache miss. Their results sit outside
-the protected acceptance and publication gates. Test builds omit debug
+The accepted `main` run reuses the exact successful Ready PR artifact without
+compiling Engine again. Only a manual `workflow_dispatch` on accepted `main`
+with `prime_windows_cargo_cache=true` starts cache warming. The
+`cache_profile=tests|release|both` choice starts one or two Windows profile
+runners (default `both`); each compiles only on a cache miss. Their results
+sit outside the protected acceptance and publication gates. Test builds omit debug
 symbols while preserving debug assertions. The release build retains its
 Cargo profile. PR jobs restore caches from trusted main and compile their
 own source tree with Cargo.
