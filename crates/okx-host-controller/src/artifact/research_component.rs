@@ -371,9 +371,12 @@ fn verify_active_control_identity() -> HostControlResult<()> {
 }
 
 fn is_canonical_ci_workflow_path(path: &str) -> bool {
-    // GitHub Actions run REST responses include an @ref suffix (`@main`,
-    // `@refs/pull/N/merge`, etc.). Bind the exact workflow file and require a
-    // simple, nonempty ref; an unqualified or differently named CI is invalid.
+    // Live workflow-run REST data uses the plain path; documented examples
+    // may include an @ref suffix. Bind the exact canonical filename in either
+    // representation without accepting a broader workflow-path prefix.
+    if path == ".github/workflows/ci.yml" {
+        return true;
+    }
     let Some(reference) = path.strip_prefix(".github/workflows/ci.yml@") else {
         return false;
     };
@@ -422,7 +425,7 @@ fn validate_research_release_jobs(
         || artifact.workflow_run.as_ref().is_none_or(|source| {
             source.id != run.id
                 || source.repository_id != REPOSITORY_ID
-                || source.head_repository_id == 0
+                || source.head_repository_id != REPOSITORY_ID
                 || source.head_sha != run.head_sha
         })
     {
@@ -1333,12 +1336,18 @@ mod tests {
         let mut tampered = zip;
         tampered[0] ^= 1;
         assert!(verify_research_zip_digest(&with_real_digest, &tampered).is_err());
+        assert!(is_canonical_ci_workflow_path(".github/workflows/ci.yml"));
         assert!(is_canonical_ci_workflow_path(
             ".github/workflows/ci.yml@main"
         ));
+        let mut plain = run.clone();
+        plain.path = ".github/workflows/ci.yml".into();
+        validate_research_release_jobs(&plain, &artifact, &jobs).unwrap();
         for path in [
-            ".github/workflows/ci.yml",
             ".github/workflows/ci.yml@",
+            ".github/workflows/ci.yml/evil",
+            ".github/workflows/Ci.yml",
+            ".github/workflows/ci.yml@refs//heads/main",
             ".github/workflows/ci-test.yml@main",
             ".github/workflows/ci.yml@../../evil",
             ".github/workflows/ci.yml@refs/pull/581/merge?attacker=1",
@@ -1381,6 +1390,13 @@ mod tests {
         assert!(validate_research_release_jobs(&run, &bad_artifact, &jobs).is_err());
         bad_artifact = artifact.clone();
         bad_artifact.workflow_run.as_mut().unwrap().id = run.id + 1;
+        assert!(validate_research_release_jobs(&run, &bad_artifact, &jobs).is_err());
+        bad_artifact = artifact.clone();
+        bad_artifact
+            .workflow_run
+            .as_mut()
+            .unwrap()
+            .head_repository_id = REPOSITORY_ID + 1;
         assert!(validate_research_release_jobs(&run, &bad_artifact, &jobs).is_err());
         let mut wrong_run = jobs.clone();
         wrong_run[0].run_id += 1;

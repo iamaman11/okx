@@ -17,7 +17,9 @@ const regressionSuites = ['engine', 'host', 'execution', 'research', 'clippy'];
 const releaseGates = ['trading-engine-acceptance-windows',
   ...regressionSuites.map(suite => `trading-engine-regressions-windows (${suite})`),
   'trading-engine-build-windows', 'linux-core', 'windows-native'];
-const acceptedWorkflowPath = String.raw`test("^\\.github/workflows/ci\\.yml@[A-Za-z0-9_./-]+$")`;
+// GitHub REST currently returns the bare workflow path; some GitHub response
+// forms append @ref. Both are canonical, but another workflow is never one.
+const acceptedWorkflowPath = String.raw`test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")`;
 const nativeCacheJobs = [
   ['trading_engine_acceptance_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
@@ -92,7 +94,7 @@ function validate(yaml, fileNames) {
   assert.match(classify, /scope="\$\{\{ steps.proven_scope.outputs.scope \}\}"/);
   assert.match(classify, /compare\/\$base\.\.\.\$CHECKED_HEAD/);
   assert.match(classify, /\.commits\[-1\]\.sha == \$head/);
-  assert.ok(classify.includes(acceptedWorkflowPath), 'MAIN_REUSE_MUST_MATCH_GITHUB_WORKFLOW_PATH_WITH_REF');
+  assert.ok(classify.includes(acceptedWorkflowPath), 'MAIN_REUSE_MUST_MATCH_EXACT_CI_WORKFLOW_PATH');
   assert.match(classify, /\.run_attempt == 1\) \| \[\.id, \.run_attempt\] \| @tsv/,
     'UNREVIEWED_RERUN_CANNOT_AUTHORIZE_MAIN_REUSE');
   assert.match(classify, /host-controller\|host-launcher\) edge_required="\$\{\{ steps\.file_scope\.outputs\.edge_changed \}\}"/);
@@ -275,8 +277,9 @@ function validate(yaml, fileNames) {
   const prime = job('trusted_main_cache_prime');
   assert.ok(prime.includes("name: trusted-main-windows-cache-prime (${{ matrix.profile }})"));
   assert.match(prime, /^        profile: \[tests, release\]$/m);
-  assert.match(prime, /github.event_name == 'push' && needs.component_impact.outputs.component_scope == 'full'/);
-  assert.match(prime, /github.event_name == 'workflow_dispatch' && inputs.prime_windows_cargo_cache == true/);
+  assert.match(prime, /github.event_name == 'workflow_dispatch' &&\n        inputs.prime_windows_cargo_cache == true &&/);
+  assert.doesNotMatch(prime, /github.event_name == 'push'/,
+    'ACCEPTED_MAIN_MUST_NOT_RECOMPILE_ENGINE_TO_WARM_WINDOWS_CACHE');
   assert.match(prime, /github.ref == 'refs\/heads\/main' &&/);
   assert.match(prime, /needs.component_impact.outputs.build_required == 'false'/);
   assert.match(prime, /merged tree exactly matches successful PR head tree/);
@@ -329,6 +332,8 @@ function validate(yaml, fileNames) {
     'MAIN_PUBLICATION_MUST_IGNORE_TRANSITIVE_SKIPS');
   assert.match(publish, /github\.event_name == 'push' &&/);
   assert.match(publish, /github\.ref == 'refs\/heads\/main' &&/);
+  assert.match(publish, /needs\.component_impact\.outputs\.build_required == 'false' &&/);
+  assert.match(publish, /needs\.component_impact\.outputs\.reason == 'merged tree exactly matches successful PR head tree'/);
   for (const name of ["['dependency-audit']", '.component_impact', '.required_linux', '.required_windows']) {
     assert.ok(publish.includes(`needs${name}.result == 'success'`),
       `PUBLICATION_NEEDS_SUCCESS:${name}`);
@@ -339,7 +344,19 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(publish, /github\.event\.workflow_run/);
   assert.doesNotMatch(publish, /gh release delete|--cleanup-tag/, 'ACCEPTED_ROLLBACK_BASES_MUST_NOT_BE_PRUNED_BLINDLY');
   assert.match(publish, /NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS/);
-  assert.ok(publish.includes(JSON.stringify(releaseGates)), 'PUBLICATION_REQUIRES_EACH_WINDOWS_SUITE');
+  assert.ok(publish.includes(acceptedWorkflowPath), 'NATIVE_PUBLISH_MUST_MATCH_EXACT_CI_WORKFLOW_PATH');
+  assert.match(publish, /\.head_sha == \$head and \.run_attempt == 1 and/);
+  assert.match(publish, /"\$attempt" == 1/);
+  assert.match(publish, /runs\/\$candidate\/attempts\/\$attempt\/jobs\?per_page=100/);
+  assert.match(publish, /all\(\.jobs\[\]; \.run_id == \$run and \.head_sha == \$head and \.run_attempt == 1\)/);
+  assert.match(publish, /\.total_count == \(\.jobs \| length\)/);
+  assert.match(publish, /\.workflow_run\.id == \$run and \.workflow_run\.repository_id == 1388071566/);
+  assert.match(publish, /\.workflow_run\.head_repository_id == 1388071566/);
+  assert.match(publish, /\.workflow_run\.head_sha == \$head/);
+  assert.match(publish, /NO_EXACT_FIRST_ATTEMPT_FULL_NATIVE_READY_PR_ARTIFACT/);
+  for (const name of [...releaseGates, 'classify', 'dependency-audit',
+    'architecture-contracts', 'cloudflare-mcp-contracts', 'rust-tests-linux'])
+    assert.ok(publish.includes(`"${name}"`), `NATIVE_PUBLICATION_MISSING_READY_GATE:${name}`);
 
   const researchPublish = job('publish_accepted_research_component');
   assert.match(researchPublish, /^    name: publish-accepted-research-component$/m);
@@ -360,8 +377,7 @@ function validate(yaml, fileNames) {
   assert.match(researchPublish, /"\$attempt" == 1/);
   assert.match(researchPublish, /\.head_sha == \$head and \.run_attempt == 1 and/);
   assert.match(researchPublish, /all\(\.jobs\[\]; \.run_id == \$run and \.head_sha == \$head\)/);
-  assert.match(researchPublish, /\.path \| test\("\^\\\\\.github\/workflows\/ci\\\\\.yml@\[A-Za-z0-9_\.\/-\]\+\$"\)/);
-  assert.ok(researchPublish.includes(acceptedWorkflowPath), 'RESEARCH_PUBLISH_MUST_MATCH_SAME_REF_PATH');
+  assert.ok(researchPublish.includes(acceptedWorkflowPath), 'RESEARCH_PUBLISH_MUST_MATCH_EXACT_CI_WORKFLOW_PATH');
   assert.match(researchPublish, /\.head_repository\.id == 1388071566/);
   assert.match(researchPublish, /\.workflow_run\.id == \$run and \.workflow_run\.repository_id == 1388071566/);
   assert.match(researchPublish, /\.workflow_run\.head_repository_id == 1388071566/);
@@ -384,12 +400,40 @@ function validate(yaml, fileNames) {
 }
 
 validate(source, workflows);
-const canonicalWorkflowPath = /^\.github\/workflows\/ci\.yml@[A-Za-z0-9_./-]+$/;
-for (const value of ['.github/workflows/ci.yml@main', '.github/workflows/ci.yml@refs/heads/main'])
-  assert.ok(canonicalWorkflowPath.test(value));
-for (const value of ['.github/workflows/ci.yml', '.github/workflows/ci.yml@',
-  '.github/workflows/other.yml@main', '.github/workflows/ci.yml@ main'])
-  assert.equal(canonicalWorkflowPath.test(value), false);
+// Exercise the actual path expression extracted independently from each job.
+// In particular, the live 2026-11-25 Actions REST `/actions/runs` response
+// for 45641162031 has path `.github/workflows/ci.yml` (without @ref).
+const mainBlock = source.split('\n  component_impact:\n', 2)[1].split('\n  draft-component-tests:\n', 1)[0];
+const nativePublisherBlock = source.split('\n  publish_accepted_windows_release:\n', 2)[1]
+  .split('\n  publish_accepted_research_component:\n', 1)[0];
+const publisherBlock = source.split('\n  publish_accepted_research_component:\n', 2)[1];
+function workflowPathMatcher(block) {
+  const found = block.match(/\.path \| (test\("(?:\\.|[^"])+"\))/g) || [];
+  assert.equal(found.length, 1, 'EXACTLY_ONE_WORKFLOW_PATH_TRUST_FILTER');
+  const expression = found[0].slice('.path | '.length);
+  assert.equal(expression, acceptedWorkflowPath, 'WORKFLOW_PATH_FILTER_DRIFT');
+  const encoded = expression.slice('test('.length, -1);
+  return new RegExp(JSON.parse(encoded));
+}
+for (const [name, block] of [['main successful_pr_ci', mainBlock],
+  ['Native-base Release publisher', nativePublisherBlock],
+  ['Research Release publisher', publisherBlock]]) {
+  const accepts = workflowPathMatcher(block);
+  for (const valid of ['.github/workflows/ci.yml', '.github/workflows/ci.yml@main',
+    '.github/workflows/ci.yml@refs/heads/main',
+    '.github/workflows/ci.yml@work/580-runtime-separation',
+    '.github/workflows/ci.yml@release/v1.2'])
+    assert.ok(accepts.test(valid), `${name}:VALID_WORKFLOW_PATH:${valid}`);
+  for (const invalid of ['', '.github/workflows/ci.yml@',
+    '.github/workflows/other.yml', '.github/workflows/other.yml@main',
+    '.github/workflows/ci.yml2', '.github/workflows/ci.yml@ main',
+    '.github/workflows/ci.yml@refs//heads/main',
+    '.github/workflows/ci.yml@../main',
+    '.github/workflows/ci.yml@main\nmalicious'])
+    assert.equal(accepts.test(invalid), false, `${name}:UNSAFE_WORKFLOW_PATH:${invalid}`);
+  // All three selectors also have mandatory first-attempt gates, independently
+  // enforced by validate() and the mutation controls below.
+}
 // Research's OS resource policy can change the measured Native Finance latency
 // without touching Engine source.
 // Route that rare change through the real Windows financial acceptance gate.
@@ -434,18 +478,61 @@ assert.throws(() => validate(source.replace('stale_bill_coverage_blocks_settleme
 assert.throws(() => validate(source.replace('always() &&\n        github.event_name',
   'github.event_name'), workflows));
 assert.throws(() => validate(source.replace("inputs.prime_windows_cargo_cache == true", "true"), workflows));
-assert.throws(() => validate(source.replace("github.event_name == 'workflow_dispatch' && inputs.prime_windows_cargo_cache == true", "github.event_name == 'pull_request'"), workflows));
-assert.throws(() => validate(source.replace("github.event_name == 'push' && needs.component_impact.outputs.component_scope == 'full'", "github.event_name == 'push'"), workflows));
+assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
+  "github.event_name == 'workflow_dispatch' &&", "github.event_name == 'pull_request' &&"), workflows));
+assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
+  "github.event_name == 'workflow_dispatch' &&", "github.event_name == 'push' &&"), workflows),
+  'MAIN_PUSH_MUST_NOT_TRIGGER_COMPILER_CACHE_PRIME');
 assert.throws(() => validate(source.replaceAll('test "${{ needs.trading_engine_build_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replaceAll('test "${{ needs.trading_engine_regressions_windows.result }}" = "success"', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"', 'true'), workflows));
 assert.throws(() => validate(source.replace('"research_only=true" >> "$GITHUB_OUTPUT"', 'true'), workflows));
 assert.throws(() => validate(source.replace('RESEARCH_COMPONENT_EXACT_THREE_FILE_PROOF_FAILED', 'BYPASS'), workflows));
-assert.throws(() => validate(source.replaceAll(acceptedWorkflowPath,
-  String.raw`test("^\\.github/workflows/ci\\.yml$")`), workflows));
+assert.throws(() => validate(source.replace(acceptedWorkflowPath,
+  String.raw`test("^\\.github/workflows/ci\\.yml$")`), workflows),
+  'MAIN_MUST_ACCEPT_GITHUB_REF_WORKFLOW_PATH');
+assert.throws(() => validate(source.replace(acceptedWorkflowPath,
+  String.raw`test("^\\.github/workflows/ci\\.yml.*$")`), workflows),
+  'MAIN_MUST_REJECT_OTHER_WORKFLOWS');
+const publisherIndex = source.lastIndexOf(acceptedWorkflowPath);
+assert.ok(publisherIndex > source.indexOf(acceptedWorkflowPath), 'TWO_INDEPENDENT_WORKFLOW_TRUST_FILTERS');
+const nativePublisherIndex = source.indexOf(acceptedWorkflowPath, source.indexOf('\n  publish_accepted_windows_release:\n'));
+assert.ok(nativePublisherIndex > source.indexOf(acceptedWorkflowPath), 'NATIVE_PUBLICATION_HAS_OWN_TRUST_FILTER');
+assert.ok(nativePublisherIndex < publisherIndex, 'PUBLISHER_PATH_FILTERS_DISTINCT');
+assert.throws(() => validate(source.slice(0, nativePublisherIndex) +
+  String.raw`test("^\\.github/workflows/ci\\.yml.*$")` +
+  source.slice(nativePublisherIndex + acceptedWorkflowPath.length), workflows),
+  'NATIVE_PUBLISHER_MUST_REJECT_OTHER_WORKFLOWS');
+assert.throws(() => validate(source.slice(0, publisherIndex) +
+  String.raw`test("^\\.github/workflows/ci\\.yml$")` +
+  source.slice(publisherIndex + acceptedWorkflowPath.length), workflows),
+  'PUBLISHER_MUST_ACCEPT_GITHUB_REF_WORKFLOW_PATH');
+assert.throws(() => validate(source.slice(0, publisherIndex) +
+  String.raw`test("^\\.github/workflows/ci\\.yml.*$")` +
+  source.slice(publisherIndex + acceptedWorkflowPath.length), workflows),
+  'PUBLISHER_MUST_REJECT_OTHER_WORKFLOWS');
 assert.throws(() => validate(source.replace('.run_attempt == 1) | [.id, .run_attempt]',
   '.run_attempt > 0) | [.id, .run_attempt]'), workflows));
-assert.throws(() => validate(source.replace('"$attempt" == 1', '"$attempt" =~ ^[1-9]'), workflows));
+assert.throws(() => validate(source.replace('all(.jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1)',
+  'all(.jobs[]; .run_id == $run)'), workflows),
+  'NATIVE_PUBLISHER_REQUIRES_SAME_HEAD_AND_ATTEMPT_JOBS');
+assert.throws(() => validate(source.replace('"$attempt" == 1', '"$attempt" =~ ^[1-9]'), workflows),
+  'NATIVE_PUBLISHER_MUST_REJECT_SECOND_ATTEMPT');
+assert.throws(() => validate(source.replace('runs/$candidate/attempts/$attempt/jobs?per_page=100',
+  'runs/$candidate/jobs?per_page=100'), workflows),
+  'NATIVE_PUBLISHER_MUST_USE_EXACT_ATTEMPT_JOB_LIST');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_windows_release',
+  '.head_sha == $head and .run_attempt == 1 and', '.head_sha == $head and .run_attempt > 0 and'),
+  workflows), 'NATIVE_PUBLISHER_REQUIRES_FIRST_ATTEMPT_RUN');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_windows_release',
+  '"trading-engine-acceptance-windows"', '"trading-engine-acceptance-SKIPPED"'),
+  workflows), 'NATIVE_PUBLISHER_MUST_REQUIRE_REAL_FINANCIAL_ACCEPTANCE');
+assert.throws(() => validate(source.replace('.workflow_run.head_repository_id == 1388071566 and',
+  'true and'), workflows),
+  'NATIVE_PUBLISHER_MUST_MATCH_ARTIFACT_ORIGIN');
+assert.throws(() => validate(source.replace('NO_EXACT_FIRST_ATTEMPT_FULL_NATIVE_READY_PR_ARTIFACT',
+  'No fresh bundle, skipping publication'), workflows),
+  'NATIVE_PUBLISHER_MUST_NOT_FAKE_GREEN_MISSING_RELEASE');
 assert.throws(() => validate(source.replace('RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED', 'BYPASS'), workflows));
 assert.throws(() => validate(source.replace('name: okx-research-component-${{ github.event.pull_request.head.sha }}',
   'name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}'), workflows));
@@ -453,9 +540,10 @@ assert.throws(() => validate(source.replace('test "sha256:$digest" = \'${{ steps
   'true'), workflows));
 assert.throws(() => validate(source.replace('RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED',
   'gh release delete "$old" --cleanup-tag --yes'), workflows));
-assert.throws(() => validate(source.replace('.workflow_run.head_repository_id == 1388071566 and',
-  'true and'), workflows));
-assert.throws(() => validate(source.replace('.head_repository.id == 1388071566) |', 'true) |'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  '.workflow_run.head_repository_id == 1388071566 and', 'true and'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  '.head_repository.id == 1388071566) |', 'true) |'), workflows));
 assert.throws(() => validate(source.replace('.commits[-1].sha == $head', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_OWNER_ONLY"', 'true'), workflows));
 assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-manifest.cjs --verify-report', 'echo skipped'), workflows));

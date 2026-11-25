@@ -278,7 +278,7 @@ jobs:
             if [[ -n "$head_sha" ]]; then
               candidates="$(gh api --paginate --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
                 -f head_sha="$head_sha" -f event=pull_request -f status=completed -f per_page=100 \
-                --jq '.workflow_runs[] | select((.path | test("^\\.github/workflows/ci\\.yml@[A-Za-z0-9_./-]+$")) and .conclusion == "success" and .run_attempt == 1) | [.id, .run_attempt] | @tsv')"
+                --jq '.workflow_runs[] | select((.path | test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")) and .conclusion == "success" and .run_attempt == 1) | [.id, .run_attempt] | @tsv')"
               while read -r run attempt; do
                 [[ -n "$run" ]] || continue
                 jobs="$(gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/actions/runs/$run/attempts/$attempt/jobs?per_page=100")"
@@ -1675,15 +1675,16 @@ jobs:
           compression-level: 1
           retention-days: 14
 
-  # Prime immutable compiler caches only after exact accepted main evidence.
+  # Optional manual cache seed only. An accepted PR merge on main reuses its
+  # Ready evidence and must not compile/link Engine again merely to warm cache.
   trusted_main_cache_prime:
     name: trusted-main-windows-cache-prime (${{ matrix.profile }})
     needs: component_impact
     if: >-
       ${{
         github.ref == 'refs/heads/main' &&
-        ((github.event_name == 'push' && needs.component_impact.outputs.component_scope == 'full') ||
-         (github.event_name == 'workflow_dispatch' && inputs.prime_windows_cargo_cache == true)) &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.prime_windows_cargo_cache == true &&
         needs.component_impact.outputs.build_required == 'false' &&
         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree'
       }}
@@ -1773,6 +1774,8 @@ jobs:
         github.event_name == 'push' &&
         github.ref == 'refs/heads/main' &&
         needs.component_impact.outputs.component_scope == 'full' &&
+        needs.component_impact.outputs.build_required == 'false' &&
+        needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree' &&
         needs['dependency-audit'].result == 'success' &&
         needs.component_impact.result == 'success' &&
         needs.required_linux.result == 'success' &&
@@ -1804,41 +1807,67 @@ jobs:
             exit 0
           fi
           prs="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$ACCEPTED_MAIN/pulls")"
-          head="$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | first | .head.sha // empty' <<<"$prs")"
+          test "$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | length' <<<"$prs")" = 1
+          head="$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | .[0].head.sha' <<<"$prs")"
           [[ "$head" =~ ^[0-9a-f]{40}$ ]] || exit 0
           main_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$ACCEPTED_MAIN" --jq .tree.sha)"
           head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head" --jq .tree.sha)"
           test "$main_tree" = "$head_tree"
           runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" -f head_sha="$head" -f event=pull_request -f status=completed -f per_page=100)"
-          run_id=""
-          artifact_id=""
-          artifact_digest=""
-          while read -r candidate; do
-            [[ -n "$candidate" ]] || continue
-            jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
+          run_id=''; run_attempt=''; artifact_id=''; artifact_digest=''
+          while IFS=$'\t' read -r candidate attempt; do
+            [[ "$candidate" =~ ^[1-9][0-9]*$ && "$attempt" == 1 ]] || continue
+            jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/attempts/$attempt/jobs?per_page=100")"
             # Require the *fresh* 4-EXE financial gate, never an aggregate
             # that reused older proof or the isolated Research-only worker.
-            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-engine-regressions-windows (engine)","trading-engine-regressions-windows (host)","trading-engine-regressions-windows (execution)","trading-engine-regressions-windows (research)","trading-engine-regressions-windows (clippy)","trading-engine-build-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+            if ! jq -e --arg head "$head" --argjson run "$candidate" '
+              .total_count == (.jobs | length) and .total_count < 100 and
+              ([.jobs[].name] | unique | length) == .total_count and
+              all(.jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1) and
+              ([.jobs[] | select(.conclusion == "success") | .name] as $ok |
+                all(["classify", "dependency-audit", "architecture-contracts",
+                     "cloudflare-mcp-contracts", "rust-tests-linux",
+                     "trading-engine-acceptance-windows", "trading-engine-regressions-windows (engine)",
+                     "trading-engine-regressions-windows (host)", "trading-engine-regressions-windows (execution)",
+                     "trading-engine-regressions-windows (research)", "trading-engine-regressions-windows (clippy)",
+                     "trading-engine-build-windows", "linux-core", "windows-native"][];
+                    . as $name | $ok | index($name) != null))
+            ' <<<"$jobs" >/dev/null; then
               continue
             fi
             artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"
-            candidate_artifact="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$artifacts")"
-            candidate_digest="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].digest else empty end' <<<"$artifacts")"
+            exact="$(jq -c --arg name "okx-windows-bundle-$head" --arg head "$head" --argjson run "$candidate" '
+              [.artifacts[] | select(.name == $name and .expired == false and
+                .workflow_run.id == $run and .workflow_run.repository_id == 1388071566 and
+                .workflow_run.head_repository_id == 1388071566 and
+                .workflow_run.head_sha == $head)] |
+              if length == 1 then .[0] else empty end' <<<"$artifacts")"
+            [[ -n "$exact" ]] || continue
+            candidate_artifact="$(jq -r .id <<<"$exact")"
+            candidate_digest="$(jq -r .digest <<<"$exact")"
             if [[ "$candidate_artifact" =~ ^[1-9][0-9]*$ && "$candidate_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               run_id="$candidate"
+              run_attempt="$attempt"
               artifact_id="$candidate_artifact"
               artifact_digest="$candidate_digest"
               break
             fi
-          done < <(jq -r '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success" and .event == "pull_request")] | .[].id' <<<"$runs")
+          done < <(jq -r --arg head "$head" '
+            .workflow_runs[] | select(.name == "CI" and
+              (.path | test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")) and
+              .event == "pull_request" and .conclusion == "success" and .status == "completed" and
+              .head_sha == $head and .run_attempt == 1 and
+              .repository.id == 1388071566 and .head_repository.id == 1388071566) |
+            [.id, .run_attempt] | @tsv' <<<"$runs")
           if [[ -z "$run_id" ]]; then
-            echo "No fresh accepted full Windows bundle: non-Native merge, no new release."
-            exit 0
+            echo 'NO_EXACT_FIRST_ATTEMPT_FULL_NATIVE_READY_PR_ARTIFACT' >&2
+            exit 1
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
           echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "tree=$head_tree" >> "$GITHUB_OUTPUT"
           echo "run=$run_id" >> "$GITHUB_OUTPUT"
+          echo "attempt=$run_attempt" >> "$GITHUB_OUTPUT"
           echo "artifact=$artifact_id" >> "$GITHUB_OUTPUT"
           echo "digest=$artifact_digest" >> "$GITHUB_OUTPUT"
 
@@ -2006,7 +2035,7 @@ jobs:
             fi
           done < <(jq -r --arg head "$head" '
             .workflow_runs[] | select(.name == "CI" and
-              (.path | test("^\\.github/workflows/ci\\.yml@[A-Za-z0-9_./-]+$")) and
+              (.path | test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")) and
               .event == "pull_request" and .conclusion == "success" and .status == "completed" and
               .head_sha == $head and .run_attempt == 1 and
               .repository.id == 1388071566 and
