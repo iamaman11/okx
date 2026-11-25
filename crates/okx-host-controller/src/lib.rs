@@ -10,6 +10,7 @@ pub mod job;
 pub mod legacy_bootstrap;
 pub mod lifecycle_executor;
 pub mod provenance;
+pub mod research_sandbox;
 pub mod research_supervisor;
 pub mod root_migration;
 pub mod runtime;
@@ -114,6 +115,9 @@ pub enum HostControlError {
 
     #[error("Research image pointer global Windows lock is unavailable or abandoned")]
     ResearchPointerLockUnavailable,
+
+    #[error("Research AppContainer isolation was not proven at stage: {0}")]
+    ResearchSandboxDenied(&'static str),
 
     #[error("the verified Engine image must expose the independent Engine runtime contract")]
     IndependentEngineRequired,
@@ -222,6 +226,7 @@ impl HostControlError {
             Self::ResearchActivationRolledBack => "RESEARCH_ACTIVATION_ROLLED_BACK",
             Self::ResearchRollbackUnconfirmed => "RESEARCH_ROLLBACK_UNCONFIRMED",
             Self::ResearchPointerLockUnavailable => "RESEARCH_POINTER_LOCK_UNAVAILABLE",
+            Self::ResearchSandboxDenied(_) => "RESEARCH_SANDBOX_DENIED",
             Self::IndependentEngineRequired => "INDEPENDENT_ENGINE_REQUIRED",
             Self::ResearchCatalogScopeRequired => "RESEARCH_CATALOG_SCOPE_REQUIRED",
             Self::ResearchCatalogMissing => "RESEARCH_CATALOG_MISSING",

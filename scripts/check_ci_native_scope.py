@@ -316,7 +316,7 @@ def _self_test() -> None:
             "mock_store_never_exposes_research_bearer_to_engine_target",
         ),
         "crates/okx-research-service/src/edge_runtime.rs": (
-            "research_starts_only_after_finite_supervisor_job_receipt",
+            "research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof",
             "installed_research_bearer_is_pinned_to_control_edge_origin",
         ),
     }
@@ -365,7 +365,7 @@ def _self_test() -> None:
         "research_token_validation_is_bounded_and_ascii_only",
         "research_native_target_is_distinct_from_engine",
         "mock_store_never_exposes_research_bearer_to_engine_target",
-        "research_starts_only_after_finite_supervisor_job_receipt",
+        "research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof",
         "installed_research_bearer_is_pinned_to_control_edge_origin",
     ):
         assert witness in research, f"RESEARCH_WINDOWS_SECRET_WITNESS_REQUIRED:{witness}"

@@ -81,18 +81,31 @@ impl AgentJob {
 
     pub fn assign(&self, child: &mut Child) -> HostControlResult<()> {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-
-        let ok = unsafe { AssignProcessToJobObject(self.handle, child.as_raw_handle() as _) };
-        if ok == 0 {
+        if let Err(error) = self.assign_raw_process(child.as_raw_handle() as _) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(HostControlError::JobAssignment(
-                std::io::Error::last_os_error().to_string(),
-            ));
+            return Err(error);
         }
 
         Ok(())
+    }
+
+    /// Assign a natively created, still-SUSPENDED Research process before its
+    /// primary thread is ever allowed to execute. The caller retains the
+    /// process handle and must terminate it if this operation fails.
+    pub fn assign_raw_process(
+        &self,
+        process: windows_sys::Win32::Foundation::HANDLE,
+    ) -> HostControlResult<()> {
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let ok = unsafe { AssignProcessToJobObject(self.handle, process) };
+        if ok == 0 {
+            Err(HostControlError::JobAssignment(
+                std::io::Error::last_os_error().to_string(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 

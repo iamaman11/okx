@@ -9,6 +9,46 @@ fn codec() -> LengthDelimitedCodec {
         .max_frame_length(MAX_FRAME_BYTES)
         .new_codec()
 }
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn edge_runtime_process_rejects_missing_and_malformed_supervisor_bearers_without_catalog() {
+    use tokio::io::AsyncWriteExt as _;
+
+    for (frame, expected_exit) in [
+        ("", 75),
+        ("RESEARCH_HOST_JOB_ASSIGNED\n", 76),
+        (
+            r#"{"schema":"okx.research.startup/v1","job_assigned":false,"bearer":"12345678901234567890123456789012"}"#,
+            76,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_okx-research-service"))
+            .arg("--edge-runtime")
+            .arg("--root")
+            .arg(root.path())
+            .arg("--scope")
+            .arg("research-startup-negative")
+            .env_remove("OKX_RESEARCH_BEARER_TOKEN")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(frame.as_bytes()).await.unwrap();
+        drop(stdin);
+        let exit = tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(exit.code(), Some(expected_exit));
+        assert!(!root.path().join("research-catalog.sqlite").exists());
+    }
+}
+
 async fn send(w: &mut FramedWrite<ChildStdin, LengthDelimitedCodec>, f: HostFrame) {
     w.send(bytes::Bytes::from(serde_json::to_vec(&f).unwrap()))
         .await
@@ -72,27 +112,20 @@ async fn legacy_and_standalone_workers_cannot_claim_separate_cpu_quotas() {
     let (mut legacy, legacy_input, legacy_output) =
         start(legacy_root.path(), &session, &legacy_scope).await;
 
-    // The standalone start gate is a test-only receipt. The second process
-    // must fail on the kernel singleton before reading credentials, starting
-    // an Edge connection or creating a second resource Job.
+    // The second process must fail on the kernel singleton before probing
+    // sandbox canaries, reading bearer stdin or creating another CPU Job.
     let mut standalone = Command::new(env!("CARGO_BIN_EXE_okx-research-service"))
         .arg("--edge-runtime")
         .arg("--root")
         .arg(standalone_root.path())
         .arg("--scope")
         .arg(standalone_scope.as_str())
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut input = standalone.stdin.take().unwrap();
-    input
-        .write_all(b"RESEARCH_HOST_JOB_ASSIGNED\n")
-        .await
-        .unwrap();
-    drop(input);
     let status = tokio::time::timeout(Duration::from_secs(10), standalone.wait())
         .await
         .unwrap()

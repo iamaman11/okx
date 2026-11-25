@@ -37,11 +37,17 @@ fn exit_code(error: &str) -> i32 {
         "RESEARCH_WORKER_ALREADY_ACTIVE" => 74,
         "RESEARCH_EDGE_CREDENTIAL_NOT_FOUND"
         | "RESEARCH_EDGE_CREDENTIAL_READ_FAILED"
-        | "RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE" => 75,
+        | "RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE"
+        | "RESEARCH_STARTUP_BEARER_UNAVAILABLE" => 75,
         "RESEARCH_EDGE_ORIGIN_UNTRUSTED"
         | "INVALID_RESEARCH_EDGE_WSS_URL"
         | "INVALID_RESEARCH_BEARER"
-        | "RESEARCH_EDGE_TOKEN_INVALID" => 76,
+        | "RESEARCH_EDGE_TOKEN_INVALID"
+        | "RESEARCH_STARTUP_ENVELOPE_INVALID"
+        | "RESEARCH_STARTUP_BEARER_INVALID"
+        | "RESEARCH_SANDBOX_ATTESTATION_INVALID"
+        | "RESEARCH_SANDBOX_CREDMAN_EXPOSED"
+        | "RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED" => 76,
         _ => 1,
     }
 }
@@ -101,10 +107,6 @@ async fn run() -> Result<(), String> {
         if independent_source || market_request || root.is_none() || scope.is_none() {
             return Err("INVALID_ARGUMENT".into());
         }
-        // CONTROL has not yet assigned its own Windows Job at process spawn.
-        // Wait for its post-assignment receipt before creating our nested,
-        // more restrictive memory Job. No secrets travel on this pipe.
-        okx_research_service::edge_runtime::await_supervisor_job().await?;
     }
     // Scoped to this Research process. Do not run the Worker without its OS
     // memory and CPU fences on Windows; Finance/Engine retain their own owners.
@@ -117,10 +119,29 @@ async fn run() -> Result<(), String> {
         isolation = "nested_windows_job_object",
         "research worker OS memory and CPU fences verified"
     );
+    let startup_token = if edge_runtime {
+        // CONTROL resumes us only after sandbox verification and host Job
+        // assignment. Before CONTROL sends any bearer, the CHILD checks that
+        // its own sandbox cannot read disposable CredMan/file canaries.
+        // Only a nonce and denial booleans are emitted on inherited stdout.
+        #[cfg(windows)]
+        okx_research_service::edge_credentials::attest_startup_sandbox()?;
+        // CONTROL may send one bounded JSON bearer only after it has verified
+        // the readiness attestation. EOF is required before proceeding.
+        Some(okx_research_service::edge_runtime::await_supervisor_startup().await?)
+    } else {
+        None
+    };
     let root = root.ok_or("MISSING_ROOT")?;
     let scope = scope.ok_or("MISSING_SCOPE")?;
     if edge_runtime {
-        return okx_research_service::edge_runtime::run(root, scope, existing_catalog).await;
+        return okx_research_service::edge_runtime::run(
+            root,
+            scope,
+            existing_catalog,
+            startup_token.ok_or("RESEARCH_STARTUP_BEARER_UNAVAILABLE")?,
+        )
+        .await;
     }
     if market_request {
         if independent_source {
@@ -231,10 +252,16 @@ mod tests {
             ("RESEARCH_EDGE_CREDENTIAL_NOT_FOUND", 75),
             ("RESEARCH_EDGE_CREDENTIAL_READ_FAILED", 75),
             ("RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE", 75),
+            ("RESEARCH_STARTUP_BEARER_UNAVAILABLE", 75),
             ("RESEARCH_EDGE_ORIGIN_UNTRUSTED", 76),
             ("INVALID_RESEARCH_EDGE_WSS_URL", 76),
             ("INVALID_RESEARCH_BEARER", 76),
             ("RESEARCH_EDGE_TOKEN_INVALID", 76),
+            ("RESEARCH_STARTUP_ENVELOPE_INVALID", 76),
+            ("RESEARCH_STARTUP_BEARER_INVALID", 76),
+            ("RESEARCH_SANDBOX_ATTESTATION_INVALID", 76),
+            ("RESEARCH_SANDBOX_CREDMAN_EXPOSED", 76),
+            ("RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED", 76),
         ] {
             assert_eq!(exit_code(reason), expected, "{reason}");
         }

@@ -228,7 +228,7 @@ function validate(yaml, fileNames) {
     'research_token_validation_is_bounded_and_ascii_only',
     'research_native_target_is_distinct_from_engine',
     'mock_store_never_exposes_research_bearer_to_engine_target',
-    'research_starts_only_after_finite_supervisor_job_receipt',
+    'research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof',
     'installed_research_bearer_is_pinned_to_control_edge_origin',
   ]) assert.match(regression, new RegExp(witness));
   assert.match(regression, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
@@ -427,10 +427,14 @@ function validate(yaml, fileNames) {
 }
 
 validate(source, workflows);
-assert.equal((ipcProcess.match(/^#\[tokio::test\]$/gm) || []).length, 10,
-  'WINDOWS_RESEARCH_IPC_SOURCE_MUST_DECLARE_EXACT_TEN_TESTS');
-assert.equal((ipcProcess.match(/^#\[cfg\(windows\)\]\n#\[tokio::test\]$/gm) || []).length, 1,
-  'LINUX_HAS_NINE_RESEARCH_IPC_TESTS_AND_WINDOWS_HAS_TEN');
+const ipcDeclaredTests = (ipcProcess.match(/^#\[tokio::test\]$/gm) || []).length;
+const ipcWindowsOnly = (ipcProcess.match(/^#\[cfg\(windows\)\]\n#\[tokio::test\]$/gm) || []).length;
+const ipcNonWindowsOnly = (ipcProcess.match(/^#\[cfg\(not\(windows\)\)\]\n#\[tokio::test\]$/gm) || []).length;
+assert.equal(ipcDeclaredTests, 11, 'RESEARCH_IPC_SOURCE_MUST_DECLARE_EXACT_ELEVEN_TESTS');
+assert.equal(ipcNonWindowsOnly, 1, 'RESEARCH_IPC_MUST_ISOLATE_EXACT_ONE_NON_WINDOWS_TEST');
+assert.equal(ipcDeclaredTests - ipcNonWindowsOnly, 10,
+  'WINDOWS_RESEARCH_IPC_MUST_RUN_EXACT_TEN_TESTS');
+assert.equal(ipcWindowsOnly, 1, 'RESEARCH_IPC_MUST_ISOLATE_EXACT_ONE_WINDOWS_TEST');
 assert.doesNotMatch(ipcProcess, /^#\[ignore\]$/m, 'RESEARCH_IPC_CANNOT_CLAIM_IGNORED_TESTS');
 // Exercise the actual path expression extracted independently from each job.
 // In particular, the live 2026-11-25 Actions REST `/actions/runs` response
