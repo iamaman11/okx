@@ -51,6 +51,18 @@ assert.equal(verify(before, head, files('crates/okx-research-service/Cargo.toml'
 assert.equal(verify(before, head, host, 'host-controller').target, 'x86_64-pc-windows-msvc');
 assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock',
   'cloudflare/okx-mcp/src/mcp.ts'), 'host-controller').protected_closures_identical, true);
+assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml',
+  'crates/okx-host-controller/src/research_supervisor.rs',
+  'crates/okx-host-protocol/src/lib.rs'), 'host-controller').protected_closures_identical, true);
+assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml',
+  'crates/okx-host-controller/tests/research_process.rs',
+  'crates/okx-host-protocol/tests/research_wire.rs'), 'host-controller').protected_closures_identical, true);
+for (const unsafeHostDiff of [
+  files('crates/okx-host-controller/Cargo.toml', 'crates/okx-ipc-contracts/src/lib.rs'),
+  files('crates/okx-host-controller/Cargo.toml', 'crates/okx-research-service/src/edge_runtime.rs'),
+  files('crates/okx-host-controller/Cargo.toml', 'crates/okx-host-controller/src/research_supervisor.json'),
+]) assert.throws(() => verify(before, head, unsafeHostDiff, 'host-controller'),
+  /MIXED_OR_UNSAFE_CARGO_DIFF/);
 assert.equal(verify(before, head, files('crates/okx-host-launcher/Cargo.toml'),
   'host-launcher').protected_closures_identical, true);
 

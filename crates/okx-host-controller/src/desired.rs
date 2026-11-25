@@ -39,6 +39,11 @@ impl DesiredStateStore {
             path: PathBuf::from(okx_host_launcher::CONTROL_ROOT).join("engine-state.pb"),
         }
     }
+    #[cfg(all(test, windows))]
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
     pub fn load(&self) -> HostControlResult<AgentDesiredState> {
         let bytes = match fs::read(&self.path) {
             Ok(v) => v,

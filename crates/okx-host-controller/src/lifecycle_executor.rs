@@ -26,6 +26,7 @@ use crate::{
     desired::{AgentDesired, AgentDesiredState, DesiredStateStore},
     job::AgentJob,
     provenance::InstalledAgentProvenanceStore,
+    research_supervisor::ResearchSupervisor,
 };
 
 const CANONICAL_ROOT: &str = okx_host_launcher::WORKSPACE_ROOT;
@@ -141,6 +142,7 @@ pub struct HostExecutor {
     agent_started_at: Option<Instant>,
     agent_launch: Option<AgentLaunchEvidence>,
     agent_job: AgentJob,
+    research: ResearchSupervisor,
     desired_store: DesiredStateStore,
     desired_agent: AgentDesired,
     desired_error: Option<String>,
@@ -151,7 +153,16 @@ pub struct HostExecutor {
 
 impl HostExecutor {
     pub fn canonical() -> HostControlResult<Self> {
-        let desired_store = DesiredStateStore::canonical();
+        Self::with_lifecycle(
+            DesiredStateStore::canonical(),
+            ResearchSupervisor::canonical()?,
+        )
+    }
+
+    fn with_lifecycle(
+        desired_store: DesiredStateStore,
+        research: ResearchSupervisor,
+    ) -> HostControlResult<Self> {
         let (desired_state, desired_error) = match desired_store.load() {
             Ok(desired) => (desired, None),
             Err(error) => (AgentDesiredState::stopped(), Some(error.to_string())),
@@ -164,6 +175,7 @@ impl HostExecutor {
             agent_started_at: None,
             agent_launch: None,
             agent_job: AgentJob::new()?,
+            research,
             desired_store,
             desired_agent: desired_state.agent,
             desired_error,
@@ -177,6 +189,22 @@ impl HostExecutor {
         self.lifecycle_gate(&operation)?;
         match operation {
             HostControlOperation::Status => self.status(),
+            HostControlOperation::StatusResearch {} => self.research.status(),
+            HostControlOperation::StartResearch {
+                expected_installed_worker_sha256,
+            } => {
+                self.require_engine_stopped_for_research()?;
+                self.research.start(&expected_installed_worker_sha256)
+            }
+            HostControlOperation::StopResearch {
+                expected_active_worker_sha256,
+                expected_process_generation,
+            } => self
+                .research
+                .stop(&expected_active_worker_sha256, expected_process_generation),
+            HostControlOperation::ProvisionResearchRuntimeToken {} => {
+                self.provision_research_runtime_token()
+            }
             HostControlOperation::AccountCatalog => AccountCatalogStore::canonical().status(),
             HostControlOperation::Sync => self.sync(),
             HostControlOperation::BuildAgent => Err(HostControlError::InvalidExecutionPath),
@@ -252,6 +280,10 @@ impl HostExecutor {
         if matches!(
             operation,
             HostControlOperation::Status
+                | HostControlOperation::StatusResearch {}
+                | HostControlOperation::StartResearch { .. }
+                | HostControlOperation::StopResearch { .. }
+                | HostControlOperation::ProvisionResearchRuntimeToken {}
                 | HostControlOperation::AccountCatalog
                 | HostControlOperation::TransportStatus
                 | HostControlOperation::ControllerUpdateStatus
@@ -266,10 +298,23 @@ impl HostExecutor {
     }
 
     pub fn shutdown(&mut self) {
+        let _ = self.research.shutdown();
         let _ = self.terminate_agent_owned();
     }
 
     pub fn reconcile_desired(&mut self) -> HostControlResult<Value> {
+        let engine_result = self.reconcile_engine_desired();
+        // Until Engine's legacy child is removed, only one Research process
+        // may be owned by CONTROL. A stopped Research can still finish cleanup.
+        if !self.research.desired_running() || self.require_engine_stopped_for_research().is_ok() {
+            let _ = self.research.reconcile();
+        } else {
+            self.research.mark_transition_blocked();
+        }
+        engine_result
+    }
+
+    fn reconcile_engine_desired(&mut self) -> HostControlResult<Value> {
         let running = self.agent_is_running()?;
 
         if let Some(error) = self.desired_error.clone() {
@@ -591,7 +636,109 @@ impl HostExecutor {
         }))
     }
 
+    /// Research has a distinct CredMan target and never sees the Engine bearer.
+    /// The only input to the verified executable is a fresh secret over stdin;
+    /// the returned SHA is public setup evidence, not the bearer itself.
+    fn provision_research_runtime_token(&mut self) -> HostControlResult<Value> {
+        #[cfg(not(windows))]
+        {
+            Err(HostControlError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+            self.research.ensure_stopped_for_provision()?;
+            let binary = self.research.verified_installed_image()?;
+            let mut random = [0u8; 32];
+            getrandom::fill(&mut random)
+                .map_err(|error| HostControlError::Random(error.to_string()))?;
+            let mut bearer = String::with_capacity(64);
+            for byte in random {
+                use std::fmt::Write as _;
+                write!(&mut bearer, "{byte:02x}")
+                    .map_err(|error| HostControlError::Random(error.to_string()))?;
+            }
+            random.zeroize();
+            let token_sha256 = format!("{:x}", Sha256::digest(bearer.as_bytes()));
+
+            let mut command = hidden_command(&binary);
+            command
+                .env_clear()
+                .arg("--set-edge-token")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            for key in [
+                "SystemRoot",
+                "WINDIR",
+                "USERPROFILE",
+                "APPDATA",
+                "LOCALAPPDATA",
+                "ProgramData",
+                "TEMP",
+                "TMP",
+                "PATH",
+                "HOMEDRIVE",
+                "HOMEPATH",
+            ] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+            let result = (|| -> HostControlResult<()> {
+                let job = AgentJob::new()?;
+                let mut child = command.spawn()?;
+                job.assign(&mut child)?;
+                let send = (|| -> std::io::Result<()> {
+                    let mut input = child.stdin.take().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "research provisioner stdin missing",
+                        )
+                    })?;
+                    input.write_all(bearer.as_bytes())?;
+                    input.write_all(b"\n")?;
+                    input.flush()?;
+                    drop(input);
+                    Ok(())
+                })();
+                if let Err(error) = send {
+                    let _ = job.terminate();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error.into());
+                }
+                let wait = unsafe { WaitForSingleObject(child.as_raw_handle() as _, 15_000) };
+                if wait != WAIT_OBJECT_0 {
+                    let _ = job.terminate();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if wait == WAIT_TIMEOUT {
+                        return Err(HostControlError::NativeStorageOutcomeUnknown);
+                    }
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                if !child.wait()?.success() {
+                    return Err(HostControlError::NativeStorageOutcomeUnknown);
+                }
+                Ok(())
+            })();
+            bearer.zeroize();
+            result?;
+            Ok(json!({
+                "stored": true,
+                "destination": "Windows Credential Manager (Research-only target)",
+                "runtime_id": AGENT_CLOUDFLARE_RUNTIME_ID,
+                "runtime_token_sha256": token_sha256
+            }))
+        }
+    }
+
     fn start_agent(&mut self) -> HostControlResult<Value> {
+        self.research.require_stopped_for_legacy_engine()?;
         if self.agent_is_running()? {
             self.persist_desired(AgentDesiredState::running())?;
             return Ok(json!({"disposition":"ALREADY_RUNNING"}));
@@ -620,6 +767,7 @@ impl HostExecutor {
     }
 
     fn restart_agent(&mut self) -> HostControlResult<Value> {
+        self.research.require_stopped_for_legacy_engine()?;
         self.persist_desired(AgentDesiredState::running())?;
         self.terminate_agent_owned()?;
         let pid = self.start_agent_process()?;
@@ -674,6 +822,19 @@ impl HostExecutor {
         }
         Ok(reply)
     }
+    fn require_engine_stopped_for_research(&mut self) -> HostControlResult<()> {
+        let desired = self.desired_store.load()?;
+        if desired.agent != AgentDesired::Stopped || self.desired_error.is_some() {
+            return Err(HostControlError::ResearchTransitionRequiresExclusiveProcess);
+        }
+        self.require_storage_stopped().map_err(|error| match error {
+            HostControlError::AgentRunning => {
+                HostControlError::ResearchTransitionRequiresExclusiveProcess
+            }
+            other => other,
+        })
+    }
+
     fn require_storage_stopped(&mut self) -> HostControlResult<()> {
         self.require_agent_stopped()?;
         if self.desired_agent != AgentDesired::Stopped
@@ -828,6 +989,9 @@ impl HostExecutor {
         }
 
         let should_restore = self.desired_agent == AgentDesired::Running;
+        if should_restore {
+            self.research.require_stopped_for_legacy_engine()?;
+        }
         let running = self.agent_is_running()?;
         if running {
             self.terminate_agent_owned()?;
@@ -878,6 +1042,7 @@ impl HostExecutor {
     }
 
     fn start_agent_process(&mut self) -> HostControlResult<u32> {
+        self.research.require_stopped_for_legacy_engine()?;
         self.start_agent_process_inner()
     }
 
@@ -1816,6 +1981,77 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn control_rejects_overlapping_legacy_engine_and_standalone_research() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "okx-cutover-fixture-{}-{nonce}",
+            std::process::id()
+        ));
+        let control = root.join("control");
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&control).unwrap();
+        let engine = DesiredStateStore::at(control.join("engine-state.pb"));
+        let open = || {
+            HostExecutor::with_lifecycle(
+                engine.clone(),
+                ResearchSupervisor::at(control.clone(), runtime.clone()).unwrap(),
+            )
+            .unwrap()
+        };
+        let research_state_path = control.join("research-state.json");
+        let sha = "a".repeat(64);
+        engine.save(AgentDesiredState::running()).unwrap();
+        let mut owner = open();
+        assert!(matches!(
+            owner.execute(HostControlOperation::StartResearch {
+                expected_installed_worker_sha256: sha.clone()
+            }),
+            Err(HostControlError::ResearchTransitionRequiresExclusiveProcess)
+        ));
+        assert!(!research_state_path.exists());
+        drop(owner);
+
+        fs::write(
+            &research_state_path,
+            serde_json::to_vec(&json!({
+                "schema":"okx.host-control.research-desired/v1",
+                "desired_running":true,"expected_worker_sha256":sha,"host_scope":"b".repeat(64),
+                "process_generation":0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut conflict = open();
+        assert!(matches!(
+            conflict.reconcile_desired(),
+            Err(HostControlError::ResearchTransitionRequiresExclusiveProcess)
+        ));
+        assert!(conflict.agent_child.is_none());
+        assert!(conflict.research.status().unwrap()["pid"].is_null());
+        drop(conflict);
+
+        engine.save(AgentDesiredState::stopped()).unwrap();
+        let mut owner = open();
+        for command in [
+            HostControlOperation::StartAgent,
+            HostControlOperation::RestartAgent,
+        ] {
+            assert!(matches!(
+                owner.execute(command),
+                Err(HostControlError::ResearchTransitionRequiresExclusiveProcess)
+            ));
+            assert_eq!(engine.load().unwrap(), AgentDesiredState::stopped());
+        }
+        assert!(owner.agent_child.is_none());
+        drop(owner);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn native_bootstrap_install_is_idempotent_and_never_overwrites_a_conflict() {

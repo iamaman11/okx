@@ -1,5 +1,6 @@
 //! Research owns jobs and artifacts; financial execution belongs to the host.
 pub mod analytics;
+pub mod edge_credentials;
 pub mod edge_runtime;
 pub mod independent_source;
 pub(crate) mod invocation;

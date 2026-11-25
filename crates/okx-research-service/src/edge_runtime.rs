@@ -31,6 +31,31 @@ use zeroize::Zeroizing;
 
 const MAX_RESEARCH_IN_FLIGHT: usize = 6;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(80);
+const SUPERVISOR_GATE: &[u8] = b"RESEARCH_HOST_JOB_ASSIGNED\n";
+
+/// CONTROL assigns its Windows Job BEFORE releasing the Research child. This
+/// prevents the child's narrower memory Job from racing with the host's Job
+/// assignment. No bearer is accepted through this channel.
+pub async fn await_supervisor_job() -> Result<(), String> {
+    let mut input = tokio::io::stdin();
+    supervisor_gate(&mut input, Duration::from_secs(10)).await
+}
+
+async fn supervisor_gate<R: tokio::io::AsyncRead + Unpin>(
+    input: &mut R,
+    deadline: Duration,
+) -> Result<(), String> {
+    use tokio::io::AsyncReadExt as _;
+    let mut receipt = Zeroizing::new(Vec::new());
+    tokio::time::timeout(deadline, input.take(129).read_to_end(&mut receipt))
+        .await
+        .map_err(|_| "RESEARCH_SUPERVISOR_ASSIGNMENT_TIMEOUT")?
+        .map_err(|_| "RESEARCH_SUPERVISOR_ASSIGNMENT_INVALID")?;
+    if receipt.as_slice() != SUPERVISOR_GATE {
+        return Err("RESEARCH_SUPERVISOR_ASSIGNMENT_INVALID".into());
+    }
+    Ok(())
+}
 
 /// Inputs are supplied by the native process supervisor, never via CLI args,
 /// argv, request payloads or public log messages.
@@ -47,6 +72,11 @@ impl EdgeRuntimeConfig {
         fn required(name: &str) -> Result<String, String> {
             std::env::var(name).map_err(|_| format!("{name}_UNAVAILABLE"))
         }
+        // Research's installed Windows credential is distinct from the Engine
+        // token and is not accepted through an inheritable process environment.
+        #[cfg(windows)]
+        let token = crate::edge_credentials::load()?;
+        #[cfg(not(windows))]
         let token = Zeroizing::new(required("OKX_RESEARCH_BEARER_TOKEN")?);
         Self::new(
             required("OKX_RESEARCH_EDGE_WSS_URL")?,
@@ -72,6 +102,14 @@ impl EdgeRuntimeConfig {
         {
             return Err("INVALID_RESEARCH_EDGE_WSS_URL".into());
         }
+        // A Windows bearer loaded from Credential Manager may not be sent to
+        // a caller-selected origin. CONTROL and Research share this immutable
+        // installed Edge endpoint; alternative deployments require a reviewed
+        // native release, never an environment-only URL substitution.
+        #[cfg(windows)]
+        if url != "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime" {
+            return Err("RESEARCH_EDGE_ORIGIN_UNTRUSTED".into());
+        }
         if runtime_id.is_empty()
             || runtime_id.len() > 64
             || !runtime_id
@@ -95,7 +133,7 @@ impl EdgeRuntimeConfig {
         {
             return Err("INVALID_RESEARCH_INCARNATION".into());
         }
-        if token.is_empty() || token.len() > 1024 || token.bytes().any(|b| !b.is_ascii_graphic()) {
+        if !crate::edge_credentials::valid_token(token.as_bytes()) {
             return Err("INVALID_RESEARCH_BEARER".into());
         }
         Ok(Self {
@@ -497,6 +535,45 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[cfg(windows)]
+    const TEST_WSS_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime";
+    #[cfg(not(windows))]
+    const TEST_WSS_URL: &str = "wss://edge.example/runtime";
+
+    #[tokio::test]
+    async fn research_starts_only_after_finite_supervisor_job_receipt() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        writer.write_all(SUPERVISOR_GATE).await.unwrap();
+        drop(writer);
+        assert!(
+            supervisor_gate(&mut reader, Duration::from_secs(1))
+                .await
+                .is_ok()
+        );
+
+        for invalid in [&b"READY\n"[..], &b"RESEARCH_HOST_JOB_ASSIGNED"[..]] {
+            let (mut writer, mut reader) = tokio::io::duplex(256);
+            writer.write_all(invalid).await.unwrap();
+            drop(writer);
+            assert_eq!(
+                supervisor_gate(&mut reader, Duration::from_secs(1))
+                    .await
+                    .unwrap_err(),
+                "RESEARCH_SUPERVISOR_ASSIGNMENT_INVALID"
+            );
+        }
+
+        let (writer, mut reader) = tokio::io::duplex(256);
+        assert_eq!(
+            supervisor_gate(&mut reader, Duration::from_millis(1))
+                .await
+                .unwrap_err(),
+            "RESEARCH_SUPERVISOR_ASSIGNMENT_TIMEOUT"
+        );
+        drop(writer);
+    }
+
     fn request(
         operation: serde_json::Value,
     ) -> okx_research_protocol::edge::ResearchRequestEnvelope {
@@ -510,11 +587,11 @@ mod tests {
     #[test]
     fn profile_has_distinct_research_hello_and_no_finance_identity() {
         let cfg = EdgeRuntimeConfig::new(
-            "wss://edge.example/runtime".into(),
+            TEST_WSS_URL.into(),
             "windows-primary".into(),
             "a".repeat(64),
             format!("ctl_{}", "b".repeat(32)),
-            Zeroizing::new("research-secret".into()),
+            Zeroizing::new("d".repeat(64)),
         )
         .unwrap();
         let producer = Producer::new("c".repeat(64), None, None).unwrap();
@@ -535,6 +612,23 @@ mod tests {
                 Zeroizing::new("secret".into())
             )
             .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_research_bearer_is_pinned_to_control_edge_origin() {
+        assert_eq!(
+            EdgeRuntimeConfig::new(
+                "wss://untrusted.example/runtime".into(),
+                "windows-primary".into(),
+                "a".repeat(64),
+                format!("ctl_{}", "b".repeat(32)),
+                Zeroizing::new("d".repeat(64)),
+            )
+            .err()
+            .as_deref(),
+            Some("RESEARCH_EDGE_ORIGIN_UNTRUSTED")
         );
     }
 
@@ -646,11 +740,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let producer = Producer::new("c".repeat(64), None, None).unwrap();
         let config = EdgeRuntimeConfig::new(
-            "wss://research.invalid/direct".into(),
+            TEST_WSS_URL.into(),
             "windows-research".into(),
             "a".repeat(64),
             format!("ctl_{}", "b".repeat(32)),
-            Zeroizing::new("test-bearer".into()),
+            Zeroizing::new("d".repeat(64)),
         )
         .unwrap();
         let scope = ResearchScope::new("test-research-scope".to_owned()).unwrap();

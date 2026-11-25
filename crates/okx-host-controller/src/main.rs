@@ -129,6 +129,7 @@ async fn run(cli: Cli) -> HostControlResult<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Once => {
+            let _single_instance = SingleInstanceGuard::acquire()?;
             let token = load_native_github_token()?;
             let github = GitHubClient::new(token, "iamaman11-okx-host-control/0.1")?;
             github.verify_repository_identity().await?;

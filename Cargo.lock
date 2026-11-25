@@ -1464,6 +1464,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "jiff",
+ "keyring-core",
  "okx-analysis",
  "okx-research",
  "okx-research-domain",
@@ -1481,6 +1482,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "windows-native-keyring-store",
  "windows-sys 0.61.2",
  "zeroize",
 ]
