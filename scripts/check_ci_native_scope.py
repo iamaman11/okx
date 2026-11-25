@@ -460,6 +460,41 @@ def _self_test() -> None:
     ):
         assert classify(selection) == "full"  # never grant scope before Cargo proof
         assert dependency_candidate(selection) == wanted
+    # A Research wire/domain source edit is *not* statically owner-only while
+    # Engine can still consume that crate through a dev/test dependency. The
+    # GitHub plan may request a Windows Cargo closure proof, but its initial
+    # scope must remain full until that independent proof succeeds.
+    for protected in (
+        "crates/okx-research-protocol/src/analytics.rs",
+        "crates/okx-research-domain/src/numeric.rs",
+    ):
+        modified = files(protected)
+        assert classify(modified) == "full"
+        scoped = github_plan(modified, allow_dependency_candidate=True)
+        assert scoped["scope"] == "full"
+        assert scoped["manifest_candidate"] == "research"
+        assert scoped["diff_verified"] == "true"
+        assert github_plan(modified, allow_dependency_candidate=False)["manifest_candidate"] == "none"
+        with_edge = files(protected, "cloudflare/okx-mcp/src/runtime_session.ts")
+        assert github_plan(with_edge, allow_dependency_candidate=True)["edge_changed"] == "true"
+        assert github_plan(with_edge, allow_dependency_candidate=True)["manifest_candidate"] == "research"
+        for status in ("added", "removed", "renamed"):
+            mutation = [[{"filename": protected, "status": status}]]
+            if status == "renamed":
+                mutation[0][0]["previous_filename"] = "crates/okx-trading-engine/src/research_client.rs"
+            assert classify(mutation) == "full"
+            assert dependency_candidate(mutation) == "none"
+        # A forged modified status with retained rename provenance is also
+        # unverified, as is an apparent add+remove crossing the owner boundary.
+        forged = [[{"filename": protected, "status": "modified",
+                    "previous_filename": "crates/okx-trading-engine/src/research_client.rs"}]]
+        assert classify(forged) == "full"
+        assert dependency_candidate(forged) == "none"
+        cross_owner = [[{"filename": protected, "status": "added"},
+                        {"filename": "crates/okx-trading-engine/src/research_client.rs",
+                         "status": "removed"}]]
+        assert classify(cross_owner) == "full"
+        assert dependency_candidate(cross_owner) == "none"
     for selection in (
         files("Cargo.lock"), files("Cargo.toml", "crates/okx-research-service/Cargo.toml"),
         files("crates/okx-ipc-contracts/Cargo.toml", "Cargo.lock"),

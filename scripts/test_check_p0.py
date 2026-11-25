@@ -66,14 +66,14 @@ class FeedbackTests(unittest.TestCase):
             "kind": "actual_research_ipc_public_candles_requests_to_synthetic_handler",
             "successful_requests": 120, "returned_candle_rows": 12000,
             "venue_http_reads": 0, "source_storage_page_reads": "not_measured",
-            "observation_scope": "request_and_rows_counted_in_native_source_handler",
+            "observation_scope": "request_and_rows_counted_in_research_owned_fixture_source_handler",
         }, "phase_wall_ms_excluding_build": 1453.0}
 
     @staticmethod
     def boundary_witness():
         return {"pre_source_boundaries": {
             "schema": "okx.518.t10-real-child-pre-source-boundaries/v1",
-            "route": "real_agent_to_separate_research_worker_ipc",
+            "route": "research_owned_fixture_to_worker_ipc",
             "admission_only_not_executed": ["one_million_bars_one_instrument_64",
                                             "eight_instruments_one_million_bars_64"],
             "rejected_before_source": {

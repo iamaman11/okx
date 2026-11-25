@@ -168,14 +168,15 @@ jobs:
           fi
           echo "comparison=$comparison" >> "$GITHUB_OUTPUT"
           python3 -B scripts/check_ci_native_scope.py --github-plan "${plan_args[@]}" < "$files"
-      # Only manifest changes and formerly shared Research protocol/domain
-      # sources incur the Windows resolver proof. Their Engine dev-only legacy
-      # consumers must keep the full matrix until those edges are removed.
+      # Manifest changes and Research protocol/domain sources incur the exact
+      # Windows resolver proof. An unchanged graph is not enough for source
+      # edits: the changed paths must also be absent from protected Engine,
+      # CONTROL, Launcher and MCP Bridge normal/build/dev (test) closures.
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'
         with:
           toolchain: 1.100.0
-      - name: Prove Windows Cargo closure before narrowing manifest changes
+      - name: Prove protected Windows Cargo closure before narrowing owner inputs
         id: cargo_closure
         if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'
         shell: bash
@@ -499,7 +500,7 @@ jobs:
         # Research has its own complete run below, including real IPC children.
         run: cargo test --locked --workspace --exclude okx-trading-engine --exclude okx-host-controller --exclude okx-research-service
 
-      - name: Research worker process and Agent dispatch contracts
+      - name: Research worker and standalone process contracts
         shell: bash
         run: |
           set -euo pipefail
@@ -510,14 +511,9 @@ jobs:
           cargo test --locked -p okx-research-service --test ipc_process -- --nocapture | tee "$RUNNER_TEMP/research-worker-ipc.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-worker-ipc.log"
           cargo test --locked -p okx-research-service --doc
-          # Keep the standalone Research process tests on the production
-          # singleton above. Engine's legacy T06–T10 child fixtures require a
-          # separate, opt-in debug worker, never a shipping binary.
-          cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
-          cp target/debug/okx-research-service target/debug/okx-research-service-test-isolated
-          export OKX_RESEARCH_SERVICE_TEST_EXE="$PWD/target/debug/okx-research-service-test-isolated"
-          cargo test --locked -p okx-trading-engine --lib research_dispatch_tests:: -- --test-threads 2 | tee "$RUNNER_TEMP/research-dispatch.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-dispatch.log"
+          # Former Engine T06–T10 IPC/causality witnesses now live in the
+          # Research-owned process suite above. Do not resurrect Engine's
+          # dev-only Research client as a Linux test compatibility shortcut.
 
       # Keep the complete portable test suite above. The old Linux-only,
       # ignored 1M-row AccountStore performance benchmark is opt-in, not a
@@ -874,11 +870,14 @@ jobs:
         shell: pwsh
         run: |
           # The process-level production singleton remains strict. Legacy
-          # Engine child tests get an opt-in debug binary with per-root mutex
-          # namespace injected by the #[cfg(test)] ResearchClient only.
+          # T10 tests get an opt-in debug worker plus a non-shipping Research-
+          # owned load fixture. The shipping release build enables neither.
           cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item -LiteralPath 'target/debug/okx-research-service.exe' -Destination 'target/debug/okx-research-service-test-isolated.exe'
+          cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath 'target/debug/okx-research-load-fixture.exe')) { throw 'RESEARCH_TEST_LOAD_FIXTURE_BINARY_MISSING' }
 
       - name: Isolated Native pending-fill crash recovery
         shell: pwsh
@@ -905,6 +904,7 @@ jobs:
         shell: pwsh
         run: |
           $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
+          $env:OKX_RESEARCH_LOAD_FIXTURE_EXE = (Resolve-Path 'target/debug/okx-research-load-fixture.exe').Path
           $output = & cargo test --locked -p okx-trading-engine --lib accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect -- --exact --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\b-process-tree.log" | Out-Host
@@ -938,6 +938,7 @@ jobs:
           OKX_CONTROL_AGENT_INCAR: ctl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         run: |
           $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
+          $env:OKX_RESEARCH_LOAD_FIXTURE_EXE = (Resolve-Path 'target/debug/okx-research-load-fixture.exe').Path
           $output = & cargo test --locked -p okx-trading-engine --lib accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research -- --exact --nocapture --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\mcp-native-load.log" | Out-Host
@@ -1009,6 +1010,9 @@ jobs:
           cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item -LiteralPath 'target/debug/okx-research-service.exe' -Destination 'target/debug/okx-research-service-test-isolated.exe'
+          cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath 'target/debug/okx-research-load-fixture.exe')) { throw 'RESEARCH_TEST_LOAD_FIXTURE_BINARY_MISSING' }
 
       - name: Remaining native regression tests for this suite
         if: matrix.suite == 'engine' || matrix.suite == 'host' || matrix.suite == 'execution'
@@ -1019,6 +1023,7 @@ jobs:
           $packages = switch ($env:NATIVE_REGRESSION_SUITE) {
             'engine' {
               $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
+              $env:OKX_RESEARCH_LOAD_FIXTURE_EXE = (Resolve-Path 'target/debug/okx-research-load-fixture.exe').Path
               'okx-trading-engine'
             }
             'host' { 'okx-host-controller'; 'okx-host-launcher'; 'okx-host-protocol'; 'okx-bridge-mcp' }
@@ -1036,7 +1041,7 @@ jobs:
           $covered = @(($manifestJson | ConvertFrom-Json).witnesses)
           $ownerTestLines = [System.Collections.Generic.List[string]]::new()
           foreach ($package in $packages) {
-            $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
+            $testArgs = @('--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
             # OS-kill is checked exclusively in the finance/isolated job.
             if ($package -eq 'okx-trading-engine') {
               $testArgs += @('--skip','accounts::native_trade_contracts::native_crash::risk_book_contract_native_os_kill_pending_fill_projects_once')
@@ -1165,16 +1170,28 @@ jobs:
           if ($code -ne 0) { exit $code }
           if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_IPC_TESTS_MISSING' }
 
-      - name: Agent dispatch to actual research child
+      - name: Engine rejects Research owner attempts to mutate Native finance
         if: matrix.suite == 'engine'
         shell: pwsh
         run: |
-          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
-          $output = & cargo test --locked -p okx-trading-engine --lib research_dispatch_tests:: -- --test-threads 2 2>&1
+          # The removed Engine ResearchClient integration suite must not be
+          # replaced by a green 0-test filter. Research-owned T06–T12 child
+          # causality now runs through Research ipc_process; this separate
+          # actual Engine test proves Research handoff cannot enqueue writes.
+          $output = & cargo test --locked -p okx-trading-engine --lib query::public_dispatch_tests::research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes -- --exact --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'AGENT_RESEARCH_DISPATCH_TESTS_MISSING' }
+          # `--exact` selects this one named test and filters out the other
+          # Engine libtests. Zero filtered would reject a correctly scoped
+          # current suite; instead require BOTH this test's positive line and
+          # one exact passing result with a nonzero filtered roster.
+          $log = $output -join "`n"
+          $testName = 'query::public_dispatch_tests::research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes'
+          if ($log -notmatch ('(?m)^test ' + [regex]::Escape($testName) + ' \.\.\. ok$') -or
+              $log -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [1-9][0-9]* filtered out;') {
+            throw 'ENGINE_RESEARCH_OWNER_FINANCE_DENIAL_EXACT_TEST_REQUIRED'
+          }
 
       # Worker-local CPU/cancellation benchmark, not physical Engine autonomy.
       - name: K9 worker two-heavy cancellation latency evidence
@@ -1315,6 +1332,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Installed CONTROL v1 requires the *existing* seven Ready display
+          # names and this v1 archive schema. A future v2 policy must arrive
+          # through a versioned manifest and verified consumer rollout, never
+          # by renaming a job or by minting a synthetic green alias.
           $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
           $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
           $dist = Join-Path $env:RUNNER_TEMP 'okx-research-component'
@@ -1355,6 +1376,9 @@ jobs:
           $component = $proof | ConvertFrom-Json
           if ($component.research_component_sha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'RESEARCH_COMPONENT_SHA_UNVERIFIED' }
           "research_component_sha256=$($component.research_component_sha256)" >> $env:GITHUB_OUTPUT
+          "RESEARCH_READY_STATUS_POLICY=okx.github.actions.research-ready/v1" >> $env:GITHUB_STEP_SUMMARY
+          "RESEARCH_READY_STATUS_NAMES=classify,architecture-contracts,dependency-audit,cloudflare-mcp-contracts,research-service-tests-windows,linux-core,windows-native" >> $env:GITHUB_STEP_SUMMARY
+          "RESEARCH_COMPONENT_MANIFEST_SCHEMA=okx.windows.research-component/v1" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload isolated Research release evidence
         if: github.event_name == 'pull_request' && needs.component_impact.outputs.research_only == 'true'
@@ -2021,11 +2045,13 @@ jobs:
             [[ "$candidate" =~ ^[1-9][0-9]*$ && "$attempt" == 1 ]] || continue
             jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/attempts/$attempt/jobs?per_page=100")"
             # The same Ready attempt must contain every authentic required
-            # owner/gate success. Draft composition cannot satisfy this.
+            # owner/gate success. Draft composition cannot satisfy this. The
+            # v1 roster is also installed CONTROL's accepted origin policy;
+            # no display-name migrations or green aliases are recognized.
             if ! jq -e --arg head "$head" --argjson run "$candidate" '
               .total_count == (.jobs | length) and .total_count < 100 and
               ([.jobs[].name] | unique | length) == .total_count and
-              all(.jobs[]; .run_id == $run and .head_sha == $head) and
+              all(.jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1) and
               ([.jobs[] | select(.conclusion == "success") | .name] as $ok |
                 all(["classify", "dependency-audit", "architecture-contracts",
                      "research-service-tests-windows", "cloudflare-mcp-contracts",

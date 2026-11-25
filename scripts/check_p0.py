@@ -27,6 +27,30 @@ WORKER_TESTS = (
 STANDALONE_MCP_TEST = (
     "edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket",
 )
+# These are the actual, independently owned Research process tests. The first
+# three invoke the retained T06–T10 helpers inside their bodies, so adding a
+# second `#[test]` target (and silently changing Windows's exact 10/10 gate)
+# is not an acceptable substitute for their execution.
+RESEARCH_IPC_PORTABLE = (
+    "child_round_trip_source_and_eof_restart",
+    "strategy_outbox_publishes_once_and_recovers_committed_proposal_after_restart",
+    "incompatible_handshake_cannot_create_root",
+    "cross_scope_restart_rejected",
+    "replay_and_wrong_session_terminate_worker",
+    "oversized_and_truncated_wire_terminate_worker",
+    "lost_enqueue_ack_retry_preserves_job_and_rejects_conflict",
+    "draining_preserves_active_job_and_rejects_new_admission",
+    "t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane",
+)
+RESEARCH_IPC_WINDOWS = "legacy_and_standalone_workers_cannot_claim_separate_cpu_quotas"
+RESEARCH_IPC_HELPERS = (
+    ('child_round_trip_source_and_eof_restart',
+     'research_legacy_witnesses', 'causal_economics_and_portfolio_are_research_only'),
+    ('strategy_outbox_publishes_once_and_recovers_committed_proposal_after_restart',
+     'research_legacy_witnesses', 'cancel_and_durable_decision_replay_are_research_only'),
+    ('cross_scope_restart_rejected',
+     'research_extra_witnesses', 't07_t08_market_and_catalog_witnesses'),
+)
 LOCAL_COMPONENTS = {
     "strategy": "okx-strategy-core",
     "analysis": "okx-analysis",
@@ -73,9 +97,169 @@ def check_counts(output, required):
     return len(passed)
 
 
-def test_command(package, target=("--lib",), required=(), exact=False, show_output=False, ignored=False):
+def check_research_ipc_wiring(source=None):
+    if source is None:
+        source = (ROOT / "crates/okx-research-service/tests/ipc_process.rs").read_text(encoding="utf-8")
+    # Ignore comments so a description of the witness cannot replace its
+    # executable call. A change to these entry points needs an explicit review.
+    executable = "\n".join(line.split("//", 1)[0] for line in source.splitlines())
+    if executable.count("#[tokio::test]") != 10:
+        raise ValueError("Research IPC exact ten process tests were altered")
+    for test_name, module, witness in RESEARCH_IPC_HELPERS:
+        if not re.search(rf'\#\[path\s*=\s*"support/{module}\.rs"\]\s*mod\s+{module}\s*;', executable):
+            raise ValueError(f"Research IPC owner helper not imported: {module}")
+        test_body = re.search(
+            rf'(?ms)^async\s+fn\s+{test_name}\s*\(\s*\)\s*\{{(.*?)(?=^#\[tokio::test\]|\Z)',
+            executable)
+        if not test_body or not re.search(
+                rf'\b{module}::{witness}\s*\(\s*\)\s*\.await\s*;', test_body.group(1)):
+            raise ValueError(f"Research IPC owner witness not executed by {test_name}: {witness}")
+        helper = ROOT / f"crates/okx-research-service/tests/support/{module}.rs"
+        if not helper.is_file() or not re.search(rf'\basync\s+fn\s+{witness}\s*\(', helper.read_text(encoding="utf-8")):
+            raise ValueError(f"Research IPC owner witness implementation missing: {witness}")
+
+
+def check_research_ipc_result(output, windows=None):
+    if windows is None:
+        windows = os.name == "nt"
+    expected = 10 if windows else 9
+    # No ignored/filtered/replaced test may satisfy the protected 10/10
+    # Windows process roster (or the corresponding nine Linux cases).
+    result = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; "
+                        r"(\d+) measured; (\d+) filtered out;", output, re.M)
+    if len(result) != 1 or result[0] != (str(expected), "0", "0", "0", "0"):
+        raise ValueError(f"Research IPC process roster is not exactly {expected}/{expected}")
+
+
+def check_financial_manifest_counts(manifest):
+    # The separate finance collector still owns 62 distinct contracts, 104
+    # crate witnesses and 3 repository checks. This draft migration must not
+    # silently drop a financial property to fund a Research test relocation.
+    if not isinstance(manifest, dict):
+        raise ValueError("financial witness manifest missing")
+    contracts = manifest.get("contracts")
+    witnesses = manifest.get("witnesses")
+    repository = manifest.get("repository_witnesses")
+    if (not isinstance(contracts, list) or len(contracts) != 62
+            or not all(isinstance(value, str) and value for value in contracts)
+            or len(set(contracts)) != 62
+            or not isinstance(witnesses, list) or len(witnesses) != 104
+            or not isinstance(repository, list) or len(repository) != 3):
+        raise ValueError("financial property roster must retain 62 contracts and 107 witnesses")
+    identities = []
+    for entry in witnesses + repository:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("package"), str)
+                or not isinstance(entry.get("test"), str)
+                or not entry["package"] or not entry["test"]):
+            raise ValueError("financial witness identity is invalid")
+        identities.append((entry["package"], entry["test"]))
+    repository_names = {
+        "architecture_and_research_negative_guards",
+        "measured_native_workload_and_resource_budgets",
+        "retained_workerd_auth_session_transport_no_financial_owner",
+    }
+    if (len(set(identities)) != 107
+            or {entry["test"] for entry in repository} != repository_names
+            or any(entry["package"] != "repository" for entry in repository)):
+        raise ValueError("financial witness roster is duplicate or missing repository gates")
+
+
+def self_test():
+    check_research_ipc_wiring()
+    source = (ROOT / "crates/okx-research-service/tests/ipc_process.rs").read_text(encoding="utf-8")
+    for _, module, witness in RESEARCH_IPC_HELPERS:
+        changed = source.replace(f"{module}::{witness}().await;", "", 1)
+        if changed == source:
+            raise ValueError(f"missing executable Research witness call: {witness}")
+        try:
+            check_research_ipc_wiring(changed)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(f"removed Research witness was accepted: {witness}")
+    for windows in (False, True):
+        names = RESEARCH_IPC_PORTABLE + ((RESEARCH_IPC_WINDOWS,) if windows else ())
+        rows = "\n".join(f"test {name} ... ok" for name in names)
+        result = f"test result: ok. {len(names)} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"
+        check_counts(rows, names)
+        check_research_ipc_result(rows + "\n" + result, windows=windows)
+        for bad in (
+            rows.replace(f"test {names[0]} ... ok", f"test {names[0]} ... ignored") + "\n" + result,
+            rows + "\n" + result.replace("0 ignored", "1 ignored"),
+            rows + "\n" + result.replace(f"{len(names)} passed", f"{len(names)-1} passed"),
+            rows + "\n" + result + "\n" + result,
+        ):
+            try:
+                check_counts(bad, names)
+                check_research_ipc_result(bad, windows=windows)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("missing/skipped/duplicate Research process evidence accepted")
+    synthetic_t10 = {
+        "source_reads": {
+            "kind": "actual_research_ipc_public_candles_requests_to_synthetic_handler",
+            "successful_requests": 10, "returned_candle_rows": 1000,
+            "venue_http_reads": 0, "source_storage_page_reads": "not_measured",
+            "observation_scope": "request_and_rows_counted_in_research_owned_fixture_source_handler",
+        },
+        "phase_wall_ms_excluding_build": 1000.0,
+        "pre_source_boundaries": {
+            "schema": "okx.518.t10-real-child-pre-source-boundaries/v1",
+            "route": "research_owned_fixture_to_worker_ipc",
+            "admission_only_not_executed": [
+                "one_million_bars_one_instrument_64", "eight_instruments_one_million_bars_64"],
+            "rejected_before_source": {
+                "one_million_plus_one_bars": "INVALID_RESEARCH_REQUEST",
+                "nine_instruments": "INVALID_RESEARCH_REQUEST",
+                "sixty_five_variants": "INVALID_RESEARCH_REQUEST",
+            },
+            "source_requests_before": 0, "source_requests_after": 0,
+            "returned_rows_before": 0, "returned_rows_after": 0,
+            "full_scale_execution": "not_attempted", "side_effects": "none",
+        },
+    }
+    check_source_witness(synthetic_t10)
+    check_real_child_boundaries(synthetic_t10)
+    for key, legacy in (
+        ("route", "real_agent_to_separate_research_worker_ipc"),
+        ("source_requests_after", 1),
+        ("returned_rows_after", 1),
+    ):
+        phase = json.loads(json.dumps(synthetic_t10))
+        phase["pre_source_boundaries"][key] = legacy
+        try:
+            check_real_child_boundaries(phase)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(f"unverified T10 Research boundary accepted: {key}")
+    phase = json.loads(json.dumps(synthetic_t10))
+    phase["source_reads"]["observation_scope"] = "request_and_rows_counted_in_native_source_handler"
+    try:
+        check_source_witness(phase)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("retired Agent-owned source receipt accepted as Research-owned")
+    manifest = json.loads(subprocess.check_output(
+        ["node", "scripts/ci-finance-witness-manifest.cjs"], cwd=ROOT, text=True))
+    check_financial_manifest_counts(manifest)
+    for field in ("contracts", "witnesses", "repository_witnesses"):
+        changed = {**manifest, field: manifest[field][:-1]}
+        try:
+            check_financial_manifest_counts(changed)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(f"reduced financial {field} roster accepted")
+    print("P0_RESEARCH_OWNER_IPC_AND_FINANCE_NEGATIVE_CONTROLS=PASS")
+
+
+def test_command(package, target=("--lib",), required=(), exact=False, show_output=False,
+                 ignored=False, test_threads=2):
     cmd = ["cargo", "test", "--locked", "-p", package, *target, "--message-format=json-render-diagnostics"]
-    cmd.extend(["--", "--test-threads", "2"])
+    cmd.extend(["--", "--test-threads", str(test_threads)])
     if exact:
         cmd.extend(["--exact", *required])
     if show_output:
@@ -85,8 +269,13 @@ def test_command(package, target=("--lib",), required=(), exact=False, show_outp
     return cmd
 
 
-def tests(package, target=("--lib",), required=(), exact=False, show_output=False, extra_env=None, ignored=False):
-    cmd = test_command(package, target, required, exact, show_output, ignored)
+def tests(package, target=("--lib",), required=(), exact=False, show_output=False,
+          extra_env=None, ignored=False, test_threads=2):
+    if package == "okx-research-service" and target == ("--test", "ipc_process"):
+        check_research_ipc_wiring()
+        if test_threads != 1:
+            raise ValueError("Research IPC real children must execute serially")
+    cmd = test_command(package, target, required, exact, show_output, ignored, test_threads)
     print(shlex.join(cmd), flush=True)
     started = time.monotonic()
     run = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, text=True,
@@ -104,6 +293,8 @@ def tests(package, target=("--lib",), required=(), exact=False, show_output=Fals
     print("\n".join(output), flush=True)
     run.check_returncode()
     count = check_counts("\n".join(output), required)
+    if package == "okx-research-service" and target == ("--test", "ipc_process"):
+        check_research_ipc_result("\n".join(output))
     report(f"{package} {' '.join(target)}: {count} tests passed in {time.monotonic()-started:.2f}s "
            f"(Cargo + tests). Recompiled workspace targets: {', '.join(sorted(rebuilt)) or 'none'}.")
     return "\n".join(output)
@@ -149,7 +340,7 @@ def check_source_witness(phase):
             or type(rows) is not int or rows < requests
             or source.get("venue_http_reads") != 0
             or source.get("source_storage_page_reads") != "not_measured"
-            or source.get("observation_scope") != "request_and_rows_counted_in_native_source_handler"
+            or source.get("observation_scope") != "request_and_rows_counted_in_research_owned_fixture_source_handler"
             or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed)
             or elapsed <= 0):
         raise ValueError("T10 missing actual typed synthetic-source reads or build-excluded phase timing")
@@ -159,7 +350,7 @@ def check_real_child_boundaries(phase):
     witness = phase.get("pre_source_boundaries", {})
     expected = {"one_million_plus_one_bars", "nine_instruments", "sixty_five_variants"}
     if (witness.get("schema") != "okx.518.t10-real-child-pre-source-boundaries/v1"
-            or witness.get("route") != "real_agent_to_separate_research_worker_ipc"
+            or witness.get("route") != "research_owned_fixture_to_worker_ipc"
             or witness.get("admission_only_not_executed") != [
                 "one_million_bars_one_instrument_64", "eight_instruments_one_million_bars_64"]
             or witness.get("rejected_before_source") != {name: "INVALID_RESEARCH_REQUEST"
@@ -317,7 +508,7 @@ def report_mcp_native_under_research(value):
                f"phase wall excluding build={phase['phase_wall_ms_excluding_build']:.1f} ms. "
                "Fixture OAuth replaced with test scope; production network, "
                "physical Windows and overall memory budget NOT evaluated.")
-        report("T10 real Agent->Research Worker IPC admission boundaries: "
+        report("T10 real Research-owned fixture->Worker IPC admission boundaries: "
                "1,000,000 bars / 8 instruments / 64 variants protocol-admitted only; "
                "1,000,001 bars / 9 instruments / 65 variants each rejected before "
                "source requests or job creation; full-scale execution not attempted.")
@@ -382,14 +573,17 @@ def execute(scopes):
         if "worker" in scopes:
             tests("okx-research-service", required=STANDALONE_MCP_TEST, exact=True, ignored=True)
     if scopes & {"ipc", "worker-ipc"}:
-        tests("okx-research-service", ("--test", "ipc_process"))
+        required = RESEARCH_IPC_PORTABLE + ((RESEARCH_IPC_WINDOWS,) if os.name == "nt" else ())
+        tests("okx-research-service", ("--test", "ipc_process"),
+              required=required, test_threads=1)
     if "worker-ipc" in scopes:
         tests("okx-research-service", ("--test", "causal_release_smoke"))
     if "ipc" in scopes:
-        # Binary renaming must preserve content-addressed legacy installations
-        # and stage only the verified new Research Service image.
-        tests("okx-trading-engine", required=(
-            "research_client::installed::tests::existing_verified_worker_image_remains_usable_after_service_rename",
+        # Binary renaming and the owner split must preserve the installed
+        # three-file Research release and rollback with Engine entirely absent.
+        # These are CONTROL-owned install proofs, not retired Engine test shims.
+        tests("okx-host-controller", required=(
+            "artifact::research_component::tests::standalone_research_stages_and_rolls_back_with_engine_entirely_absent",
         ), exact=True)
         tests("okx-host-controller", required=(
             "artifact::research_component::tests::research_staging_publishes_only_verified_version_and_preserves_agent_state",
@@ -401,20 +595,21 @@ def execute(scopes):
                                            cwd=ROOT, text=True)
         suffix = ".exe" if os.name == "nt" else ""
         worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-service" + suffix)
-        # Shipping and standalone Research checks use the production host-wide
-        # singleton. Only Engine's legacy child tests can spawn this opt-in
-        # debug binary; #[cfg(test)] ResearchClient injects a per-root token.
+        fixture = worker.with_name("okx-research-load-fixture" + suffix)
+        # T10 financial process contracts still execute the real Worker under
+        # two heavy CPU Grids. Research owns this debug-only fixture binary
+        # and its private typed protocol; Engine drives only bounded JSONL.
+        # The shipping Worker and the accepted Research ZIP remain unchanged.
+        subprocess.run(["cargo", "build", "--locked", "-p", "okx-research-service",
+                        "--bin", "okx-research-load-fixture", "--features", "test-fixture"],
+                       cwd=ROOT, check=True)
         subprocess.run(["cargo", "build", "--locked", "-p", "okx-research-service",
                         "--bin", "okx-research-service", "--features", "test-isolated-singleton"],
                        cwd=ROOT, check=True)
         isolated_worker = worker.with_name("okx-research-service-test-isolated" + suffix)
         shutil.copy2(worker, isolated_worker)
         os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(isolated_worker)
-        tests("okx-trading-engine", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
-        tests("okx-trading-engine", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
-        tests("okx-trading-engine", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)
-        tests("okx-trading-engine", required=("research_dispatch_tests::t07_t08_real_worker_intraday_event_and_holdout_stay_separate",), exact=True)
-        tests("okx-trading-engine", required=("research_client::transport_tests::t11_t12_cancel_is_dispatchable_while_work_and_observation_lanes_are_full",), exact=True)
+        os.environ["OKX_RESEARCH_LOAD_FIXTURE_EXE"] = str(fixture)
         native = tests("okx-trading-engine", required=("accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect",), exact=True, show_output=True)
         report_native_under_research(measured_native_under_research(native))
         if "mcp" in scopes:
@@ -464,12 +659,19 @@ def main():
     parser.add_argument("--base", default="origin/main", help="compare working tree with merge base")
     parser.add_argument("--plan", action="store_true", help="print selection without building")
     parser.add_argument("--expanded", action="store_true", help="also check broader semantic impact")
+    parser.add_argument("--self-test", action="store_true",
+                        help="check Research owner IPC and financial roster negative controls without Cargo")
     parser.add_argument("--checks", help="execute the comma-separated checks emitted by the CI classifier")
     parser.add_argument("--component", choices=sorted({*LOCAL_COMPONENTS, "mcp"}),
                         help="test one component locally")
     parser.add_argument("--repeat", type=int, default=1,
                         help="repeat the local component check in the same build directory")
     args = parser.parse_args()
+    if args.self_test:
+        if args.checks is not None or args.component or args.plan or args.expanded or args.repeat != 1:
+            parser.error("--self-test cannot be combined with execution or plan options")
+        self_test()
+        return
     if args.checks is not None:
         scopes = set(args.checks.split(",")) if args.checks else set()
         if not scopes <= DRAFT_CHECKS or args.component or args.plan or args.expanded or args.repeat != 1:

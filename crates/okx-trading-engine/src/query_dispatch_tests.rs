@@ -1,8 +1,7 @@
-//! Public routing tests: real owners, with delivery replaced only at HTTP/WS.
+//! Engine owner-boundary tests: actual Native Finance, no Research child or IPC.
 use super::*;
 use crate::accounts::{initialize_installation, recorded_support};
 use crate::trade_service::TradeService;
-use crate::{research_client::ResearchClient, research_test_support};
 use okx_api::{HttpSend, HttpTransport, OkxEnvironment, RateBudget};
 use okx_ipc_contracts::{AGENT_REQUEST_SCHEMA_V1, InstrumentTypeFilter};
 use std::sync::Arc;
@@ -28,16 +27,14 @@ impl HttpTransport for ForbiddenNetwork {
 struct Fixture {
     root: PathBuf,
     context: DispatchContext,
-    market: crate::market_bootstrap::MarketBootstrapper,
-    public_ws: okx_market_runtime::PublicWsHandle,
-    legacy_research: Option<ResearchClient>,
-    // Keep the actual command receiver alive without starting a network task.
+    _market: crate::market_bootstrap::MarketBootstrapper,
+    // Keep the actual public websocket command receiver alive but offline.
     _coordinator: okx_market_runtime::PublicWsCoordinator,
     network: Arc<ForbiddenNetwork>,
     finance_owner: okx_trade_execution::account_worker::UnifiedFinanceHandle,
 }
 impl Fixture {
-    async fn new(reference: okx_observation::ReferenceRegistry) -> Self {
+    async fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "okx-query-dispatch-{}-{}-{}",
@@ -81,13 +78,13 @@ impl Fixture {
         );
         let (coordinator, public_ws) = okx_market_runtime::PublicWsCoordinator::new_with_connector(
             environment,
-            reference,
+            okx_observation::ReferenceRegistry::from_public("fixture", vec![]).unwrap(),
             RateBudget::new(),
             Arc::new(recorded_support::OfflineSocket),
         );
         let trade = Arc::new(TradeService::new(
             accounts.clone(),
-            public_ws.clone(),
+            public_ws,
             crate::risk_bridge::NativeRiskClient::local(
                 crate::native_finance_risk::NativeFinanceRisk::from_owner(finance_owner.clone()),
             ),
@@ -97,77 +94,43 @@ impl Fixture {
             context: DispatchContext {
                 finance: crate::finance_dispatch::FinanceDispatch::ready(accounts, trade),
             },
-            market,
-            public_ws,
-            legacy_research: None,
+            _market: market,
             _coordinator: coordinator,
             network,
             finance_owner,
         }
     }
+
     async fn request(&self, operation: AgentOperation, account: Option<&str>) -> AgentResponse {
-        self.route(operation, account, None).await
-    }
-    async fn legacy_request(
-        &self,
-        operation: AgentOperation,
-        account: Option<&str>,
-    ) -> AgentResponse {
-        self.route(
-            operation,
-            account,
-            Some(self.legacy_research.as_ref().unwrap()),
-        )
-        .await
-    }
-    fn enable_legacy_research(&mut self) {
-        self.legacy_research = Some(
-            research_test_support::client(self.root.join("research"), self.market.clone()).unwrap(),
-        );
-    }
-    async fn route(
-        &self,
-        operation: AgentOperation,
-        account: Option<&str>,
-        legacy_research: Option<&ResearchClient>,
-    ) -> AgentResponse {
-        let finance_jobs_before = self.finance_owner.sql_timing().observed_jobs;
+        let jobs_before = self.finance_owner.sql_timing().observed_jobs;
         let request = AgentRequest {
             schema: AGENT_REQUEST_SCHEMA_V1.into(),
             request_id: "query-dispatch-request-001".into(),
             account: account.map(str::to_owned),
             operation,
         };
-        let response = match legacy_research {
-            Some(client) => {
-                research_test_support::dispatch(&self.public_ws, &self.market, client, &request)
-                    .await
-            }
-            None => dispatch(&self.context, &request).await,
-        };
+        let response = dispatch(&self.context, &request).await;
         assert_eq!(
             self.finance_owner.sql_timing().observed_jobs,
-            finance_jobs_before,
-            "read-only public dispatch cannot enqueue financial work"
+            jobs_before,
+            "Engine read-only public dispatch cannot enqueue a financial write"
         );
         response
     }
+
     async fn finish(self) {
-        if let Some(client) = &self.legacy_research {
-            client.shutdown().await;
-        }
         assert_eq!(
             self.network.0.load(Ordering::Relaxed),
             0,
-            "read-only fixture must not fetch external data"
+            "Engine public handoff must not fetch from a venue"
         );
         assert!(
             self.finance_owner
-                .configured_campaign(Instant::now() + std::time::Duration::from_secs(3),)
+                .configured_campaign(Instant::now() + std::time::Duration::from_secs(3))
                 .await
                 .unwrap()
                 .is_none(),
-            "read-only dispatch cannot install financial policy"
+            "Research handoff must not install a financial policy"
         );
         self.context.finance.accounts().unwrap().shutdown().await;
         let root = self.root.clone();
@@ -180,9 +143,7 @@ impl Fixture {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
-fn empty_reference() -> okx_observation::ReferenceRegistry {
-    okx_observation::ReferenceRegistry::from_public("fixture", vec![]).unwrap()
-}
+
 fn rejection(response: AgentResponse, code: &str) {
     assert_eq!(response.status, AgentResponseStatus::Rejected);
     assert_eq!(response.quality, DataQuality::NotReady);
@@ -194,8 +155,8 @@ fn rejection(response: AgentResponse, code: &str) {
 async fn trading_and_strategy_requests_reach_finance_owner_not_research_fallback() {
     use okx_ipc_contracts::trading::{StrategyRequest, TradeRequest};
 
-    // No installed account, network, Research process or financial mutation.
-    // Distinct finance failure proves the router reached the proper owner.
+    // No account, network, Research process or mutation. Distinct finance
+    // failure proves that a normal financial request cannot hit Research.
     let ctx = DispatchContext {
         finance: crate::finance_dispatch::FinanceDispatch::missing(),
     };
@@ -220,30 +181,18 @@ async fn trading_and_strategy_requests_reach_finance_owner_not_research_fallback
     }
 }
 
+// These are the Engine's *shipping* Research-owner handoff operations. The
+// retired Engine-only child route and public Market shim were never shipping
+// routes; Research now tests their positive semantics in its owner crate.
 #[tokio::test]
 async fn engine_rejects_every_research_operation_without_network_or_finance_work() {
-    use okx_ipc_contracts::{analytics::ResearchRequest, trading::DiagnosticsRequest};
-    let fixture = Fixture::new(empty_reference()).await;
+    use okx_ipc_contracts::trading::{DiagnosticsRequest, DiagnosticsView};
+    let fixture = Fixture::new().await;
     let operations = [
-        AgentOperation::Market {
-            request: serde_json::from_value(json!({
-                "action":"screen", "instruments":["BTC-USDT"], "fields":["returns"],
-                "timeframe_ms":60_000, "start_ms":0, "end_ms":12_000_000, "limit":1
-            }))
-            .unwrap(),
-        },
         AgentOperation::MarketCapabilities,
         AgentOperation::MarketMicrostructure {
             instrument: "BTC-USDT-SWAP".into(),
             size_contracts: Some("1".into()),
-        },
-        AgentOperation::Research {
-            request: ResearchRequest::Status {
-                job_id: "a".repeat(64),
-            },
-        },
-        AgentOperation::PortfolioScenario {
-            request: two_position_scenario(),
         },
         AgentOperation::FindInstruments {
             asset: "BTC".into(),
@@ -276,15 +225,20 @@ async fn engine_rejects_every_research_operation_without_network_or_finance_work
         let response = fixture.request(operation.clone(), None).await;
         assert!(!response.failure.as_ref().unwrap().retryable);
         rejection(response, "RESEARCH_OWNER_REQUIRED");
-        for finance in [FinanceDispatch::missing(), FinanceDispatch::invalid()] {
+        for finance in [
+            crate::finance_dispatch::FinanceDispatch::missing(),
+            crate::finance_dispatch::FinanceDispatch::invalid(),
+        ] {
             let request = AgentRequest {
                 schema: AGENT_REQUEST_SCHEMA_V1.into(),
                 request_id: "query-dispatch-offline-001".into(),
                 account: None,
                 operation: operation.clone(),
             };
-            let response = dispatch(&DispatchContext { finance }, &request).await;
-            rejection(response, "RESEARCH_OWNER_REQUIRED");
+            rejection(
+                dispatch(&DispatchContext { finance }, &request).await,
+                "RESEARCH_OWNER_REQUIRED",
+            );
         }
     }
     assert!(!fixture.root.join("research").exists());
@@ -292,103 +246,143 @@ async fn engine_rejects_every_research_operation_without_network_or_finance_work
     fixture.finish().await;
 }
 
+// An independent Engine-owned finance witness. Unlike the retired Research
+// child tests, this compares actual Native Finance files under a live writer.
 #[tokio::test]
-async fn legacy_research_without_finance_cannot_create_financial_authority() {
-    use okx_ipc_contracts::{
-        analytics::ResearchRequest,
-        trading::{DiagnosticsRequest, DiagnosticsView, TradeRequest},
-    };
-    for invalid in [false, true] {
-        let root = std::env::temp_dir().join(format!(
-            "okx-research-finance-boundary-{}-{}-{invalid}",
-            std::process::id(),
-            Timestamp::now().as_nanosecond()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let finance_file = root.join("finance/finance.sqlite");
-        if invalid {
-            initialize_installation(&root, "research-boundary-installation").unwrap();
-            std::fs::create_dir(root.join("finance")).unwrap();
-            std::fs::write(
-                &finance_file,
-                b"invalid financial input must stay unchanged",
-            )
-            .unwrap();
-        }
-        let before = invalid.then(|| std::fs::read(&finance_file).unwrap());
-        let catalog = root.join("account-catalog.pb");
-        let catalog_before = invalid.then(|| std::fs::read(&catalog).unwrap());
-        let env = OkxEnvironment::new(okx_api::Region::Global, false);
-        let network = Arc::new(ForbiddenNetwork::default());
-        let client =
-            okx_api::OkxPublicClient::with_http_transport(env, RateBudget::new(), network.clone())
-                .unwrap();
-        let market = crate::market_bootstrap::MarketBootstrapper::new(client.clone());
-        let (_coordinator, public_ws) = okx_market_runtime::PublicWsCoordinator::new_uninitialized(
-            env,
-            RateBudget::new(),
-            client,
+async fn research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes() {
+    use okx_ipc_contracts::trading::{DiagnosticsRequest, DiagnosticsView};
+
+    let fixture = Fixture::new().await;
+    let files_before = crate::accounts::tests::read_only_fixture_files(&fixture.root);
+    let jobs_before = fixture.finance_owner.sql_timing().observed_jobs;
+    for operation in [
+        AgentOperation::MarketCapabilities,
+        AgentOperation::MarketMicrostructure {
+            instrument: "BTC-USDT-SWAP".into(),
+            size_contracts: Some("1".into()),
+        },
+        AgentOperation::FindInstruments {
+            asset: "BTC".into(),
+            settle_currency: Some("USDT".into()),
+            instrument_type: Some(InstrumentTypeFilter::Swap),
+        },
+        AgentOperation::MarketOverview {
+            instrument: "BTC-USDT-SWAP".into(),
+        },
+        AgentOperation::Diagnostics {
+            request: DiagnosticsRequest {
+                view: Some(DiagnosticsView::Research),
+                reference: Some("deployment".into()),
+                account: None,
+                cycle_id: None,
+                limit: None,
+            },
+        },
+        AgentOperation::Diagnostics {
+            request: DiagnosticsRequest {
+                view: Some(DiagnosticsView::Research),
+                reference: Some("a".repeat(64)),
+                account: None,
+                cycle_id: None,
+                limit: None,
+            },
+        },
+    ] {
+        rejection(
+            fixture.request(operation, None).await,
+            "RESEARCH_OWNER_REQUIRED",
         );
-        let finance = crate::finance_startup::select(&root, RateBudget::new(), false, None)
-            .await
-            .finish(public_ws.clone(), market.clone())
-            .await;
-        let context = DispatchContext { finance };
-        let research =
-            research_test_support::client(root.join("research"), market.clone()).unwrap();
-        let request = |operation, account: Option<&str>| AgentRequest {
-            schema: AGENT_REQUEST_SCHEMA_V1.into(),
-            request_id: "research-only-host-001".into(),
-            account: account.map(str::to_owned),
-            operation,
-        };
-        let deployment = || {
-            request(
-                AgentOperation::Diagnostics {
-                    request: DiagnosticsRequest {
-                        view: Some(DiagnosticsView::Research),
-                        reference: Some("deployment".into()),
-                        account: None,
-                        cycle_id: None,
-                        limit: None,
-                    },
-                },
-                None,
-            )
-        };
-        let snapshot =
-            research_test_support::dispatch(&public_ws, &market, &research, &deployment())
-                .await
-                .result
-                .unwrap();
-        assert_eq!(snapshot["schema"], "okx.research.deployment/v1");
-        assert!(snapshot["research"]["active_pid"].is_null());
-        assert!(!root.join("research").exists());
-        let response = research_test_support::dispatch(
-            &public_ws,
-            &market,
-            &research,
-            &request(
-                AgentOperation::Research {
-                    request: ResearchRequest::Capabilities {},
-                },
-                None,
-            ),
-        )
-        .await;
         assert_eq!(
-            response.status,
-            AgentResponseStatus::Completed,
-            "{response:?}"
+            fixture.finance_owner.sql_timing().observed_jobs,
+            jobs_before,
+            "Research handoff must not enqueue a Native financial operation"
         );
-        let snapshot =
-            research_test_support::dispatch(&public_ws, &market, &research, &deployment())
-                .await
-                .result
-                .unwrap();
-        assert_eq!(snapshot["engine_pid"], std::process::id());
-        assert!(snapshot["research"]["active_pid"].is_u64());
-        let denied = dispatch(
+        assert_eq!(
+            crate::accounts::tests::read_only_fixture_files(&fixture.root),
+            files_before,
+            "Research handoff must preserve original durable finance files"
+        );
+    }
+    assert!(!fixture.root.join("research").exists());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn malformed_finance_catalog_remains_unchanged_during_research_handoff_denial() {
+    use okx_ipc_contracts::trading::{DiagnosticsRequest, DiagnosticsView, TradeRequest};
+
+    // Unlike a FinanceDispatch::invalid() synthetic state, this creates the
+    // real installation/catalog and a corrupt original finance.sqlite, then
+    // exercises the genuine startup path without repairing its financial data.
+    let root = std::env::temp_dir().join(format!(
+        "okx-research-invalid-finance-boundary-{}-{}",
+        std::process::id(),
+        Timestamp::now().as_nanosecond()
+    ));
+    initialize_installation(&root, "research-denial-invalid-finance").unwrap();
+    let finance_file = root.join("finance/finance.sqlite");
+    std::fs::create_dir(root.join("finance")).unwrap();
+    std::fs::write(
+        &finance_file,
+        b"invalid financial input must stay unchanged",
+    )
+    .unwrap();
+    let catalog = root.join("account-catalog.pb");
+    let original_finance = std::fs::read(&finance_file).unwrap();
+    let original_catalog = std::fs::read(&catalog).unwrap();
+
+    let environment = OkxEnvironment::new(okx_api::Region::Global, false);
+    let forbidden = Arc::new(ForbiddenNetwork::default());
+    let client = okx_api::OkxPublicClient::with_http_transport(
+        environment,
+        RateBudget::new(),
+        forbidden.clone(),
+    )
+    .unwrap();
+    let market = crate::market_bootstrap::MarketBootstrapper::new(client.clone());
+    let (_coordinator, public_ws) = okx_market_runtime::PublicWsCoordinator::new_uninitialized(
+        environment,
+        RateBudget::new(),
+        client,
+    );
+    let finance = crate::finance_startup::select(&root, RateBudget::new(), false, None)
+        .await
+        .finish(public_ws, market)
+        .await;
+    let context = DispatchContext { finance };
+    let request = |operation, account: Option<&str>| AgentRequest {
+        schema: AGENT_REQUEST_SCHEMA_V1.into(),
+        request_id: "research_invalid_finance_001".into(),
+        account: account.map(str::to_owned),
+        operation,
+    };
+    for operation in [
+        AgentOperation::MarketCapabilities,
+        AgentOperation::FindInstruments {
+            asset: "BTC".into(),
+            settle_currency: Some("USDT".into()),
+            instrument_type: Some(InstrumentTypeFilter::Swap),
+        },
+        AgentOperation::MarketOverview {
+            instrument: "BTC-USDT-SWAP".into(),
+        },
+        AgentOperation::Diagnostics {
+            request: DiagnosticsRequest {
+                view: Some(DiagnosticsView::Research),
+                reference: Some("deployment".into()),
+                account: None,
+                cycle_id: None,
+                limit: None,
+            },
+        },
+    ] {
+        rejection(
+            dispatch(&context, &request(operation, None)).await,
+            "RESEARCH_OWNER_REQUIRED",
+        );
+    }
+    rejection(
+        dispatch(
             &context,
             &request(
                 AgentOperation::Trade {
@@ -399,86 +393,27 @@ async fn legacy_research_without_finance_cannot_create_financial_authority() {
                 Some("test-account"),
             ),
         )
-        .await;
-        rejection(
-            denied,
-            if invalid {
-                "FINANCE_FILE_FORMAT_UNKNOWN"
-            } else {
-                "FINANCE_INSTALLATION_NOT_INITIALIZED"
-            },
-        );
-        let diagnostic = DiagnosticsRequest {
-            view: Some(DiagnosticsView::Research),
-            reference: Some("a".repeat(64)),
-            account: None,
-            cycle_id: None,
-            limit: None,
-        };
-        let response = research_test_support::dispatch(
-            &public_ws,
-            &market,
-            &research,
-            &request(
-                AgentOperation::Diagnostics {
-                    request: diagnostic.clone(),
-                },
-                None,
-            ),
-        )
-        .await;
-        assert_eq!(response.status, AgentResponseStatus::Completed);
-        assert_eq!(
-            response.result.unwrap()["reason_code"],
-            "UNKNOWN_NOT_RETAINED"
-        );
-        let denied = research_test_support::dispatch(
-            &public_ws,
-            &market,
-            &research,
-            &request(
-                AgentOperation::Diagnostics {
-                    request: diagnostic,
-                },
-                Some("test-account"),
-            ),
-        )
-        .await;
-        rejection(denied, "RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE");
-        assert_eq!(network.0.load(Ordering::Relaxed), 0);
-        research.shutdown().await;
-        if let Some(bytes) = before {
-            assert_eq!(std::fs::read(&finance_file).unwrap(), bytes);
-            assert_eq!(std::fs::read(&catalog).unwrap(), catalog_before.unwrap());
-        } else {
-            assert!(!root.join("finance").exists());
-            assert!(!catalog.exists());
-        }
-        assert!(!root.join("installation.json").exists());
-        drop(context);
-        std::fs::remove_dir_all(root).unwrap();
-    }
+        .await,
+        "FINANCE_FILE_FORMAT_UNKNOWN",
+    );
+    assert_eq!(forbidden.0.load(Ordering::Relaxed), 0);
+    assert_eq!(std::fs::read(&finance_file).unwrap(), original_finance);
+    assert_eq!(std::fs::read(&catalog).unwrap(), original_catalog);
+    assert!(!root.join("research").exists());
+    drop(context);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
 async fn capabilities_and_mailbox_use_public_dispatch_without_external_effects() {
-    let mut fixture = Fixture::new(empty_reference()).await;
-    fixture.enable_legacy_research();
-    let capabilities = fixture
-        .legacy_request(AgentOperation::MarketCapabilities, None)
-        .await;
-    assert_eq!(capabilities.request_id, "query-dispatch-request-001");
-    assert_eq!(capabilities.status, AgentResponseStatus::Completed);
-    assert_eq!(capabilities.quality, DataQuality::Fresh);
-    let data = capabilities.result.unwrap();
-    assert_eq!(data["schema"], "okx.market.capabilities/v1");
-    assert_eq!(data["limits"]["max_page_rows"], 50);
-    assert!(
-        data["operators"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|op| op["name"] == "returns" && op["unit"] == "ratio")
+    let fixture = Fixture::new().await;
+    // Research now owns positive MarketCapabilities. The shipping Engine may
+    // only refuse that action while its own mailbox remains available.
+    rejection(
+        fixture
+            .request(AgentOperation::MarketCapabilities, None)
+            .await,
+        "RESEARCH_OWNER_REQUIRED",
     );
     let mailbox = fixture
         .request(AgentOperation::MailboxTelemetry, None)
@@ -492,336 +427,8 @@ async fn capabilities_and_mailbox_use_public_dispatch_without_external_effects()
 }
 
 #[tokio::test]
-async fn research_public_dispatch_progress_decision_and_locked_catalog_have_zero_financial_effects()
-{
-    use crate::research_client::{ResearchClient, ResearchClientConfig};
-    use okx_ipc_contracts::{
-        analytics::{ResearchDecisionStatus, ResearchRequest},
-        research_ipc::ResearchScope,
-        trading::{DiagnosticsRequest, DiagnosticsView},
-    };
-    let mut fixture = Fixture::new(empty_reference()).await;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let executable = std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
-        .map(PathBuf::from)
-        .expect("real worker executable must be built before process contracts");
-    use sha2::{Digest, Sha256};
-    let expected_worker_sha256 =
-        format!("{:x}", Sha256::digest(std::fs::read(&executable).unwrap()));
-    let research_root = fixture.root.join("public-research");
-    fixture.legacy_research = Some(ResearchClient::new(
-        ResearchClientConfig {
-            executable,
-            root: research_root.clone(),
-            scope: ResearchScope::new("query-dispatch-installation".into()).unwrap(),
-        },
-        crate::research_dispatch_tests::candle_source(calls.clone()),
-    ));
-    let mut request = crate::research_dispatch_tests::grid("public-dispatch-progress");
-    // A decision is scoped to one experiment, so use one instrument at this boundary.
-    if let ResearchRequest::Grid { instruments, .. } = &mut request {
-        instruments.truncate(1);
-    }
-    let queued = fixture
-        .legacy_request(
-            AgentOperation::Research {
-                request: request.clone(),
-            },
-            None,
-        )
-        .await;
-    assert_eq!(queued.status, AgentResponseStatus::Completed, "{queued:?}");
-    let id = queued.result.unwrap()["id"].as_str().unwrap().to_owned();
-    let complete = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let response = fixture
-                .legacy_request(
-                    AgentOperation::Research {
-                        request: ResearchRequest::Status { job_id: id.clone() },
-                    },
-                    None,
-                )
-                .await;
-            assert_eq!(
-                response.status,
-                AgentResponseStatus::Completed,
-                "{response:?}"
-            );
-            let job = response.result.unwrap();
-            match job["state"].as_str() {
-                Some("completed") => break job,
-                Some("failed" | "cancelled" | "interrupted") => {
-                    panic!("research did not complete: {job}")
-                }
-                _ => tokio::task::yield_now().await,
-            }
-        }
-    })
-    .await
-    .expect("bounded public research completion");
-    assert_eq!(complete["origin_invocation"], "query-dispatch-request-001");
-    assert_eq!(
-        complete["producer"]["binary_sha256"],
-        expected_worker_sha256
-    );
-    assert_eq!(complete["candidate_progress"]["completed_candidates"], 64);
-    assert_eq!(complete["candidate_progress"]["total_work_units"], 193);
-    let result = fixture
-        .legacy_request(
-            AgentOperation::Research {
-                request: ResearchRequest::Result {
-                    job_id: id.clone(),
-                    cursor: None,
-                    limit: 1,
-                    view: okx_ipc_contracts::analytics::ResearchResultView::Summary,
-                },
-            },
-            None,
-        )
-        .await;
-    assert_eq!(result.status, AgentResponseStatus::Completed, "{result:?}");
-    let result = result.result.unwrap();
-    assert_eq!(result["metadata"]["job_id"], id);
-    assert_eq!(
-        result["metadata"]["producer"]["binary_sha256"],
-        expected_worker_sha256
-    );
-    let result_id = complete["artifact"].as_str().unwrap().to_owned();
-    let record = ResearchRequest::RecordDecision {
-        job_id: id.clone(),
-        result_id,
-        expected_decision_id: None,
-        name: "Independent hypothesis".into(),
-        hypothesis: "Test a parameter grid".into(),
-        status: ResearchDecisionStatus::Deferred,
-        reason: "Await review".into(),
-    };
-    let recorded = fixture
-        .legacy_request(
-            AgentOperation::Research {
-                request: record.clone(),
-            },
-            None,
-        )
-        .await;
-    assert_eq!(
-        recorded.status,
-        AgentResponseStatus::Completed,
-        "{recorded:?}"
-    );
-    let decision = recorded.result.unwrap();
-    assert_eq!(decision["trading_authority"], false);
-    assert_eq!(
-        fixture
-            .legacy_request(AgentOperation::Research { request: record }, None)
-            .await
-            .result
-            .unwrap(),
-        decision
-    );
-    let calls_before = calls.load(Ordering::Relaxed);
-    let catalog =
-        rusqlite::Connection::open(research_root.join("research-catalog.sqlite")).unwrap();
-    catalog.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let changes_before = catalog.total_changes();
-    let request = DiagnosticsRequest {
-        reference: Some(id.clone()),
-        account: None,
-        view: Some(DiagnosticsView::Research),
-        cycle_id: None,
-        limit: None,
-    };
-    let observed = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        fixture.legacy_request(
-            AgentOperation::Diagnostics {
-                request: request.clone(),
-            },
-            None,
-        ),
-    )
-    .await
-    .expect("read-only diagnostic waited for catalog writer");
-    assert_eq!(
-        observed.status,
-        AgentResponseStatus::Completed,
-        "{observed:?}"
-    );
-    assert_eq!(observed.result.unwrap()["job"]["state"], "completed");
-    assert_eq!(catalog.total_changes(), changes_before);
-    let refused = fixture
-        .legacy_request(
-            AgentOperation::Diagnostics { request },
-            Some("another-account"),
-        )
-        .await;
-    rejection(refused, "RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE");
-    catalog.execute_batch("ROLLBACK").unwrap();
-    drop(catalog);
-    assert_eq!(calls.load(Ordering::Relaxed), calls_before);
-    fixture.legacy_research.as_ref().unwrap().shutdown().await;
-    let mut replay_request = crate::research_dispatch_tests::grid("public-dispatch-progress");
-    if let ResearchRequest::Grid { instruments, .. } = &mut replay_request {
-        instruments.truncate(1);
-    }
-    let replay = fixture
-        .legacy_request(
-            AgentOperation::Research {
-                request: replay_request,
-            },
-            None,
-        )
-        .await;
-    assert_eq!(replay.result.unwrap()["id"], id);
-    fixture.finish().await;
-}
-
-#[tokio::test]
-async fn public_screen_distinguishes_flat_and_two_compositions_through_real_research() {
-    use crate::research_client::ResearchClientConfig;
-    use okx_ipc_contracts::research_ipc::ResearchScope;
-    use std::collections::BTreeSet;
-    use std::time::Duration;
-
-    let mut fixture = Fixture::new(empty_reference()).await;
-    let reads = Arc::new(AtomicUsize::new(0));
-    fixture.legacy_research = Some(ResearchClient::new(
-        ResearchClientConfig {
-            executable: std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
-                .expect("build Research before running child process contracts")
-                .into(),
-            root: fixture.root.join("composition-research"),
-            scope: ResearchScope::new("query-dispatch-installation".into()).unwrap(),
-        },
-        crate::research_dispatch_tests::candle_source(reads.clone()),
-    ));
-
-    let flat = json!({"action":"screen", "instruments":["BTC-USDT"], "fields":["returns"],
-        "timeframe_ms":60_000, "start_ms":0, "end_ms":12_000_000, "limit":1});
-    let mut range = flat.clone();
-    range["composition"] = json!({"version":"okx.market.composition/v1", "steps":[
-        {"id":"width", "op":"rolling_range", "input":"close", "period":3}
-    ], "result_steps":["width"]});
-    let mut edge = flat.clone();
-    edge["composition"] = json!({"version":"okx.market.composition/v1", "steps":[
-        {"id":"change", "op":"returns_series", "input":"close"},
-        {"id":"avg3", "op":"rolling_mean", "input":"change", "period":3},
-        {"id":"positive", "op":"greater_than", "input":"avg3", "threshold":0},
-        {"id":"turn_on", "op":"rising_edge", "input":"positive"}
-    ], "result_steps":["avg3", "turn_on"]});
-
-    let mut results = Vec::new();
-    for input in [flat, range, edge] {
-        let operation = AgentOperation::Market {
-            request: serde_json::from_value(input).unwrap(),
-        };
-        let completed = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let reply = fixture.legacy_request(operation.clone(), None).await;
-                assert_eq!(reply.status, AgentResponseStatus::Completed, "{reply:?}");
-                let result = reply.result.unwrap();
-                if result["rows"].is_array() {
-                    break result;
-                }
-                assert!(
-                    matches!(result["state"].as_str(), Some("queued" | "running")),
-                    "unexpected market result: {result}"
-                );
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("Research screening did not complete");
-        let replay = fixture
-            .legacy_request(operation, None)
-            .await
-            .result
-            .unwrap();
-        for key in [
-            "job_id",
-            "market_request_fingerprint",
-            "result_artifact",
-            "rows",
-        ] {
-            assert_eq!(replay[key], completed[key], "replay changed {key}");
-        }
-        results.push(completed);
-    }
-
-    for key in ["job_id", "market_request_fingerprint", "result_artifact"] {
-        let identifiers: BTreeSet<_> = results
-            .iter()
-            .map(|result| result[key].as_str().unwrap())
-            .collect();
-        assert_eq!(identifiers.len(), 3, "different graphs shared {key}");
-    }
-    assert!(results[0]["rows"][0]["metrics"].get("width").is_none());
-    assert_eq!(results[1]["rows"][0]["metrics"]["width"], 2.0);
-    let metrics = &results[2]["rows"][0]["metrics"];
-    let expected = (1.0 / 297.0 + 1.0 / 298.0 + 1.0 / 299.0) / 3.0;
-    assert!((metrics["avg3"].as_f64().unwrap() - expected).abs() < 1e-12);
-    assert_eq!(metrics["turn_on"], false);
-    assert!(reads.load(Ordering::Relaxed) > 0);
-    fixture.finish().await;
-}
-
-#[tokio::test]
-async fn instrument_search_routes_type_filter_before_public_limit() {
-    let instrument = |id: String, kind: &str| {
-        serde_json::from_value(json!({
-            "instId":id,"instType":kind,"state":"live","baseCcy":"BTC","ctValCcy":"BTC",
-            "settleCcy":"USDT","tickSz":"0.1","lotSz":"1","minSz":"1"
-        }))
-        .unwrap()
-    };
-    let mut instruments = (0..60)
-        .map(|i| instrument(format!("A-SWAP-{i:02}"), "SWAP"))
-        .collect::<Vec<_>>();
-    instruments.extend((0..55).map(|i| instrument(format!("Z-FUTURE-{i:02}"), "FUTURES")));
-    let mut fixture = Fixture::new(
-        okx_observation::ReferenceRegistry::from_public("fixture", instruments).unwrap(),
-    )
-    .await;
-    fixture.enable_legacy_research();
-    let response = fixture
-        .legacy_request(
-            AgentOperation::FindInstruments {
-                asset: "BTC".into(),
-                settle_currency: Some("USDT".into()),
-                instrument_type: Some(InstrumentTypeFilter::Futures),
-            },
-            None,
-        )
-        .await;
-    assert_eq!(response.status, AgentResponseStatus::Completed);
-    let data = response.result.unwrap();
-    let rows = data["instruments"].as_array().unwrap();
-    assert_eq!(rows.len(), 50);
-    assert!(rows.iter().all(|row| {
-        row["instrument_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("Z-FUTURE-")
-    }));
-    rejection(
-        fixture
-            .legacy_request(
-                AgentOperation::FindInstruments {
-                    asset: "".into(),
-                    settle_currency: None,
-                    instrument_type: None,
-                },
-                None,
-            )
-            .await,
-        "INVALID_COMMAND",
-    );
-    fixture.finish().await;
-}
-
-#[tokio::test]
 async fn account_summary_checks_account_and_source_at_public_boundary() {
-    let fixture = Fixture::new(empty_reference()).await;
+    let fixture = Fixture::new().await;
     rejection(
         fixture.request(AgentOperation::AccountSummary, None).await,
         "EXPLICIT_ACCOUNT_REQUIRED",
@@ -842,8 +449,8 @@ async fn account_summary_checks_account_and_source_at_public_boundary() {
         .connect_prepared(config.clone(), clients)
         .await
         .unwrap();
-    // Freeze the source producer before varying its published input. This tests
-    // the public consumer, not the exchange observer's separate freshness proof.
+    // Freeze the source producer before varying its published input. This
+    // tests the public consumer, not an exchange observer's freshness proof.
     fixture.context.finance.accounts().unwrap().shutdown().await;
     let owner = fixture
         .context
@@ -896,7 +503,7 @@ async fn account_summary_checks_account_and_source_at_public_boundary() {
     assert!(
         fixture
             .finance_owner
-            .configured_campaign(Instant::now() + std::time::Duration::from_secs(3),)
+            .configured_campaign(Instant::now() + std::time::Duration::from_secs(3))
             .await
             .unwrap()
             .is_none()
@@ -913,186 +520,4 @@ async fn account_summary_checks_account_and_source_at_public_boundary() {
     .await
     .expect("actual SQL owner must terminate before deleting its files");
     std::fs::remove_dir_all(root).unwrap();
-}
-
-#[tokio::test]
-async fn overview_without_reference_rejects_unavailable_source_instead_of_empty_success() {
-    let mut fixture = Fixture::new(empty_reference()).await;
-    fixture.enable_legacy_research();
-    rejection(
-        fixture
-            .legacy_request(
-                AgentOperation::MarketOverview {
-                    instrument: "BTC-USDT-SWAP".into(),
-                },
-                None,
-            )
-            .await,
-        "MARKET_SOURCE_UNAVAILABLE",
-    );
-    rejection(
-        fixture
-            .legacy_request(
-                AgentOperation::MarketMicrostructure {
-                    instrument: "BTC-USDT-SWAP".into(),
-                    size_contracts: None,
-                },
-                None,
-            )
-            .await,
-        "MICROSTRUCTURE_FRESH_BOOK_REQUIRED",
-    );
-    fixture.finish().await;
-}
-
-fn two_position_scenario() -> okx_ipc_contracts::analytics::PortfolioScenarioRequest {
-    use okx_ipc_contracts::analytics::{
-        PortfolioScenarioRequest, ScenarioCorrelation, ScenarioPosition, ScenarioPositionSide,
-    };
-    PortfolioScenarioRequest {
-        equity_usd: "100".into(),
-        positions: vec![
-            ScenarioPosition {
-                instrument: "BTC-USDT-SWAP".into(),
-                side: ScenarioPositionSide::Long,
-                notional_usd: "100".into(),
-                margin_usd: "10".into(),
-                price_shock_bps: -1000,
-                volatility_bps: 300,
-                liquidity_cost_bps: 100,
-            },
-            ScenarioPosition {
-                instrument: "ETH-USDT-SWAP".into(),
-                side: ScenarioPositionSide::Short,
-                notional_usd: "200".into(),
-                margin_usd: "20".into(),
-                price_shock_bps: 500,
-                volatility_bps: 200,
-                liquidity_cost_bps: 50,
-            },
-        ],
-        correlations: vec![ScenarioCorrelation {
-            left: 0,
-            right: 1,
-            rho: 0.0,
-        }],
-    }
-}
-
-// SQLite coordination bytes are not a durable financial-state fingerprint.
-use crate::accounts::tests::read_only_fixture_files as fixture_artifacts;
-
-#[tokio::test]
-async fn portfolio_scenario_public_dispatch_returns_independent_virtual_risk_values() {
-    let mut fixture = Fixture::new(empty_reference()).await;
-    fixture.enable_legacy_research();
-    fixture
-        .legacy_research
-        .as_ref()
-        .unwrap()
-        .capabilities()
-        .await
-        .unwrap();
-    let before = fixture_artifacts(&fixture.root);
-    let response = fixture
-        .legacy_request(
-            AgentOperation::PortfolioScenario {
-                request: two_position_scenario(),
-            },
-            None,
-        )
-        .await;
-    assert_eq!(response.request_id, "query-dispatch-request-001");
-    assert_eq!(response.status, AgentResponseStatus::Completed);
-    assert_eq!(response.quality, DataQuality::Fresh);
-    assert!(response.failure.is_none());
-    let data = response.result.unwrap();
-    assert_eq!(data["schema"], "okx.portfolio.scenario/v1");
-    assert_eq!(data["quality"], "assumed");
-    assert_eq!(data["execution"], "virtual_read_only");
-    assert_eq!(data["provenance"], "caller_supplied");
-    assert_eq!(data["exchange_post"], false);
-    assert_eq!(data["venue_margin_verified"], false);
-    assert_eq!(data["gross_notional_usd"], "300");
-    assert_eq!(data["margin_usd"], "30");
-    assert_eq!(data["gross_leverage_ratio"], "3");
-    assert_eq!(data["stress_price_pnl_usd"], "-20");
-    assert_eq!(data["liquidity_loss_usd"], "2");
-    assert_eq!(data["net_stress_pnl_usd"], "-22");
-    assert_eq!(data["stressed_equity_usd"], "78");
-    assert_eq!(data["drawdown_ratio"], "0.22");
-    // Independent 3-4-5 case: uncorrelated dollar volatilities 3 and 4
-    // have variance 25 and standard deviation 5. No VaR is exposed by this DTO.
-    assert_eq!(data["correlated_volatility_usd"], 5.0);
-    assert_eq!(data["correlation_basis"], "caller_supplied_psd");
-    assert_eq!(
-        data["positions"],
-        json!([
-            {"instrument":"BTC-USDT-SWAP","side":"long","price_pnl_usd":"-10","liquidity_loss_usd":"1","source":"caller_supplied"},
-            {"instrument":"ETH-USDT-SWAP","side":"short","price_pnl_usd":"-10","liquidity_loss_usd":"1","source":"caller_supplied"}
-        ])
-    );
-    assert_eq!(fixture_artifacts(&fixture.root), before);
-    fixture.finish().await;
-}
-
-#[tokio::test]
-async fn portfolio_scenario_public_dispatch_rejects_non_psd_and_invalid_parameters() {
-    use okx_ipc_contracts::analytics::ScenarioCorrelation;
-    let mut fixture = Fixture::new(empty_reference()).await;
-    fixture.enable_legacy_research();
-    fixture
-        .legacy_research
-        .as_ref()
-        .unwrap()
-        .capabilities()
-        .await
-        .unwrap();
-    let before = fixture_artifacts(&fixture.root);
-    let mut non_psd = two_position_scenario();
-    non_psd.positions.push(non_psd.positions[0].clone());
-    // Pairwise-valid correlations cannot all coexist: the first two perfect
-    // positive relationships require the third relationship to be positive.
-    non_psd.correlations = vec![
-        ScenarioCorrelation {
-            left: 0,
-            right: 1,
-            rho: 1.0,
-        },
-        ScenarioCorrelation {
-            left: 0,
-            right: 2,
-            rho: 1.0,
-        },
-        ScenarioCorrelation {
-            left: 1,
-            right: 2,
-            rho: -1.0,
-        },
-    ];
-    assert!(non_psd.valid());
-    rejection(
-        fixture
-            .legacy_request(AgentOperation::PortfolioScenario { request: non_psd }, None)
-            .await,
-        "CORRELATION_NOT_PSD",
-    );
-    let mut invalid = two_position_scenario();
-    invalid.positions[0].price_shock_bps = -10001;
-    rejection(
-        fixture
-            .legacy_request(AgentOperation::PortfolioScenario { request: invalid }, None)
-            .await,
-        "INVALID_COMMAND",
-    );
-    let mut invalid = two_position_scenario();
-    invalid.correlations[0].rho = 1.01;
-    rejection(
-        fixture
-            .legacy_request(AgentOperation::PortfolioScenario { request: invalid }, None)
-            .await,
-        "INVALID_COMMAND",
-    );
-    assert_eq!(fixture_artifacts(&fixture.root), before);
-    fixture.finish().await;
 }

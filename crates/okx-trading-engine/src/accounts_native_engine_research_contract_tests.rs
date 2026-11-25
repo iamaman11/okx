@@ -8,211 +8,21 @@ use crate::{
     finance_dispatch::FinanceDispatch,
     market_bootstrap::MarketBootstrapper,
     query::DispatchContext,
-    research_client::{ResearchClient, ResearchClientConfig, SourceHandler},
+    research_load_test_support::ResearchLoadFixture,
     runtime::{EngineContext, EngineDrainOutcome, run_engine_until},
 };
-use okx_ipc_contracts::research_ipc::HistoryCandle;
-use okx_ipc_contracts::{
-    NATIVE_CHILD_CONTROL_SCHEMA_V1, NativeChildOperation, NativeChildRequest,
-    analytics::*,
-    research_ipc::{PublicCandleCapture, PublicSourceReply, PublicSourceRequest, ResearchScope},
-};
+use okx_ipc_contracts::{NATIVE_CHILD_CONTROL_SCHEMA_V1, NativeChildOperation, NativeChildRequest};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering as CounterOrdering};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
 };
 
-#[derive(Default)]
-struct SourceReadWitness {
-    successful_requests: AtomicU64,
-    returned_rows: AtomicU64,
-}
-
-fn heavy_research(root: std::path::PathBuf, reads: Arc<SourceReadWitness>) -> ResearchClient {
-    let executable = std::path::PathBuf::from(
-        std::env::var_os("OKX_RESEARCH_SERVICE_TEST_EXE")
-            .expect("set OKX_RESEARCH_SERVICE_TEST_EXE"),
-    );
-    assert!(executable.is_file());
-    let source: SourceHandler = Arc::new(move |request| {
-        let reads = reads.clone();
-        Box::pin(async move {
-            let PublicSourceRequest::Candles { after, .. } = request else {
-                return Err("UNEXPECTED_SOURCE".into());
-            };
-            let cursor = after
-                .as_deref()
-                .ok_or("CURSOR_MISSING")?
-                .parse::<u64>()
-                .map_err(|e| e.to_string())?;
-            let upper = (cursor / 60_000).min(60_000);
-            let lower = upper.saturating_sub(100);
-            let rows = (lower..upper)
-                .rev()
-                .map(|i| HistoryCandle {
-                    open_time_ms: (i * 60_000).to_string(),
-                    open: "100".into(),
-                    high: "102".into(),
-                    low: "99".into(),
-                    close: if i % 2 == 0 { "100" } else { "101" }.into(),
-                    volume: "1".into(),
-                    volume_currency: "1".into(),
-                    volume_quote: None,
-                    confirmed: true,
-                })
-                .collect::<Vec<_>>();
-            reads
-                .returned_rows
-                .fetch_add(rows.len() as u64, CounterOrdering::Relaxed);
-            reads
-                .successful_requests
-                .fetch_add(1, CounterOrdering::Relaxed);
-            Ok(PublicSourceReply::Candles(PublicCandleCapture {
-                rows,
-                raw_body: b"synthetic closed candles".to_vec(),
-                acquired_at_ms: "1".into(),
-                http_delivery: None,
-            }))
-        })
-    });
-    ResearchClient::new(
-        ResearchClientConfig {
-            executable,
-            root,
-            scope: ResearchScope::new("engine-heavy".into()).unwrap(),
-        },
-        source,
-    )
-}
-fn heavy_grid(key: &str) -> ResearchRequest {
-    ResearchRequest::Grid {
-        idempotency_key: key.into(),
-        instruments: vec!["BTC-USDT".into()],
-        timeframe_ms: 60_000,
-        start_ms: 0,
-        end_ms: 60_000 * 60_000,
-        strategy_id: "ema_cross_v1".into(),
-        variants: (3..67)
-            .map(|slow| EmaParameters { fast: 2, slow }.into())
-            .collect(),
-        costs: ResearchCosts {
-            maker_fee_bps: 1.,
-            taker_fee_bps: 2.,
-            slippage_bps: 1.,
-            funding_mode: FundingMode::ZeroAssumption,
-        },
-        data_mode: ResearchDataMode::Counterfactual,
-        seed: 7,
-    }
-}
-
-fn boundary_grid(
-    key: &str,
-    instruments: usize,
-    bars_per_instrument: u64,
-    variants: usize,
-) -> ResearchRequest {
-    ResearchRequest::Grid {
-        idempotency_key: key.into(),
-        instruments: (0..instruments).map(|i| format!("TEST-{i}")).collect(),
-        timeframe_ms: 60_000,
-        start_ms: 0,
-        end_ms: 60_000 * bars_per_instrument,
-        strategy_id: "ema_cross_v1".into(),
-        variants: (0..variants)
-            .map(|i| {
-                EmaParameters {
-                    fast: 2,
-                    slow: 90 + i,
-                }
-                .into()
-            })
-            .collect(),
-        costs: ResearchCosts {
-            maker_fee_bps: 1.,
-            taker_fee_bps: 2.,
-            slippage_bps: 1.,
-            funding_mode: FundingMode::ZeroAssumption,
-        },
-        data_mode: ResearchDataMode::Counterfactual,
-        seed: 7,
-    }
-}
-
-/// Pre-source wire rejection on the *same real child process* used for the
-/// concurrent Grid/Finance campaign. Maximal valid plans are admission-only:
-/// executing a million-bar grid here would contaminate the bounded SLO run.
-async fn t10_real_worker_boundary_proof(
-    research: &ResearchClient,
-    reads: &SourceReadWitness,
-) -> serde_json::Value {
-    let before = reads.successful_requests.load(CounterOrdering::SeqCst);
-    let rows_before = reads.returned_rows.load(CounterOrdering::SeqCst);
-    assert_eq!(before, 0, "no source page may precede the boundary check");
-    assert_eq!(rows_before, 0);
-    for (name, request) in [
-        (
-            "one_million_bars_one_instrument_64",
-            boundary_grid("t10-max-bars", 1, 1_000_000, 64),
-        ),
-        (
-            "eight_instruments_one_million_bars_64",
-            boundary_grid("t10-max-eight", 8, 125_000, 64),
-        ),
-    ] {
-        assert!(request.valid(), "{name}: exact boundary must admit");
-    }
-    let mut rejected = serde_json::Map::new();
-    for (name, request) in [
-        (
-            "one_million_plus_one_bars",
-            boundary_grid("t10-over-bars", 1, 1_000_001, 64),
-        ),
-        (
-            "nine_instruments",
-            boundary_grid("t10-over-instruments", 9, 125_000, 64),
-        ),
-        (
-            "sixty_five_variants",
-            boundary_grid("t10-over-variants", 8, 125_000, 65),
-        ),
-    ] {
-        assert!(!request.valid(), "{name}: exceeding boundary must reject");
-        let error = tokio::time::timeout(Duration::from_secs(5), research.research(request))
-            .await
-            .expect("pre-source real Worker IPC rejection deadline")
-            .expect_err("invalid request must not create a Research job");
-        assert_eq!(error, "INVALID_RESEARCH_REQUEST", "{name}");
-        assert_eq!(
-            reads.successful_requests.load(CounterOrdering::SeqCst),
-            before
-        );
-        assert_eq!(
-            reads.returned_rows.load(CounterOrdering::SeqCst),
-            rows_before
-        );
-        rejected.insert(name.into(), serde_json::Value::String(error));
-    }
-    serde_json::json!({
-        "schema":"okx.518.t10-real-child-pre-source-boundaries/v1",
-        "route":"real_agent_to_separate_research_worker_ipc",
-        "admission_only_not_executed":["one_million_bars_one_instrument_64","eight_instruments_one_million_bars_64"],
-        "rejected_before_source":rejected,
-        "source_requests_before":before,
-        "source_requests_after":reads.successful_requests.load(CounterOrdering::SeqCst),
-        "returned_rows_before":rows_before,
-        "returned_rows_after":reads.returned_rows.load(CounterOrdering::SeqCst),
-        "full_scale_execution":"not_attempted",
-        "side_effects":"none",
-    })
-}
-async fn state(client: &ResearchClient, id: &str) -> serde_json::Value {
-    client
-        .research(ResearchRequest::Status { job_id: id.into() })
-        .await
-        .unwrap()
+// The independent, feature-gated Research fixture owns the Worker protocol,
+// typed source replies, boundary plans and real CPU grids. Engine only sees a
+// strict versioned JSONL receipt from the separate test executable.
+async fn state(client: &ResearchLoadFixture, id: &str) -> serde_json::Value {
+    client.status(id).await
 }
 
 fn latency_proof(mut samples: Vec<f64>, name: &str) -> serde_json::Value {
@@ -346,9 +156,7 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     )
     .unwrap();
     let bootstrap = MarketBootstrapper::new(api);
-    let reads = Arc::new(SourceReadWitness::default());
-    let research = heavy_research(fixture.root.join("heavy-research"), reads.clone());
-    let boundary_evidence = t10_real_worker_boundary_proof(&research, &reads).await;
+    let research = ResearchLoadFixture::launch(fixture.root.join("heavy-research")).await;
     fixture.trade = Arc::new(TradeService::new(
         fixture.registry.clone(),
         public.clone(),
@@ -383,7 +191,6 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
     let trade = fixture.trade.clone();
     let authority = fixture.authority.clone();
     let child = research.clone();
-    let source_reads = reads.clone();
     let (evidence_tx, evidence_rx) = tokio::sync::oneshot::channel();
     let (compute_tx, compute_rx) = tokio::sync::oneshot::channel();
     let until = async move {
@@ -410,22 +217,12 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
         // begins before the first source fetch. Every timed Finance group
         // still runs while the grids are active, or after deliberate loss.
         let phase_started = std::time::Instant::now();
-        let first = child.research(heavy_grid("heavy-one")).await.unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let second = child.research(heavy_grid("heavy-two")).await.unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let (first, second, boundary_evidence) = child.start().await;
         wait_for_grid_compute(&child, &first, &second).await;
         compute_tx.send(()).expect("compute phase receiver dropped");
         if disconnect_before_opening {
-            child.shutdown().await;
-            assert!(
-                child.diagnostic_job(&first).await.is_err(),
-                "child must actually disconnect"
-            );
+            child.disconnect().await;
+            child.rejected_while_disconnected(&first).await;
         }
         trade.update_governance(&authority).await.unwrap();
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -443,7 +240,7 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
         .await
         .expect("actual Engine maintenance failed to install opening");
         if disconnect_before_opening {
-            let restarted = state(&child, &first).await;
+            let restarted = child.reopen_status(&first).await;
             assert_eq!(restarted["id"], first);
             assert_eq!(
                 restarted["state"], "interrupted",
@@ -483,11 +280,9 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
             assert_eq!(owner.installation_id(), installation);
             if !disconnect_before_opening {
                 let began = std::time::Instant::now();
-                let snapshot =
-                    tokio::time::timeout(Duration::from_secs(2), child.diagnostic_job(&first))
-                        .await
-                        .expect("read-only Research IPC blocked by CPU")
-                        .unwrap();
+                let snapshot = tokio::time::timeout(Duration::from_secs(2), child.explain(&first))
+                    .await
+                    .expect("read-only Research IPC blocked by CPU");
                 research_explain_ms.push(began.elapsed().as_secs_f64() * 1000.0);
                 assert_eq!(snapshot["job"]["id"], first);
                 assert!(
@@ -549,10 +344,7 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
                 "real Grid must overlap entire MCP Finance measurement: {a} {b}"
             );
         }
-        let successful_requests = source_reads
-            .successful_requests
-            .load(CounterOrdering::Relaxed);
-        let returned_rows = source_reads.returned_rows.load(CounterOrdering::Relaxed);
+        let (successful_requests, returned_rows) = child.source_stats().await;
         assert!(
             successful_requests > 0 && returned_rows > 0,
             "real Research child must have fetched typed fixture source pages"
@@ -574,7 +366,7 @@ async fn run_phase(disconnect_before_opening: bool, with_mcp: bool) -> serde_jso
                 "returned_candle_rows":returned_rows,
                 "venue_http_reads":0,
                 "source_storage_page_reads":"not_measured",
-                "observation_scope":"request_and_rows_counted_in_native_source_handler"
+                "observation_scope":"request_and_rows_counted_in_research_owned_fixture_source_handler"
             },
             "phase_wall_ms_excluding_build":phase_started.elapsed().as_secs_f64() * 1000.0,
             "trading_requests_sent":0,
@@ -630,7 +422,7 @@ async fn engine_maintenance_and_stop_remain_independent_of_heavy_research_and_di
     );
 }
 
-async fn wait_for_grid_compute(child: &ResearchClient, first: &str, second: &str) {
+async fn wait_for_grid_compute(child: &ResearchLoadFixture, first: &str, second: &str) {
     tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             let a = state(child, first).await;

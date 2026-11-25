@@ -1,13 +1,41 @@
 use futures_util::{SinkExt, StreamExt};
 use okx_research_protocol::{analytics::MarketRequest, research_ipc::*};
+use sha2::{Digest, Sha256};
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+
+// These Research-owned, real-process witnesses replace the pre-cutover Engine
+// test harness without creating a second Windows IPC test target. The exact
+// 10/10 Windows process-test gate remains intact.
+#[path = "support/research_extra_witnesses.rs"]
+mod research_extra_witnesses;
+#[path = "support/research_legacy_witnesses.rs"]
+mod research_legacy_witnesses;
 
 fn codec() -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
         .max_frame_length(MAX_FRAME_BYTES)
         .new_codec()
+}
+
+fn expected_worker_sha256() -> &'static str {
+    static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DIGEST.get_or_init(|| {
+        use std::io::Read;
+        let mut binary = std::fs::File::open(env!("CARGO_BIN_EXE_okx-research-service"))
+            .expect("real Research Worker executable is required");
+        let mut hash = Sha256::new();
+        let mut page = [0_u8; 64 * 1024];
+        loop {
+            let bytes = binary.read(&mut page).expect("Research Worker EXE read");
+            if bytes == 0 {
+                break;
+            }
+            hash.update(&page[..bytes]);
+        }
+        format!("{:x}", hash.finalize())
+    })
 }
 async fn send(w: &mut FramedWrite<ChildStdin, LengthDelimitedCodec>, f: HostFrame) {
     w.send(bytes::Bytes::from(serde_json::to_vec(&f).unwrap()))
@@ -53,9 +81,20 @@ async fn start(
         },
     )
     .await;
-    assert!(
-        matches!(receive(&mut output).await, WorkerFrame::Hello { session: s, .. } if s == *session)
-    );
+    match receive(&mut output).await {
+        WorkerFrame::Hello {
+            session: actual,
+            producer_sha256,
+            ..
+        } if actual == *session => {
+            assert_eq!(
+                producer_sha256,
+                expected_worker_sha256(),
+                "real child Hello must identify the exact executable bytes"
+            );
+        }
+        other => panic!("Research child Hello identity mismatch: {other:?}"),
+    }
     (child, input, output)
 }
 
@@ -171,9 +210,28 @@ async fn child_round_trip_source_and_eof_restart() {
             },
         )
         .await;
-        assert!(
-            matches!(receive(&mut output).await, WorkerFrame::Response { id: got, result: Ok(_), .. } if got == id)
-        );
+        match receive(&mut output).await {
+            WorkerFrame::Response {
+                id: got,
+                result: Ok(WorkerReply::Product(value)),
+                ..
+            } if got == id => {
+                if number == 1 {
+                    assert_eq!(value["schema"], "okx.market.capabilities/v1");
+                    assert_eq!(value["limits"]["max_page_rows"], 50);
+                    assert!(
+                        value["operators"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|operator| {
+                                operator["name"] == "returns" && operator["unit"] == "ratio"
+                            })
+                    );
+                }
+            }
+            other => panic!("unexpected real Worker capability/explain response: {other:?}"),
+        }
     }
     let request: MarketRequest = serde_json::from_value(serde_json::json!({"action":"screen","instruments":["BTC-USDT"],"fields":["rolling_mean"],"timeframe_ms":60000,"start_ms":0,"end_ms":6000000})).unwrap();
     let id = RequestId::new("h3".into()).unwrap();
@@ -255,6 +313,7 @@ async fn child_round_trip_source_and_eof_restart() {
             .success()
     );
     std::fs::remove_dir_all(root).unwrap();
+    research_legacy_witnesses::causal_economics_and_portfolio_are_research_only().await;
 }
 
 #[tokio::test]
@@ -357,6 +416,7 @@ async fn strategy_outbox_publishes_once_and_recovers_committed_proposal_after_re
             .success()
     );
     std::fs::remove_dir_all(root).unwrap();
+    research_legacy_witnesses::cancel_and_durable_decision_replay_are_research_only().await;
 }
 
 use okx_research_protocol::analytics::ResearchRequest;
@@ -467,6 +527,9 @@ async fn cross_scope_restart_rejected() {
             .success()
     );
     std::fs::remove_dir_all(root).unwrap();
+    // The same real standalone Research process contract now owns T07/T08
+    // causal/holdout, immutable graph, and read-only locked-catalog witnesses.
+    research_extra_witnesses::t07_t08_market_and_catalog_witnesses().await;
 }
 #[tokio::test]
 async fn replay_and_wrong_session_terminate_worker() {

@@ -44,6 +44,82 @@ struct ResearchComponentManifestV1 {
     worker: ResearchComponentWorkerV1,
 }
 
+/// A future producer may explicitly opt into a new Ready-evidence policy.
+/// The archive layout stays independent of Engine and remains exactly three
+/// files. A v1 archive cannot acquire v2 semantics through an extra field.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResearchComponentManifestV2 {
+    schema: String,
+    repository_id: u64,
+    source_head_sha: String,
+    source_tree: String,
+    rust_version: String,
+    cargo_lock_sha256: String,
+    ci_status_policy: NamedResearchReadyPolicyV2,
+    worker: ResearchComponentWorkerV1,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+enum NamedResearchReadyPolicyV2 {
+    #[serde(rename = "okx.github.actions.research-ready/v2")]
+    ReadyV2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadyEvidencePolicy {
+    /// Existing installed CONTROL and the current producer retain this roster.
+    LegacyV1,
+    /// Only the explicit v2 manifest and typed policy string can select this.
+    NamedV2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResearchReadyGate {
+    Classify,
+    Architecture,
+    DependencyAudit,
+    CloudflareContracts,
+    ResearchWindows,
+    LinuxCore,
+    WindowsNative,
+}
+
+impl ResearchReadyGate {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Classify => "classify",
+            Self::Architecture => "architecture-contracts",
+            Self::DependencyAudit => "dependency-audit",
+            Self::CloudflareContracts => "cloudflare-mcp-contracts",
+            Self::ResearchWindows => "research-service-tests-windows",
+            Self::LinuxCore => "linux-core",
+            Self::WindowsNative => "windows-native",
+        }
+    }
+}
+
+const RESEARCH_READY_GATES: [ResearchReadyGate; 7] = [
+    ResearchReadyGate::Classify,
+    ResearchReadyGate::Architecture,
+    ResearchReadyGate::DependencyAudit,
+    ResearchReadyGate::CloudflareContracts,
+    ResearchReadyGate::ResearchWindows,
+    ResearchReadyGate::LinuxCore,
+    ResearchReadyGate::WindowsNative,
+];
+
+impl ReadyEvidencePolicy {
+    const fn gates(self) -> &'static [ResearchReadyGate] {
+        // There is no status rename in the current CI. Preserve the v1
+        // seven-job acceptance verbatim; a future migration must define a
+        // third version rather than silently adding names or aliases here.
+        match self {
+            Self::LegacyV1 | Self::NamedV2 => &RESEARCH_READY_GATES,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ResearchComponentWorkerV1 {
@@ -102,6 +178,7 @@ const MAX_RESEARCH_LOCK_BYTES: u64 = 4 * 1024 * 1024;
 const CURRENT_RESEARCH_POINTER: &str = "installed-research.json";
 const ROLLBACK_RESEARCH_POINTER: &str = "rollback-research.json";
 const RESEARCH_COMPONENT_SCHEMA_V1: &str = "okx.windows.research-component/v1";
+const RESEARCH_COMPONENT_SCHEMA_V2: &str = "okx.windows.research-component/v2";
 
 /// The parent CONTROL singleton is scoped to the interactive Windows session.
 /// Independent sessions therefore need an installation-scoped kernel guard
@@ -205,6 +282,44 @@ fn validate_component_bytes(c: &ComponentManifest, bytes: &[u8]) -> HostControlR
     Ok(())
 }
 
+fn decode_research_manifest(
+    bytes: &[u8],
+) -> HostControlResult<(ReadyEvidencePolicy, ResearchComponentManifestV1)> {
+    // Inspect the schema only to select a *strict* typed deserializer below.
+    // Never validate a serde_json::Value and then trust its fields: duplicate
+    // keys must still be rejected by the original typed deserialization.
+    let probe: Value = serde_json::from_slice(bytes)?;
+    match probe.get("schema").and_then(Value::as_str) {
+        Some(RESEARCH_COMPONENT_SCHEMA_V1) => Ok((
+            ReadyEvidencePolicy::LegacyV1,
+            serde_json::from_slice(bytes)?,
+        )),
+        Some(RESEARCH_COMPONENT_SCHEMA_V2) => {
+            let v2: ResearchComponentManifestV2 = serde_json::from_slice(bytes)?;
+            if v2.ci_status_policy != NamedResearchReadyPolicyV2::ReadyV2 {
+                return Err(HostControlError::ArtifactVerification(
+                    "unknown research Ready-evidence policy",
+                ));
+            }
+            Ok((
+                ReadyEvidencePolicy::NamedV2,
+                ResearchComponentManifestV1 {
+                    schema: v2.schema,
+                    repository_id: v2.repository_id,
+                    source_head_sha: v2.source_head_sha,
+                    source_tree: v2.source_tree,
+                    rust_version: v2.rust_version,
+                    cargo_lock_sha256: v2.cargo_lock_sha256,
+                    worker: v2.worker,
+                },
+            ))
+        }
+        _ => Err(HostControlError::ArtifactVerification(
+            "unknown research release schema or Ready-evidence version",
+        )),
+    }
+}
+
 /// An upload-artifact archive has exactly these three root files. In particular,
 /// it is not a bundle and cannot borrow an Engine, CONTROL, or Launcher image.
 fn parse_research_component_archive(
@@ -213,7 +328,7 @@ fn parse_research_component_archive(
     expected_tree: &str,
     run_id: u64,
     artifact_id: u64,
-) -> HostControlResult<(InstalledResearch, Vec<u8>)> {
+) -> HostControlResult<(InstalledResearch, Vec<u8>, ReadyEvidencePolicy)> {
     if !valid_hex(expected_head, 40)
         || !valid_hex(expected_tree, 40)
         || run_id == 0
@@ -255,13 +370,16 @@ fn parse_research_component_archive(
         ));
     }
 
-    let manifest: ResearchComponentManifestV1 = serde_json::from_slice(&read_entry(
+    let (policy, manifest) = decode_research_manifest(&read_entry(
         &mut archive,
         "manifest.json",
         MAX_MANIFEST_BYTES,
     )?)?;
-    if manifest.schema != RESEARCH_COMPONENT_SCHEMA_V1
-        || manifest.repository_id != REPOSITORY_ID
+    if !matches!(
+        (policy, manifest.schema.as_str()),
+        (ReadyEvidencePolicy::LegacyV1, RESEARCH_COMPONENT_SCHEMA_V1)
+            | (ReadyEvidencePolicy::NamedV2, RESEARCH_COMPONENT_SCHEMA_V2)
+    ) || manifest.repository_id != REPOSITORY_ID
         || manifest.source_head_sha != expected_head
         || manifest.source_tree != expected_tree
         || manifest.rust_version.trim().is_empty()
@@ -305,7 +423,7 @@ fn parse_research_component_archive(
         storage_version: manifest.worker.storage_version,
     };
     validate_research_record(&record)?;
-    Ok((record, worker))
+    Ok((record, worker, policy))
 }
 
 /// This is a CONTROL trust anchor only: it examines its own active record and
@@ -392,20 +510,12 @@ fn is_canonical_ci_workflow_path(path: &str) -> bool {
 /// A green workflow by itself can be a Draft run whose required Ready checks
 /// never executed. Bind the accepted component to *this attempt's* completed
 /// required jobs, not another attempt or a similarly named Draft artifact.
-fn validate_research_release_jobs(
+fn validate_research_ready_jobs_for_policy(
+    policy: ReadyEvidencePolicy,
     run: &WorkflowRun,
     artifact: &WorkflowArtifact,
     jobs: &[WorkflowJob],
 ) -> HostControlResult<()> {
-    const READY_JOBS: [&str; 7] = [
-        "classify",
-        "architecture-contracts",
-        "dependency-audit",
-        "cloudflare-mcp-contracts",
-        "research-service-tests-windows",
-        "linux-core",
-        "windows-native",
-    ];
     if run.name != "CI"
         || !is_canonical_ci_workflow_path(&run.path)
         || run.event != "pull_request"
@@ -443,7 +553,8 @@ fn validate_research_release_jobs(
             ));
         }
     }
-    for name in READY_JOBS {
+    for gate in policy.gates() {
+        let name = gate.name();
         if !jobs.iter().any(|job| {
             job.name == name
                 && job.status == "completed"
@@ -501,9 +612,9 @@ pub async fn deploy_research(
             "research component is not from accepted PR CI",
         ));
     }
-    // DeployResearch has exactly one accepted release format. Historical v2
-    // bundles can still install native components via their own commands, but
-    // can never bypass Ready checks or inspect Engine through Research deploy.
+    // DeployResearch accepts only the independent three-file Research archive,
+    // whose manifest has an explicitly selected v1 or v2 Ready policy. Native
+    // bundles can never bypass these checks or enter Research-only deploy.
     if artifact.name != format!("okx-research-component-{}", run.head_sha) {
         return Err(HostControlError::ArtifactVerification(
             "standalone research artifact name does not bind to PR head",
@@ -514,7 +625,11 @@ pub async fn deploy_research(
     let jobs = github
         .workflow_run_attempt_jobs(run_id, run.run_attempt)
         .await?;
-    validate_research_release_jobs(&run, &artifact, &jobs)?;
+    // Retain the original v1 Ready gate *before* fetching an archive. V2
+    // deliberately pins the same seven names today; its explicit manifest
+    // policy is then checked again below. Any future status migration must
+    // update both gates atomically and may only fail closed in older CONTROL.
+    validate_research_ready_jobs_for_policy(ReadyEvidencePolicy::LegacyV1, &run, &artifact, &jobs)?;
     if !valid_hex(expected_source_tree, 40)
         || github.repository_commit_tree(&run.head_sha).await? != expected_source_tree
         || github.repository_commit_tree("main").await? != expected_source_tree
@@ -524,13 +639,18 @@ pub async fn deploy_research(
     let zip_bytes = github.download_artifact_zip(artifact_id).await?;
     verify_research_zip_digest(&artifact, &zip_bytes)?;
     let archive_ready = Instant::now();
-    let (record, worker) = parse_research_component_archive(
+    let (record, worker, policy) = parse_research_component_archive(
         &zip_bytes,
         &run.head_sha,
         expected_source_tree,
         run_id,
         artifact_id,
     )?;
+    // This untrusted archive can only *select* a policy after its own ZIP
+    // digest, immutable source tree, three-file shape and typed manifest have
+    // been verified. No installation mutation happens before the exact
+    // policy-specific Ready jobs from this run attempt have all succeeded.
+    validate_research_ready_jobs_for_policy(policy, &run, &artifact, &jobs)?;
     verify_active_control_identity()?;
     let verified = Instant::now();
     let (status, staged) = activate_verified_research_image(supervisor, &record, &worker)?;
@@ -1098,7 +1218,7 @@ pub(super) fn parse_bundle_compatible(zip_bytes: &[u8]) -> HostControlResult<Ver
     }
     // Native Agent/Launcher installation still recognizes a complete v2
     // release with all fresh, self-origin components. Mixed-origin v2 archives
-    // are never accepted by DeployResearch (standalone v1 only).
+    // are never accepted by DeployResearch (standalone Research v1/v2 only).
     let mut files = BTreeMap::new();
     let mut contents = BTreeMap::new();
     for name in COMPONENT_NAMES {
@@ -1144,6 +1264,16 @@ pub(super) fn parse_bundle_compatible(zip_bytes: &[u8]) -> HostControlResult<Ver
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn validate_research_release_jobs(
+        run: &WorkflowRun,
+        artifact: &WorkflowArtifact,
+        jobs: &[WorkflowJob],
+    ) -> HostControlResult<()> {
+        // Preserve every original v1 negative case verbatim; the production
+        // call must always supply a policy selected by the trusted manifest.
+        validate_research_ready_jobs_for_policy(ReadyEvidencePolicy::LegacyV1, run, artifact, jobs)
+    }
 
     use crate::research_supervisor::ResearchSupervisor;
 
@@ -1203,7 +1333,32 @@ mod tests {
         (manifest, bytes)
     }
 
-    fn parse_standalone(bytes: &[u8]) -> HostControlResult<(InstalledResearch, Vec<u8>)> {
+    fn standalone_v2_fixture() -> (Value, Vec<u8>) {
+        let (mut manifest, _) = standalone_fixture();
+        manifest["schema"] = json!(RESEARCH_COMPONENT_SCHEMA_V2);
+        manifest["ci_status_policy"] = json!("okx.github.actions.research-ready/v2");
+        let zip = standalone_fixture_zip(manifest.clone(), &[], None);
+        (manifest, zip)
+    }
+
+    fn standalone_raw_manifest_zip(manifest: &[u8]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        let pe = fixture_pe_image();
+        for (name, bytes) in [
+            ("manifest.json", manifest),
+            ("Cargo.lock", b"lock bytes".as_slice()),
+            ("okx-research-service.exe", pe.as_slice()),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn parse_standalone(
+        bytes: &[u8],
+    ) -> HostControlResult<(InstalledResearch, Vec<u8>, ReadyEvidencePolicy)> {
         parse_research_component_archive(bytes, &"a".repeat(40), &"b".repeat(40), 11, 12)
     }
 
@@ -1282,7 +1437,8 @@ mod tests {
     #[test]
     fn independent_research_component_strict_three_file_release() {
         let (manifest, zip) = standalone_fixture();
-        let (record, worker) = parse_standalone(&zip).unwrap();
+        let (record, worker, policy) = parse_standalone(&zip).unwrap();
+        assert_eq!(policy, ReadyEvidencePolicy::LegacyV1);
         assert_eq!(record.run_id, 11);
         assert_eq!(record.artifact_id, 12);
         assert_eq!(worker, fixture_pe_image());
@@ -1323,6 +1479,98 @@ mod tests {
         let mut changed = manifest;
         changed["unexpected_engine"] = json!(true);
         assert!(parse_standalone(&standalone_fixture_zip(changed, &[], None)).is_err());
+    }
+
+    #[test]
+    fn research_ready_policy_v2_requires_exact_explicit_manifest_and_statuses() {
+        let (manifest, zip) = standalone_v2_fixture();
+        let (record, worker, policy) = parse_standalone(&zip).unwrap();
+        assert_eq!(policy, ReadyEvidencePolicy::NamedV2);
+        assert_eq!(record.schema, "okx.host-control.installed-research/v1");
+        assert_eq!(record.worker_sha256, sha256_hex(&worker));
+
+        let (run, artifact, jobs) = ready_jobs();
+        validate_research_ready_jobs_for_policy(policy, &run, &artifact, &jobs).unwrap();
+        assert_eq!(policy.gates().len(), 7);
+        // A Ready policy upgrade does not license a renaming of protected or
+        // installed CONTROL job identities. Every required status is still
+        // an actual completed success in the same first attempt.
+        for gate in policy.gates() {
+            let missing: Vec<_> = jobs
+                .iter()
+                .filter(|job| job.name != gate.name())
+                .cloned()
+                .collect();
+            assert!(
+                validate_research_ready_jobs_for_policy(policy, &run, &artifact, &missing).is_err(),
+                "v2 accepted missing {}",
+                gate.name()
+            );
+        }
+        let mut renamed = jobs.clone();
+        renamed[0].name = "classify-v2".into();
+        assert!(
+            validate_research_ready_jobs_for_policy(policy, &run, &artifact, &renamed).is_err()
+        );
+        let mut skipped = jobs.clone();
+        skipped[1].conclusion = Some("skipped".into());
+        assert!(
+            validate_research_ready_jobs_for_policy(policy, &run, &artifact, &skipped).is_err()
+        );
+        let mut wrong_attempt = run.clone();
+        wrong_attempt.run_attempt = 2;
+        assert!(
+            validate_research_ready_jobs_for_policy(policy, &wrong_attempt, &artifact, &jobs)
+                .is_err()
+        );
+        let mut duplicate = jobs.clone();
+        duplicate.push(jobs[0].clone());
+        assert!(
+            validate_research_ready_jobs_for_policy(policy, &run, &artifact, &duplicate).is_err()
+        );
+
+        let mut bad = manifest.clone();
+        bad.as_object_mut().unwrap().remove("ci_status_policy");
+        assert!(parse_standalone(&standalone_fixture_zip(bad, &[], None)).is_err());
+        for value in [
+            json!("okx.github.actions.research-ready/v1"),
+            json!("okx.github.actions.research-ready/v3"),
+            json!(""),
+            json!(null),
+            json!(["okx.github.actions.research-ready/v2"]),
+        ] {
+            let mut bad = manifest.clone();
+            bad["ci_status_policy"] = value;
+            assert!(parse_standalone(&standalone_fixture_zip(bad, &[], None)).is_err());
+        }
+        let mut unknown = manifest.clone();
+        unknown["unreviewed_ready_alias"] = json!(true);
+        assert!(parse_standalone(&standalone_fixture_zip(unknown, &[], None)).is_err());
+        let mut unknown_version = manifest.clone();
+        unknown_version["schema"] = json!("okx.windows.research-component/v3");
+        assert!(parse_standalone(&standalone_fixture_zip(unknown_version, &[], None)).is_err());
+
+        let (mut legacy, _) = standalone_fixture();
+        legacy["ci_status_policy"] = json!("okx.github.actions.research-ready/v2");
+        assert!(parse_standalone(&standalone_fixture_zip(legacy, &[], None)).is_err());
+
+        // The schema dispatch probe uses serde_json::Value, which ignores
+        // duplicates. Deserializing the original bytes as a strict struct
+        // must still reject a duplicate v2 policy rather than choosing one.
+        let original = serde_json::to_string(&manifest).unwrap();
+        let field = "\"ci_status_policy\":\"okx.github.actions.research-ready/v2\"";
+        assert!(original.contains(field));
+        let duplicate_policy = original.replacen(field, &format!("{field},{field}"), 1);
+        assert!(
+            parse_standalone(&standalone_raw_manifest_zip(duplicate_policy.as_bytes())).is_err()
+        );
+        let schema_field = format!("\"schema\":\"{RESEARCH_COMPONENT_SCHEMA_V2}\"");
+        assert!(original.contains(&schema_field));
+        let duplicate_schema =
+            original.replacen(&schema_field, &format!("{schema_field},{schema_field}"), 1);
+        assert!(
+            parse_standalone(&standalone_raw_manifest_zip(duplicate_schema.as_bytes())).is_err()
+        );
     }
 
     #[test]
@@ -1427,7 +1675,8 @@ mod tests {
         fs::create_dir_all(&runtime).unwrap();
         fs::create_dir_all(&control).unwrap();
         let (_, zip) = standalone_fixture();
-        let (first, worker) = parse_standalone(&zip).unwrap();
+        let (first, worker, policy) = parse_standalone(&zip).unwrap();
+        assert_eq!(policy, ReadyEvidencePolicy::LegacyV1);
         let mut supervisor = ResearchSupervisor::at(control, runtime.clone()).unwrap();
         let staged = prepare_research_transition(&runtime, &first, &worker).unwrap();
         supervisor

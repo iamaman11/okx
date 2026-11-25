@@ -5,10 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[features]
-# Test-only adapter for the historical Engine-child Research IPC witnesses.
-legacy-research-test = ["okx-ipc-contracts/legacy-research-test"]
-
 [dependencies]
 jiff = "1.0"
 okx-api = { path = "../okx-api" }

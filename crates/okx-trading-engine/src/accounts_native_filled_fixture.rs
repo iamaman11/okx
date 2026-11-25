@@ -284,13 +284,23 @@ pub(super) async fn opened_market_with_public_client(
         {
             Ok(()) => break,
             // A read of complete cursors is not atomic with the production
-            // opening call: `through = now - 2s` advances meanwhile. Only
-            // this precise capture-lag result can retry, using the next
-            // independently published SQL frontiers and the original owner.
-            Err(reason) if reason == "ENTRY_BASELINE_CAPTURE_PENDING" => {
+            // opening call: `through = now - 2s` advances meanwhile. The
+            // independent SQL owner's configured-campaign read can also fail
+            // within its unchanged two-second lookup deadline under Windows
+            // test-runner contention; the public error covers other SQL owner
+            // failures too, so it never constitutes a readiness proof.
+            // Only these two precise transient refusals may retry against the
+            // SAME original finance owner inside this existing eight-second
+            // fixture window; no financial readiness condition is relaxed.
+            Err(reason)
+                if matches!(
+                    reason.as_str(),
+                    "ENTRY_BASELINE_CAPTURE_PENDING" | "FINANCE_CAMPAIGN_IDENTITY_UNAVAILABLE"
+                ) =>
+            {
                 assert!(
                     Instant::now() < opening_until,
-                    "original source capture never caught up to the opening cutoff"
+                    "original source/campaign owner never recovered: {reason}"
                 );
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }

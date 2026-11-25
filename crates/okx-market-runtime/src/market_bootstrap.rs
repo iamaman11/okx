@@ -1,6 +1,3 @@
-#[cfg(feature = "legacy-research-test")]
-mod legacy_research_source;
-
 use std::collections::BTreeMap;
 
 use jiff::Timestamp;
@@ -477,98 +474,6 @@ impl MarketBootstrapper {
 mod tests {
     use super::*;
     use okx_api::PublicInstrument;
-
-    #[cfg(feature = "legacy-research-test")]
-    #[tokio::test]
-    async fn catalog_source_uses_host_public_get_and_shared_rate_budget() {
-        use okx_api::{HttpSend, HttpTransport, RawHttpResponse};
-        use okx_ipc_contracts::research_ipc::{PublicSourceReply, PublicSourceRequest};
-        use std::sync::{Arc, Mutex};
-
-        struct PublicOnly(Mutex<Vec<String>>);
-        impl HttpTransport for PublicOnly {
-            fn send(&self, request: okx_api::HttpRequest, _: std::time::Instant) -> HttpSend<'_> {
-                assert_eq!(request.method().as_str(), "GET");
-                assert!(request.headers().get("OK-ACCESS-KEY").is_none());
-                let path = request.url().path().to_owned();
-                let query = request.url().query().unwrap_or_default().to_owned();
-                self.0.lock().unwrap().push(format!("{path}?{query}"));
-                Box::pin(async {
-                    Ok(RawHttpResponse {
-                        status: okx_api::HttpStatusCode::OK,
-                        headers: Default::default(),
-                        body: serde_json::to_vec(&serde_json::json!({
-                            "code": "0",
-                            "msg": "",
-                            "data": [{
-                                "instId": "BTC-USDT-SWAP",
-                                "tradeId": "1",
-                                "px": "100.5",
-                                "sz": "2",
-                                "ts": "1234",
-                            }],
-                        }))
-                        .unwrap(),
-                    })
-                })
-            }
-        }
-        let transport = Arc::new(PublicOnly(Mutex::new(Vec::new())));
-        let rate = okx_api::RateBudget::new();
-        let source = MarketBootstrapper::new(
-            OkxPublicClient::with_http_transport(
-                okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
-                rate.clone(),
-                transport.clone(),
-            )
-            .unwrap(),
-        );
-        let call = |route: &str| PublicSourceRequest::CatalogPage {
-            route: route.into(),
-            instrument: "BTC-USDT-SWAP".into(),
-            after: None,
-            before: None,
-            limit: 2,
-        };
-        for route in ["recent_trades", "history_trades"] {
-            let PublicSourceReply::CatalogPage(capture) =
-                source.research_source(call(route)).await.unwrap()
-            else {
-                panic!("unexpected public source response");
-            };
-            assert_eq!(capture.route, route);
-            assert_eq!(capture.rows.len(), 1);
-            assert_eq!(capture.rows[0]["tradeId"], "1");
-            assert_eq!(capture.http_delivery.transport_send_invocations, 1);
-            assert_eq!(
-                capture.http_delivery.response_body_bytes,
-                capture.raw_body.len() as u64
-            );
-            assert!(!capture.acquired_at_ms.is_empty());
-        }
-        assert!(rate.snapshot().tracked_domains >= 2);
-        assert_eq!(
-            transport
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec![
-                "/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=2",
-                "/api/v5/market/history-trades?instId=BTC-USDT-SWAP&type=1&limit=2",
-            ]
-        );
-        for forbidden in [
-            "https://evil.invalid",
-            "/api/v5/trade/order",
-            "private_account",
-        ] {
-            assert!(source.research_source(call(forbidden)).await.is_err());
-        }
-        assert_eq!(transport.0.lock().unwrap().len(), 2);
-    }
 
     #[test]
     fn market_source_scope_is_bound_to_native_public_client_environment() {

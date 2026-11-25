@@ -8,7 +8,7 @@ const {verify} = require('./ci-cargo-closure-proof.cjs');
 const root = '/tmp/ci-head';
 const base = '/tmp/ci-base';
 const owners = ['okx-trading-engine', 'okx-trade-execution', 'okx-host-controller',
-  'okx-host-launcher', 'okx-host-protocol', 'okx-research-service', 'okx-research', 'okx-strategy-core',
+  'okx-host-launcher', 'okx-host-protocol', 'okx-bridge-mcp', 'okx-research-service', 'okx-research', 'okx-strategy-core',
   'okx-ipc-contracts', 'okx-research-protocol', 'okx-research-domain'];
 const external = name => `registry+https://github.com/rust-lang/crates.io-index#${name}@1.0.0`;
 const edge = (pkg, kind = null, target = null) => ({name: pkg.split('#')[0], pkg,
@@ -18,6 +18,7 @@ const dependencies = {
   'okx-trade-execution': [edge(external('serde'), 'dev')],
   'okx-host-controller': [edge('okx-host-launcher'), edge('okx-host-protocol'), edge('okx-ipc-contracts')],
   'okx-host-protocol': [edge('okx-ipc-contracts')],
+  'okx-bridge-mcp': [edge('okx-host-protocol'), edge('okx-ipc-contracts')],
   'okx-research-service': [edge('okx-research'), edge('okx-strategy-core'), edge('okx-ipc-contracts')],
   'okx-research': [edge('okx-strategy-core')],
   'okx-research-protocol': [edge('okx-research-domain')],
@@ -29,11 +30,13 @@ function metadata(workspaceRoot = root) {
       manifest_path: path.join(workspaceRoot, 'crates', name, 'Cargo.toml'),
       edition: '2024', rust_version: null, links: null,
       features: {default: []},
-      targets: [{name, kind: ['lib'], crate_types: ['lib'], edition: '2024'}]})),
+      targets: [{name, kind: ['lib'], crate_types: ['lib'], edition: '2024',
+        src_path: path.join(workspaceRoot, 'crates', name, 'src', 'lib.rs')}]})),
     ...externalNames.map(name => ({id: external(name), name, version: '1.0.0',
       source: 'registry+https://github.com/rust-lang/crates.io-index',
       checksum: name.repeat(4), manifest_path: `/tmp/registry/${name}/Cargo.toml`,
-      features: {}, targets: [{name, kind: ['lib'], crate_types: ['lib']}]})),
+      features: {}, targets: [{name, kind: ['lib'], crate_types: ['lib'],
+        src_path: `/tmp/registry/${name}/src/lib.rs`}]})),
   ];
   return {workspace_root: workspaceRoot, workspace_members: owners,
     packages, resolve: {nodes: packages.map(pkg => ({id: pkg.id,
@@ -46,10 +49,17 @@ const host = files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock');
 const head = metadata(), before = metadata(base);
 
 assert.equal(verify(before, head, research, 'research').protected_closures_identical, true);
+assert.ok(verify(before, head, research, 'research').protected_roots.includes('okx-bridge-mcp'),
+  'RESEARCH_WIRE_MUST_PRESERVE_BRIDGE_MCP_CONSUMER');
 assert.equal(verify(before, head, files('crates/okx-research-protocol/src/analytics.rs'),
   'research').protected_closures_identical, true);
 assert.equal(verify(before, head, files('crates/okx-research-domain/src/numeric.rs'),
   'research').protected_closures_identical, true);
+// A filename-only list discards GH status and previous_filename provenance;
+// it must never stand in for the verified immutable compare API pages.
+assert.throws(() => verify(before, head,
+  ['crates/okx-research-protocol/src/analytics.rs'], 'research'),
+  /CARGO_DIFF_NOT_VERIFIED/);
 assert.equal(verify(before, head, files('crates/okx-research-service/Cargo.toml',
   'crates/okx-research-service/src/edge_runtime.rs',
   'crates/okx-research-service/tests/edge_wss.rs'), 'research').protected_closures_identical, true);
@@ -93,6 +103,14 @@ reject(m => m.packages.find(p => p.id === external('sqlite')).checksum = 'other-
 reject(m => m.packages.find(p => p.id === 'okx-trade-execution').features.new = ['ipc']);
 reject(m => m.packages.find(p => p.id === 'okx-trading-engine').targets[0]
   ['required-features'] = ['instrumented']);
+reject(m => m.packages.find(p => p.id === 'okx-trading-engine').targets[0]
+  .src_path = path.join(root, 'crates', 'okx-trading-engine', 'src', 'alternate.rs'));
+reject(m => m.packages.find(p => p.id === 'okx-research-service').targets[0]
+  .src_path = path.join(root, 'crates', 'okx-trading-engine', 'src', 'main.rs'));
+reject(m => m.packages.find(p => p.id === 'okx-trading-engine').targets[0]
+  .src_path = '../outside.rs');
+reject(m => m.packages.find(p => p.id === 'okx-trading-engine').targets[0]
+  .src_path = null);
 reject(m => m.resolve.nodes.find(n => n.id === 'okx-trading-engine').deps[0].name = 'renamed');
 reject(m => m.resolve.nodes.find(n => n.id === 'okx-host-controller')
   .deps.push(edge(external('serde'))));
@@ -120,9 +138,33 @@ for (const diff of [
   files('crates/okx-research-service/Cargo.toml', 'crates/okx-analysis/README.md'),
   files('crates/okx-research-service/Cargo.toml', 'crates/okx-strategy-core/examples/strategy.rs'),
   [[{filename: 'crates/okx-research-service/Cargo.toml', status: 'renamed', previous_filename: 'x'}]],
+  [[{filename: 'crates/okx-research-protocol/src/analytics.rs', status: 'renamed',
+    previous_filename: 'crates/okx-trading-engine/src/research_client.rs'}]],
+  [[{filename: 'crates/okx-research-protocol/src/analytics.rs', status: 'modified',
+    previous_filename: 'crates/okx-trading-engine/src/research_client.rs'}]],
+  [[{filename: 'crates/okx-research-protocol/src/analytics.rs', status: 'added'}]],
+  [[{filename: 'crates/okx-research-protocol/src/analytics.rs', status: 'removed'}]],
+  [[{filename: 'crates/okx-research-protocol/src/analytics.rs', status: 'added'},
+    {filename: 'crates/okx-trading-engine/src/research_client.rs', status: 'removed'}]],
   [[{filename: '../Cargo.toml', status: 'modified'}]],
   [[]], [],
 ]) assert.throws(() => verify(before, head, diff, 'research'));
+for (const [scope, pathName] of [
+  ['research', 'crates/okx-research-service/Cargo.toml'],
+  ['host-controller', 'crates/okx-host-controller/Cargo.toml'],
+  ['host-launcher', 'crates/okx-host-launcher/Cargo.toml'],
+  ['research', 'Cargo.lock'],
+]) {
+  const candidate = scope === 'research' && pathName === 'Cargo.lock'
+    ? 'crates/okx-research-service/Cargo.toml' : pathName;
+  for (const status of ['added', 'removed']) {
+    const entries = [{filename: candidate, status: 'modified'}];
+    if (candidate === pathName) entries[0].status = status;
+    else entries.push({filename: pathName, status});
+    assert.throws(() => verify(before, head, [entries], scope),
+      /CARGO_PROOF_REQUIRES_EXISTING_MODIFIED_OWNER_INPUT/);
+  }
+}
 
 const included = structuredClone(head);
 included.resolve.nodes.find(n => n.id === 'okx-trading-engine').deps.push(edge('okx-research-service'));
@@ -144,6 +186,28 @@ for (const source of ['crates/okx-research-protocol/src/analytics.rs',
   'crates/okx-research-domain/src/numeric.rs']) {
   assert.throws(() => verify(legacyBase, legacyHead, files(source), 'research'),
     /EDITED_SOURCE_IN_PROTECTED_CARGO_CLOSURE/);
+  // The *transition commit* removing Engine's legacy dev dependency is itself
+  // a full Native change. Scope can narrow only on a later exact base/head
+  // pair whose protected Engine closure was already independent in both.
+  assert.throws(() => verify(legacyBase, head, files(source), 'research'),
+    /PROTECTED_WINDOWS_CARGO_CLOSURE_CHANGED:okx-trading-engine/);
+  assert.throws(() => verify(before, legacyHead, files(source), 'research'),
+    /PROTECTED_WINDOWS_CARGO_CLOSURE_CHANGED:okx-trading-engine/);
+}
+// Bridge also consumes the IPC contract and participates in Windows Host
+// regressions. An Engine-independent Research source cannot skip that consumer
+// if its test/dev closure still includes the changing Research protocol.
+const bridgeBase = structuredClone(before), bridgeHead = structuredClone(head);
+for (const graph of [bridgeBase, bridgeHead]) {
+  graph.resolve.nodes.find(n => n.id === 'okx-bridge-mcp')
+    .deps.push(edge('okx-research-protocol', 'dev'));
+}
+for (const source of ['crates/okx-research-protocol/src/analytics.rs',
+  'crates/okx-research-domain/src/numeric.rs']) {
+  assert.throws(() => verify(bridgeBase, bridgeHead, files(source), 'research'),
+    /EDITED_SOURCE_IN_PROTECTED_CARGO_CLOSURE/);
+  assert.throws(() => verify(bridgeBase, head, files(source), 'research'),
+    /PROTECTED_WINDOWS_CARGO_CLOSURE_CHANGED:okx-bridge-mcp/);
 }
 
 console.log('CI_WINDOWS_CARGO_CLOSURE_NEGATIVE_CONTROLS=PASS');

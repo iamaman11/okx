@@ -4,8 +4,6 @@ pub mod accounts;
 pub mod crypto;
 pub mod host_state_proto;
 pub use okx_engine_domain::numeric;
-#[cfg(feature = "legacy-research-test")]
-pub use okx_research_protocol::{analytics, research_ipc};
 pub mod risk_authority;
 pub mod trading;
 
@@ -94,14 +92,8 @@ pub enum ProtocolError {
     #[error("invalid history limit")]
     InvalidHistoryLimit,
 
-    #[error("market research requires 2..=8 unique instruments")]
-    InvalidMarketResearchInstruments,
-
     #[error("invalid analytical query plan: {0}")]
     InvalidAnalyticalQuery(&'static str),
-
-    #[error("invalid research request: {0}")]
-    InvalidResearchRequest(&'static str),
 
     #[error("invalid authenticated governance or risk message")]
     InvalidGovernance,
@@ -232,18 +224,10 @@ pub enum AgentOperation {
         operation_id: String,
         request_digest: String,
     },
-    #[cfg(feature = "legacy-research-test")]
-    Market {
-        request: analytics::MarketRequest,
-    },
     MarketCapabilities,
     MarketMicrostructure {
         instrument: String,
         size_contracts: Option<String>,
-    },
-    #[cfg(feature = "legacy-research-test")]
-    Research {
-        request: analytics::ResearchRequest,
     },
     Trade {
         request: trading::TradeRequest,
@@ -253,10 +237,6 @@ pub enum AgentOperation {
     },
     Portfolio {
         request: trading::PortfolioRequest,
-    },
-    #[cfg(feature = "legacy-research-test")]
-    PortfolioScenario {
-        request: analytics::PortfolioScenarioRequest,
     },
     Diagnostics {
         request: trading::DiagnosticsRequest,
@@ -306,12 +286,6 @@ impl AgentOperation {
             | Self::MarketOverview { .. }
             | Self::AccountSummary
             | Self::MailboxTelemetry => C::Read,
-            // The pre-cutover IPC creates durable Research jobs and must not
-            // be granted generic read-only mailbox authority, even in tests.
-            #[cfg(feature = "legacy-research-test")]
-            Self::Market { .. } | Self::Research { .. } | Self::PortfolioScenario { .. } => {
-                C::Maintenance
-            }
         }
     }
     pub fn requires_account(&self) -> bool {
@@ -339,8 +313,6 @@ impl AgentOperation {
                         .bytes()
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             }
-            #[cfg(feature = "legacy-research-test")]
-            Self::Market { request } => request.valid(),
             Self::MarketCapabilities => true,
             Self::MarketMicrostructure {
                 instrument,
@@ -352,13 +324,9 @@ impl AgentOperation {
                             .is_ok_and(|n| n.is_finite() && n > 0.0 && n <= 1_000_000.0)
                     })
             }
-            #[cfg(feature = "legacy-research-test")]
-            Self::Research { request } => request.valid(),
             Self::Trade { request } => request.valid(),
             Self::Strategies { request } => request.valid(),
             Self::Portfolio { request } => request.valid(),
-            #[cfg(feature = "legacy-research-test")]
-            Self::PortfolioScenario { request } => request.valid(),
             Self::Diagnostics { request } => request.valid(),
             Self::FindInstruments {
                 asset,
@@ -919,37 +887,6 @@ mod product_contract_tests {
             let value = serde_json::json!({"type":operation,"intent_id":"intent_12345678"});
             assert!(serde_json::from_value::<AgentOperation>(value).is_err());
         }
-    }
-    #[cfg(feature = "legacy-research-test")]
-    #[test]
-    fn worker_universe_only_request_decodes_through_native_agent_envelope() {
-        let body = serde_json::json!({
-            "schema": AGENT_REQUEST_SCHEMA_V1,
-            "request_id": "a".repeat(64),
-            "operation": {
-                "type": "market",
-                "request": {
-                    "action": "screen",
-                    "universe": { "instrument_type": "SWAP", "limit": 50 },
-                    "fields": ["return_pct"],
-                    "timeframe_ms": 60000,
-                    "start_ms": 60000,
-                    "end_ms": 180000,
-                    "limit": 50
-                }
-            }
-        });
-        let decoded: AgentRequest = serde_json::from_value(body.clone()).unwrap();
-        assert!(decoded.validate().is_ok());
-        let AgentOperation::Market { request } = decoded.operation else {
-            panic!("wrong action")
-        };
-        assert!(request.instruments.is_empty());
-        assert!(request.universe.is_some());
-        let mut ambiguous = body;
-        ambiguous["operation"]["request"]["instruments"] = serde_json::json!(["BTC-USDT-SWAP"]);
-        let parsed: AgentRequest = serde_json::from_value(ambiguous).unwrap();
-        assert!(parsed.validate().is_err());
     }
     #[test]
     fn account_reference_is_preserved_in_transport() {

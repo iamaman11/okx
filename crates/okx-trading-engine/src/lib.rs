@@ -25,11 +25,7 @@ mod portfolio;
 pub mod query;
 pub mod reference_bootstrap;
 #[cfg(test)]
-mod research_client;
-#[cfg(test)]
-mod research_dispatch_tests;
-#[cfg(test)]
-mod research_test_support;
+mod research_load_test_support;
 pub mod source_capture;
 pub mod storage_commands;
 pub mod trade_service;
