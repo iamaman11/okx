@@ -39,6 +39,32 @@ use tokio_tungstenite::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(all(feature = "s2-disposable-windows", any(not(windows), not(debug_assertions))))]
+compile_error!("s2-disposable-windows is permitted only for disposable Windows debug Research binaries");
+
+#[cfg(all(windows, feature = "s2-disposable-windows", debug_assertions))]
+const S2_DISPOSABLE_EDGE_WSS: &str = "wss://127.0.0.1:9/s2-disposable";
+
+#[cfg(all(windows, feature = "s2-disposable-windows", debug_assertions))]
+fn s2_disposable_nonce_attested() -> bool {
+    let (Ok(allowed), Ok(sandbox)) = (
+        std::env::var("OKX_RESEARCH_S2_DISPOSABLE_NONCE"),
+        std::env::var("OKX_RESEARCH_SANDBOX_NONCE"),
+    ) else {
+        return false;
+    };
+    valid_s2_disposable_nonce_pair(&allowed, &sandbox)
+}
+
+#[cfg(all(windows, feature = "s2-disposable-windows", debug_assertions))]
+fn valid_s2_disposable_nonce_pair(allowed: &str, sandbox: &str) -> bool {
+    allowed == sandbox
+        && allowed.len() == 32
+        && allowed
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 const MAX_RESEARCH_IN_FLIGHT: usize = 6;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(80);
 const EDGE_WRITE_DEADLINE: Duration = Duration::from_secs(10);
@@ -57,6 +83,25 @@ fn edge_websocket_config() -> WebSocketConfig {
 
 const STARTUP_SCHEMA: &str = "okx.research.startup/v1";
 const STARTUP_MAX_BYTES: usize = 1536;
+
+/// Fail BEFORE sending a sandbox READY when the runner accidentally supplied
+/// a production endpoint or did not compile the disposable worker feature.
+/// A post-bearer origin check alone would let a fixture misreport success.
+#[cfg(windows)]
+pub fn preflight_edge_origin_before_ready() -> Result<(), String> {
+    let url = std::env::var("OKX_RESEARCH_EDGE_WSS_URL")
+        .map_err(|_| "RESEARCH_EDGE_ORIGIN_UNTRUSTED")?;
+    if url == "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime" {
+        // This preserves the production-only fixed endpoint, while CONTROL's
+        // compiled test separately forbids it under a disposable marker.
+        return Ok(());
+    }
+    #[cfg(all(feature = "s2-disposable-windows", debug_assertions))]
+    if url == S2_DISPOSABLE_EDGE_WSS && s2_disposable_nonce_attested() {
+        return Ok(());
+    }
+    Err("RESEARCH_EDGE_ORIGIN_UNTRUSTED".into())
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +211,15 @@ impl EdgeRuntimeConfig {
         // native release, never an environment-only URL substitution.
         #[cfg(windows)]
         if url != "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime" {
+            #[cfg(all(feature = "s2-disposable-windows", debug_assertions))]
+            if url == S2_DISPOSABLE_EDGE_WSS && s2_disposable_nonce_attested() {
+                // This is an exact loopback-only physical acceptance mode.
+                // The nonce is injected by a positively marked disposable
+                // CONTROL unit test; no arbitrary host or port is accepted.
+            } else {
+                return Err("RESEARCH_EDGE_ORIGIN_UNTRUSTED".into());
+            }
+            #[cfg(not(all(feature = "s2-disposable-windows", debug_assertions)))]
             return Err("RESEARCH_EDGE_ORIGIN_UNTRUSTED".into());
         }
         if runtime_id.is_empty()
@@ -845,6 +899,20 @@ mod tests {
             .as_deref(),
             Some("RESEARCH_EDGE_ORIGIN_UNTRUSTED")
         );
+    }
+
+    #[cfg(all(windows, feature = "s2-disposable-windows", debug_assertions))]
+    #[test]
+    fn disposable_loopback_requires_exact_matching_lowercase_nonce() {
+        let a = "a".repeat(32);
+        assert!(valid_s2_disposable_nonce_pair(&a, &a));
+        assert!(!valid_s2_disposable_nonce_pair(&a, &"b".repeat(32)));
+        assert!(!valid_s2_disposable_nonce_pair(&"A".repeat(32), &"A".repeat(32)));
+        assert!(!valid_s2_disposable_nonce_pair(&"a".repeat(31), &"a".repeat(31)));
+        assert!(!valid_s2_disposable_nonce_pair(
+            &format!("{}g", "a".repeat(31)),
+            &format!("{}g", "a".repeat(31))
+        ));
     }
 
     #[test]

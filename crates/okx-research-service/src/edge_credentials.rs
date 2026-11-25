@@ -56,8 +56,7 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, ERROR_ACCESS_DENIED, ERROR_NO_SUCH_LOGON_SESSION, ERROR_NOT_FOUND,
-            DELETE, GENERIC_READ, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE,
-            WRITE_DAC, WRITE_OWNER,
+            GENERIC_READ, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE,
         },
         Security::Credentials::{
             CRED_PERSIST_SESSION, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredEnumerateW,
@@ -68,6 +67,13 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
             FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
     };
+
+    // Standard NT access-mask bits (not exported from Win32::Foundation by
+    // the pinned windows-sys build). Keep these exact and independently
+    // requested so a broad-mask failure cannot hide a granted right.
+    const DELETE: u32 = 0x0001_0000;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const WRITE_OWNER: u32 = 0x0008_0000;
 
     fn denied_or_missing(error: u32) -> bool {
         matches!(

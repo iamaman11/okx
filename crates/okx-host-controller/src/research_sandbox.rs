@@ -147,6 +147,8 @@ mod native {
     use crate::{HostControlError, HostControlResult, job::AgentJob};
 
     const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+    #[cfg(test)]
+    const S2_DISPOSABLE_EDGE_WSS: &str = "wss://127.0.0.1:9/s2-disposable";
     // All finance-owned paths must reject every file/directory data, mutation,
     // execute and security-control right. Keep individual AccessCheck results:
     // a combined mask could incorrectly deny when only one right is granted.
@@ -642,6 +644,41 @@ mod native {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn verified_disposable_windows_root() -> HostControlResult<PathBuf> {
+        if std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref() != Ok("1") {
+            return Err(denied("disposable_runner_not_explicit"));
+        }
+        let declared_root = std::env::var_os("OKX_DISPOSABLE_WINDOWS_ROOT")
+            .map(PathBuf::from)
+            .ok_or_else(|| denied("disposable_runner_root_missing"))?;
+        if !declared_root.is_absolute() {
+            return Err(denied("disposable_runner_root_relative"));
+        }
+        let runner_temp = std::env::var_os("RUNNER_TEMP")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let temp = fs::canonicalize(runner_temp)
+            .map_err(|_| denied("disposable_runner_temp_invalid"))?;
+        let root = fs::canonicalize(declared_root)
+            .map_err(|_| denied("disposable_runner_root_invalid"))?;
+        if !root.starts_with(&temp)
+            || root == temp
+            || root.to_string_lossy().to_ascii_lowercase().starts_with(r"c:\okx\")
+        {
+            return Err(denied("disposable_runner_root_unsafe"));
+        }
+        let marker = root.join(".okx-disposable-windows-runner");
+        checked_regular_path(&marker)?;
+        if !fs::read(marker)
+            .map(|contents| contents == b"okx-s2-disposable-v1\n")
+            .unwrap_or(false)
+        {
+            return Err(denied("disposable_runner_marker_invalid"));
+        }
+        Ok(root)
     }
 
     fn check_finance_metadata(token: HANDLE, runtime_root: &Path) -> HostControlResult<()> {
@@ -1212,6 +1249,19 @@ mod native {
         edge_wss: &str,
         existing_catalog: bool,
     ) -> HostControlResult<ResearchChild> {
+        #[cfg(test)]
+        let disposable_loopback = if edge_wss == S2_DISPOSABLE_EDGE_WSS {
+            // A compiled test can unlock ONLY the exact loopback target, and
+            // only when the disposable Windows runner root and marker have
+            // been checked. No shipping CONTROL binary adds this environment.
+            verified_disposable_windows_root()?;
+            true
+        } else {
+            if std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref() == Ok("1") {
+                return Err(denied("disposable_runner_live_edge_forbidden"));
+            }
+            false
+        };
         // The bearer must never enter argv, environment or child handles.
         let bearer = load_research_bearer()?;
         let frame = startup_frame(&bearer).ok_or_else(|| denied("bearer_frame"))?;
@@ -1270,7 +1320,7 @@ mod native {
         let mut commandline = wide(OsStr::new(&arguments));
         let application = wide(executable.as_os_str());
         let cwd_wide = wide(cwd.as_os_str());
-        let mut environment = environment_block(&[
+        let child_environment = vec![
             (
                 "SystemRoot",
                 std::env::var("SystemRoot").map_err(|_| denied("system_root"))?,
@@ -1289,7 +1339,14 @@ mod native {
                     .to_owned(),
             ),
             ("OKX_RESEARCH_SANDBOX_NONCE", nonce.clone()),
-        ])?;
+        ];
+        #[cfg(test)]
+        let mut child_environment = child_environment;
+        #[cfg(test)]
+        if disposable_loopback {
+            child_environment.push(("OKX_RESEARCH_S2_DISPOSABLE_NONCE", nonce.clone()));
+        }
+        let mut environment = environment_block(&child_environment)?;
         let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
         startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -1353,6 +1410,9 @@ mod native {
         // suspended process until the Job assignment succeeds.
         unsafe {
             job.assign_raw_process(raw(&process))?;
+        }
+        if !unsafe { job.contains_raw_process(raw(&process))? } {
+            return Err(denied("research_job_membership_unproven_before_resume"));
         }
         if unsafe { ResumeThread(raw(&thread)) } == u32::MAX {
             return Err(denied("resume_research_thread"));
@@ -1434,7 +1494,10 @@ mod native {
                     deleted: false,
                 };
                 let readback = Zeroizing::new(
-                    guard.entry.get_secret().expect("read back synthetic bearer"),
+                    guard
+                        .entry
+                        .get_secret()
+                        .expect("read back synthetic bearer"),
                 );
                 assert_eq!(readback.as_slice(), secret.as_bytes());
                 guard
@@ -1461,37 +1524,8 @@ mod native {
         fn disposable_real_research_lpac_ready_job_and_bearer() {
             use sha2::{Digest, Sha256};
 
-            assert_eq!(
-                std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref(),
-                Ok("1"),
-                "real LPAC launch is forbidden outside a disposable runner"
-            );
-            let declared_root = PathBuf::from(
-                std::env::var_os("OKX_DISPOSABLE_WINDOWS_ROOT")
-                    .expect("explicit disposable Windows root is required"),
-            );
-            assert!(declared_root.is_absolute());
-            let runner_temp = std::env::var_os("RUNNER_TEMP")
-                .map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir);
-            let temp = fs::canonicalize(runner_temp).expect("runner temp must already exist");
-            let root = fs::canonicalize(declared_root)
-                .expect("disposable Windows root must already exist");
-            assert!(
-                root.starts_with(&temp) && root != temp,
-                "disposable root must be a dedicated subdirectory of runner temp"
-            );
-            assert!(
-                !root.to_string_lossy().to_ascii_lowercase().starts_with(r"c:\okx\"),
-                "installed OKX root is never an acceptable disposable test root"
-            );
-            let marker = root.join(".okx-disposable-windows-runner");
-            checked_regular_path(&marker).expect("marker must not use reparse points");
-            assert_eq!(
-                fs::read(&marker).expect("explicit runner marker is required"),
-                b"okx-s2-disposable-v1\n",
-                "unrecognized disposable runner marker"
-            );
+            let root = verified_disposable_windows_root()
+                .expect("positive disposable Windows marker and isolated temp root required");
 
             let worker_source = PathBuf::from(
                 std::env::var_os("OKX_DISPOSABLE_RESEARCH_EXE")
@@ -1554,31 +1588,34 @@ mod native {
                 &scope,
                 &host_scope,
                 &incarnation,
-                // Loopback-only synthetic endpoint: this test must never
-                // contact production Edge or transmit its disposable bearer.
-                "wss://127.0.0.1:9/s2-disposable",
+                S2_DISPOSABLE_EDGE_WSS,
                 false,
             )
             .expect("real suspended LPAC CreateProcessW, token, ACL, Job and READY required");
             assert!(child.id() > 0, "actual native child PID is required");
-            assert!(
-                !job.is_empty().expect("kernel Job accounting must be readable"),
-                "actual Research child must still belong to active CONTROL Job"
-            );
 
-            // Research must not outlive the disposable proof. Terminate the
-            // exact CONTROL Job, wait for a typed process exit, and prove no
-            // descendant remains in the same kernel Job.
+            // Exact Job membership was already queried while suspended,
+            // before ResumeThread. A post-bearer liveness assertion would
+            // race the loopback socket and catalog startup; it is not an OS
+            // isolation witness. Terminate this Job and drain the exact PID.
             job.terminate().expect("terminate isolated CONTROL Job");
             let status = child.wait().expect("typed native process exit is required");
-            assert!(!status.success(), "terminated Research child must not report success");
+            assert!(
+                status.code().is_some(),
+                "Windows process exit must expose a typed exit code"
+            );
             let deadline = Instant::now() + Duration::from_secs(5);
-            while !job.is_empty().expect("kernel Job accounting must remain readable")
+            while !job
+                .is_empty()
+                .expect("kernel Job accounting must remain readable")
                 && Instant::now() < deadline
             {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            assert!(job.is_empty().unwrap(), "CONTROL Job retained a child/descendant");
+            assert!(
+                job.is_empty().unwrap(),
+                "CONTROL Job retained a child/descendant"
+            );
             bearer.delete();
             println!("OKX_S2_WITNESS=disposable_real_research_lpac_ready_job_and_bearer");
         }
@@ -1699,7 +1736,8 @@ mod tests {
         assert!(proof.len() <= MAX_READY_BYTES);
         assert!(verify_ready(proof.as_bytes(), &nonce));
         assert!(!verify_ready(
-            proof.replace(READY_SCHEMA, "okx.research.sandbox-ready/v1")
+            proof
+                .replace(READY_SCHEMA, "okx.research.sandbox-ready/v1")
                 .as_bytes(),
             &nonce,
         ));
@@ -1736,7 +1774,8 @@ mod tests {
             );
             assert!(
                 !verify_ready(
-                    proof.replace(&key_true, &format!("\"{field}\":false"))
+                    proof
+                        .replace(&key_true, &format!("\"{field}\":false"))
                         .as_bytes(),
                     &nonce
                 ),

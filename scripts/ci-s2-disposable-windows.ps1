@@ -43,6 +43,7 @@ $receipt = [ordered]@{
     runner_image = $env:ImageOS
     runner_image_version = $env:ImageVersion
     disposable_root = $root
+    research_worker_build_feature = 's2-disposable-windows'
     research_worker_sha256 = $null
     expected_exact_test_count = $tests.Count
     executed_exact_test_count = 0
@@ -84,9 +85,11 @@ try {
     [IO.File]::WriteAllText($marker, "okx-s2-disposable-v1`n", [Text.UTF8Encoding]::new($false))
     $env:OKX_DISPOSABLE_WINDOWS_ROOT = $root
 
+    # A non-shipping test-only feature permits loopback WSS exclusively on the
+    # disposable worker. Production origin pinning must remain unchanged.
     # The LPAC test launches only this freshly built non-release worker.
     $buildLog = Join-Path $evidenceDir 'research-worker-build.log'
-    & cargo build --locked -p okx-research-service --bin okx-research-service 2>&1 |
+    & cargo build --locked -p okx-research-service --bin okx-research-service --features s2-disposable-windows 2>&1 |
         Tee-Object -FilePath $buildLog
     $buildExit = $LASTEXITCODE
     $receipt.build_log_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $buildLog).Hash.ToLowerInvariant()

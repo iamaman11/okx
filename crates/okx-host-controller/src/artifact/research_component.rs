@@ -1850,9 +1850,11 @@ mod tests {
             read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER).unwrap(),
             Some(first.clone())
         );
-        assert!(read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
+                .unwrap()
+                .is_none()
+        );
         assert!(control.join("research-state.json").is_file());
         assert!(!runtime.join("okx-agent.exe").exists());
         assert!(!runtime.join("installed-agent.json").exists());
@@ -1875,16 +1877,17 @@ mod tests {
             fs::read(control.join("research-state.json")).unwrap(),
             state_before
         );
-        assert!(read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
+                .unwrap()
+                .is_none()
+        );
 
         let mut next_bytes = initial_bytes.clone();
         next_bytes[64] = 0x42;
         let next = fixture_record(&next_bytes, 'c');
         let (promoted, _) =
-            activate_verified_research_image_at(&runtime, &mut owner, &next, &next_bytes)
-                .unwrap();
+            activate_verified_research_image_at(&runtime, &mut owner, &next, &next_bytes).unwrap();
         assert_eq!(promoted["installed_worker_sha256"], next.worker_sha256);
         assert_eq!(
             read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER).unwrap(),
@@ -1942,13 +1945,20 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code(), "RESEARCH_ACTIVATION_ROLLED_BACK");
-        assert!(read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER)
-            .unwrap()
-            .is_none());
-        assert!(read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
-            .unwrap()
-            .is_none());
-        assert_eq!(owner.status().unwrap()["last_error"], "RESEARCH_ACTIVATION_ROLLED_BACK");
+        assert!(
+            read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            owner.status().unwrap()["last_error"],
+            "RESEARCH_ACTIVATION_ROLLED_BACK"
+        );
         assert!(!runtime.join("okx-agent.exe").exists());
         assert!(!runtime.join("installed-agent.json").exists());
         assert!(!runtime.join("desired-state.json").exists());
@@ -1976,7 +1986,9 @@ mod tests {
         fs::create_dir_all(&runtime).unwrap();
         let legacy_bytes = fixture_pe_image();
         let legacy = fixture_record(&legacy_bytes, 'a');
-        let legacy_dir = runtime.join("research/versions").join(&legacy.worker_sha256);
+        let legacy_dir = runtime
+            .join("research/versions")
+            .join(&legacy.worker_sha256);
         fs::create_dir_all(&legacy_dir).unwrap();
         fs::write(legacy_dir.join("okx-research-service.exe"), &legacy_bytes).unwrap();
         write_research_pointer(&runtime, CURRENT_RESEARCH_POINTER, &legacy).unwrap();
@@ -1995,21 +2007,20 @@ mod tests {
         let mut candidate_bytes = legacy_bytes.clone();
         candidate_bytes[64] = 0x43;
         let candidate = fixture_record(&candidate_bytes, 'c');
-        assert!(activate_verified_research_image_at(
-            &runtime,
-            &mut owner,
-            &candidate,
-            &candidate_bytes
-        )
-        .is_err());
+        assert!(
+            activate_verified_research_image_at(&runtime, &mut owner, &candidate, &candidate_bytes)
+                .is_err()
+        );
         assert_eq!(
             fs::read(runtime.join(CURRENT_RESEARCH_POINTER)).unwrap(),
             original_pointer,
             "legacy current must never be silently resealed or replaced"
         );
-        assert!(read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
+                .unwrap()
+                .is_none()
+        );
         assert!(!control.exists());
 
         // The rollback pointer is also provenance, not permission to adopt
@@ -2057,13 +2068,15 @@ mod tests {
         let mut replacement_bytes = candidate_bytes;
         replacement_bytes[65] = 0x44;
         let replacement = fixture_record(&replacement_bytes, 'd');
-        assert!(activate_verified_research_image_at(
-            &rollback_runtime,
-            &mut rollback_owner,
-            &replacement,
-            &replacement_bytes,
-        )
-        .is_err());
+        assert!(
+            activate_verified_research_image_at(
+                &rollback_runtime,
+                &mut rollback_owner,
+                &replacement,
+                &replacement_bytes,
+            )
+            .is_err()
+        );
         assert_eq!(
             fs::read(rollback_runtime.join(CURRENT_RESEARCH_POINTER)).unwrap(),
             current_before

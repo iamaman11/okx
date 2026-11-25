@@ -113,6 +113,27 @@ impl AgentJob {
             Ok(())
         }
     }
+
+    /// Query kernel membership of the exact process in this exact Job. The
+    /// Research launcher calls this while its primary thread is suspended,
+    /// after assignment and before any child code can run.
+    ///
+    /// # Safety
+    /// `process` must be an open, valid process handle for the entire call.
+    pub(crate) unsafe fn contains_raw_process(
+        &self,
+        process: windows_sys::Win32::Foundation::HANDLE,
+    ) -> HostControlResult<bool> {
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+
+        let mut member = 0;
+        if unsafe { IsProcessInJob(process, self.handle, &mut member) } == 0 {
+            return Err(HostControlError::JobAssignment(
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+        Ok(member != 0)
+    }
 }
 
 #[cfg(windows)]

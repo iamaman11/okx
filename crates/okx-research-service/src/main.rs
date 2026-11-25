@@ -116,6 +116,8 @@ async fn run() -> Result<(), String> {
         "research worker OS memory and CPU fences verified"
     );
     let startup_token = if edge_runtime {
+        #[cfg(windows)]
+        okx_research_service::edge_runtime::preflight_edge_origin_before_ready()?;
         // CONTROL resumes us only after sandbox verification and host Job
         // assignment. Before CONTROL sends any bearer, the CHILD checks that
         // its own sandbox cannot read disposable CredMan/file canaries.

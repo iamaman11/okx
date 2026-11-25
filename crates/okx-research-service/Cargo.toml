@@ -10,6 +10,10 @@ license.workspace = true
 # Only for CI's non-shipping debug Research EXE. Engine test clients use
 # isolated fixtures while accepted Release binaries enforce one global Worker.
 test-isolated-singleton = []
+# Physical LPAC acceptance only: allow one loopback-only Edge transport in a
+# debug Windows worker when the inherited disposable sandbox nonce matches.
+# Never build or ship a release binary with this feature.
+s2-disposable-windows = []
 # A separate, non-shipping executable drives real Research child IPC for the
 # legacy Finance-vs-Research load acceptance. Its JSONL control surface has no
 # authority in the installed Research Worker and cannot build in release.

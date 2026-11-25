@@ -879,8 +879,7 @@ mod native {
 
         fn snapshot_acl(path: &Path, directory: bool) -> AclSnapshot {
             let handle = open(path, directory, false).unwrap();
-            let (mut descriptor, mut owner, mut dacl) =
-                (null_mut(), null_mut(), null_mut());
+            let (mut descriptor, mut owner, mut dacl) = (null_mut(), null_mut(), null_mut());
             assert_eq!(
                 unsafe {
                     GetSecurityInfo(
@@ -914,7 +913,12 @@ mod native {
                 assert_ne!(unsafe { GetAce(dacl, index as u32, &mut ptr) }, 0);
                 assert!(!ptr.is_null());
                 let header = unsafe { &*(ptr.cast::<ACE_HEADER>()) };
-                assert_eq!(header.AceType, 0, "unexpected ACE type on {}", path.display());
+                assert_eq!(
+                    header.AceType,
+                    0,
+                    "unexpected ACE type on {}",
+                    path.display()
+                );
                 assert!((header.AceSize as usize) >= size_of::<ACCESS_ALLOWED_ACE>());
                 let allow = unsafe { &*(ptr.cast::<ACCESS_ALLOWED_ACE>()) };
                 let sid = (&allow.SidStart as *const u32).cast_mut().cast();
@@ -935,7 +939,10 @@ mod native {
         fn assert_package_mask(path: &Path, directory: bool, expected_mask: u32) {
             let acl = snapshot_acl(path, directory);
             let package = identity().unwrap().package;
-            assert_ne!(acl.owner, package, "package SID unexpectedly owns an object");
+            assert_ne!(
+                acl.owner, package,
+                "package SID unexpectedly owns an object"
+            );
             let grants: Vec<_> = acl
                 .aces
                 .iter()
@@ -944,8 +951,13 @@ mod native {
             assert_eq!(grants.len(), 1, "exactly one package grant required");
             assert_eq!(grants[0].2, expected_mask);
             assert_eq!(grants[0].2 & (WRITE_DAC | WRITE_OWNER), 0);
-            assert!(acl.aces.iter().all(|(_, flags, _, _)| flags & INHERITED_ACE == 0)
-                || !acl.protected, "protected image/catalog root has inherited ACEs");
+            assert!(
+                acl.aces
+                    .iter()
+                    .all(|(_, flags, _, _)| flags & INHERITED_ACE == 0)
+                    || !acl.protected,
+                "protected image/catalog root has inherited ACEs"
+            );
         }
 
         fn assert_no_exact_package_grant(path: &Path, directory: bool) {
@@ -975,7 +987,10 @@ mod native {
                         .expect("OKX_DISPOSABLE_WINDOWS_ROOT must be set"),
                 );
                 assert!(runner_temp.is_absolute() && base.is_absolute());
-                assert!(runner_temp.file_name().is_some(), "RUNNER_TEMP must not be a volume root");
+                assert!(
+                    runner_temp.file_name().is_some(),
+                    "RUNNER_TEMP must not be a volume root"
+                );
                 assert!(
                     !runner_temp.components().any(|component| component
                         .as_os_str()
@@ -983,8 +998,14 @@ mod native {
                         .is_some_and(|name| name.eq_ignore_ascii_case("okx"))),
                     "never use an installed OKX tree as RUNNER_TEMP"
                 );
-                assert_ne!(base, runner_temp, "never use RUNNER_TEMP itself as test root");
-                assert!(base.starts_with(&runner_temp), "disposable root must be below RUNNER_TEMP");
+                assert_ne!(
+                    base, runner_temp,
+                    "never use RUNNER_TEMP itself as test root"
+                );
+                assert!(
+                    base.starts_with(&runner_temp),
+                    "disposable root must be below RUNNER_TEMP"
+                );
                 assert!(
                     base.file_name()
                         .and_then(|s| s.to_str())
@@ -1154,7 +1175,8 @@ mod native {
                 assert_eq!(acl.aces.len(), 4);
                 assert!(!acl.protected, "children should inherit the catalog DACL");
                 let package: Vec<_> = acl
-                    .aces.iter()
+                    .aces
+                    .iter()
                     .filter(|(_, _, _, sid)| sid == &id.package)
                     .collect();
                 assert_eq!(package.len(), 1);
@@ -1162,7 +1184,10 @@ mod native {
                 assert_ne!(package[0].1 & INHERITED_ACE, 0);
                 assert_eq!(package[0].2 & (WRITE_DAC | WRITE_OWNER), 0);
                 let mut bytes = Vec::new();
-                fs::File::open(&file).unwrap().read_to_end(&mut bytes).unwrap();
+                fs::File::open(&file)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
                 assert!(bytes.ends_with(b"\nappend/delete canary"));
             }
             ensure_independent_catalog(&catalog).unwrap();
@@ -1174,7 +1199,9 @@ mod native {
                 fs::remove_file(catalog.join(name)).unwrap();
             }
             ensure_independent_catalog(&catalog).unwrap();
-            println!("OKX_S2_WITNESS=disposable_windows_acl_catalog_sqlite_sidecars_inherit_low_il");
+            println!(
+                "OKX_S2_WITNESS=disposable_windows_acl_catalog_sqlite_sidecars_inherit_low_il"
+            );
         }
 
         #[test]
@@ -1215,7 +1242,11 @@ mod native {
                 assert_eq!(&snapshot_acl(path, *directory), baseline);
                 assert_no_exact_package_grant(path, *directory);
                 if !directory {
-                    assert!(fs::read_to_string(path).unwrap().starts_with("synthetic-only:"));
+                    assert!(
+                        fs::read_to_string(path)
+                            .unwrap()
+                            .starts_with("synthetic-only:")
+                    );
                 }
             }
             println!("OKX_S2_WITNESS=disposable_windows_acl_finance_sqlite_locks_untouched");

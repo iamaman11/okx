@@ -174,7 +174,11 @@ function validate(yaml, fileNames, runnerScript = disposableScript) {
   assert.match(runnerScript, /\.okx-disposable-windows-runner/);
   assert.match(runnerScript, /okx-s2-disposable-v1`n/);
   assert.match(runnerScript, /\$env:OKX_DISPOSABLE_WINDOWS_ROOT = \$root/);
-  assert.match(runnerScript, /cargo build --locked -p okx-research-service --bin okx-research-service/);
+  assert.match(runnerScript,
+    /cargo build --locked -p okx-research-service --bin okx-research-service --features s2-disposable-windows/,
+    'S2_LOOPBACK_WORKER_MUST_REQUIRE_NON_SHIPPING_CARGO_FEATURE');
+  assert.match(runnerScript, /research_worker_build_feature = 's2-disposable-windows'/,
+    'S2_RECEIPT_MUST_DISCLOSE_NON_SHIPPING_WORKER_BUILD_FEATURE');
   assert.match(runnerScript, /\$env:OKX_DISPOSABLE_RESEARCH_EXE = /);
   assert.match(runnerScript, /cargo test --locked -p okx-host-controller --lib \$testName -- --ignored --exact --nocapture --test-threads 1/);
   assert.match(runnerScript, /\$namedPass = \$log -cmatch/);
@@ -1085,6 +1089,10 @@ for (const [before, after, reason] of [
   ["$env:OKX_DISPOSABLE_WINDOWS_ROOT = $root", '$env:OKX_DISPOSABLE_WINDOWS_ROOT = "C:\\okx"',
     'S2_TEMP_ROOT_REQUIRED'],
   ['.okx-disposable-windows-runner', '.unverified-runner-marker', 'S2_DISPOSABLE_MARKER_REQUIRED'],
+  ['--bin okx-research-service --features s2-disposable-windows', '--bin okx-research-service',
+    'S2_WORKER_MUST_NOT_USE_PRODUCTION_ORIGIN_PINNING'],
+  ["research_worker_build_feature = 's2-disposable-windows'", "research_worker_build_feature = 'none'",
+    'S2_FEATURE_MUST_BE_ATTESTED_IN_SMOKE_RECEIPT'],
   ['-- --ignored --exact --nocapture --test-threads 1', '-- --nocapture', 'S2_IGNORED_EXACT_ONLY'],
   ['$namedPass = $log -cmatch', '$namedPass = $true #', 'S2_NAMED_PASS_REQUIRED'],
   ['$hasWitness = $log.Contains($witness)', '$hasWitness = $true #', 'S2_NATIVE_WITNESS_REQUIRED'],
