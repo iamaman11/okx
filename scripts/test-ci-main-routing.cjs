@@ -310,8 +310,12 @@ function validate(yaml, fileNames) {
     'ENGINE_MUST_RUN_EXACT_RESEARCH_FINANCE_DENIAL_TEST');
   assert.ok(financeDenial.includes('if ($code -ne 0) { exit $code }'),
     'ENGINE_FINANCE_DENIAL_MUST_FAIL_ON_PROCESS_ERROR');
-  assert.ok(financeDenial.includes('test result: ok\\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;'),
-    'ENGINE_FINANCE_DENIAL_MUST_REJECT_ZERO_OR_FILTERED_TESTS');
+  assert.ok(financeDenial.includes("$testName = 'query::public_dispatch_tests::research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes'"),
+    'ENGINE_FINANCE_DENIAL_MUST_NAME_THE_ACTUAL_EXECUTED_TEST');
+  assert.ok(financeDenial.includes("$log -notmatch ('(?m)^test ' + [regex]::Escape($testName) + ' \\.\\.\\. ok$') -or"),
+    'ENGINE_FINANCE_DENIAL_MUST_PROVE_THE_EXACT_NAMED_TEST_PASSED');
+  assert.ok(financeDenial.includes("$log -notmatch 'test result: ok\\. 1 passed; 0 failed; 0 ignored; 0 measured; [1-9][0-9]* filtered out;'"),
+    'ENGINE_FINANCE_DENIAL_MUST_REJECT_ZERO_PASSED_BUT_ALLOW_NONZERO_FILTERED');
   assert.ok(financeDenial.includes("throw 'ENGINE_RESEARCH_OWNER_FINANCE_DENIAL_EXACT_TEST_REQUIRED'"),
     'ENGINE_FINANCE_DENIAL_MUST_FAIL_CLOSED_ON_MISSING_TEST');
   assert.match(regression, /'execution' \{ 'okx-trade-execution' \}/);
@@ -862,22 +866,45 @@ assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_
   "$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = (Resolve-Path 'target/debug/okx-research-load-fixture.exe').Path",
   '$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = $null'), workflows),
   'ENGINE_REGRESSION_TESTS_MUST_USE_REAL_FIXTURE_PATH');
-assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+// Apply each mutation *before* asserting failure: a stale `before` substring
+// must not count as a successfully exercised negative control.
+function rejectFinanceDenialMutation(before, after, reason) {
+  const mutated = changeJobInput(source, 'trading_engine_regressions_windows', before, after);
+  assert.notEqual(mutated, source, `MISSING_FINANCE_DENIAL_MUTATION:${reason}`);
+  assert.throws(() => validate(mutated, workflows), reason);
+}
+rejectFinanceDenialMutation(
   '      - name: Engine rejects Research owner attempts to mutate Native finance',
-  '      - name: Engine finance denial skipped'), workflows),
+  '      - name: Engine finance denial skipped',
   'ENGINE_RESEARCH_FINANCE_DENIAL_STEP_CANNOT_DISAPPEAR');
-assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+rejectFinanceDenialMutation(
   'query::public_dispatch_tests::research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes',
-  'query::public_dispatch_tests::irrelevant_readonly_test'), workflows),
+  'query::public_dispatch_tests::irrelevant_readonly_test',
   'ENGINE_RESEARCH_FINANCE_DENIAL_MUST_RUN_EXACT_TEST_NAME');
-assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+rejectFinanceDenialMutation(
+  "$testName = 'query::public_dispatch_tests::research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes'",
+  "$testName = 'query::public_dispatch_tests::irrelevant_readonly_test'",
+  'ENGINE_RESEARCH_FINANCE_DENIAL_MUST_VALIDATE_THE_ACTUAL_TEST_LINE');
+rejectFinanceDenialMutation(
   'research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes -- --exact --test-threads 1',
-  'research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes -- --test-threads 1'), workflows),
+  'research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes -- --test-threads 1',
   'ENGINE_RESEARCH_FINANCE_DENIAL_MUST_RETAIN_EXACT_MATCH');
-assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
-  'test result: ok\\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;',
-  'test result: ok\\. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out;'), workflows),
+rejectFinanceDenialMutation(
+  'test result: ok\\. 1 passed; 0 failed; 0 ignored; 0 measured; [1-9][0-9]* filtered out;',
+  'test result: ok\\. 0 passed; 0 failed; 0 ignored; 0 measured; [1-9][0-9]* filtered out;',
   'ENGINE_RESEARCH_FINANCE_DENIAL_MUST_FAIL_ON_ZERO_MATCHED_TESTS');
+rejectFinanceDenialMutation(
+  'test result: ok\\. 1 passed; 0 failed; 0 ignored; 0 measured; [1-9][0-9]* filtered out;',
+  'test result: ok\\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;',
+  'ENGINE_RESEARCH_FINANCE_DENIAL_MUST_REQUIRE_REAL_FILTERED_ROSTER');
+rejectFinanceDenialMutation(
+  "(?m)^test ' + [regex]::Escape($testName) + ' \\.\\.\\. ok$",
+  "(?m)^test ' + [regex]::Escape($testName) + ' .*",
+  'ENGINE_FINANCE_DENIAL_MUST_PROVE_NAMED_TEST_PASS_LINE');
+rejectFinanceDenialMutation(
+  "(?m)^test ' + [regex]::Escape($testName) + ' \\.\\.\\. ok$') -or",
+  "(?m)^test ' + [regex]::Escape($testName) + ' \\.\\.\\. ok$') -and",
+  'ENGINE_FINANCE_DENIAL_MUST_REQUIRE_BOTH_NAMED_TEST_AND_RESULT');
 assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-native-finance-check -- --list'), workflows));
 assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
 assert.throws(() => validate(source.replace('"trading-engine-regressions-windows (engine)",', ''), workflows));
