@@ -41,7 +41,23 @@ use zeroize::Zeroizing;
 const MAX_RESEARCH_IN_FLIGHT: usize = 6;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(80);
 const EDGE_WRITE_DEADLINE: Duration = Duration::from_secs(10);
+const STABLE_EDGE_SESSION: Duration = Duration::from_secs(60);
+const RECONNECT_DELAYS_SECONDS: [u64; 5] = [1, 3, 10, 30, 60];
 const SUPERVISOR_GATE: &[u8] = b"RESEARCH_HOST_JOB_ASSIGNED\n";
+
+/// Keep startup retries bounded, but recover quickly after a healthy session.
+/// Otherwise any one-off disconnect after days of uptime would inherit the
+/// maximum retry delay from failures that happened before the last success.
+fn reconnect_delay(failures: &mut usize, session_elapsed: Duration) -> Duration {
+    if session_elapsed >= STABLE_EDGE_SESSION {
+        *failures = 0;
+    }
+    let delay = RECONNECT_DELAYS_SECONDS[(*failures).min(RECONNECT_DELAYS_SECONDS.len() - 1)];
+    *failures = (*failures)
+        .saturating_add(1)
+        .min(RECONNECT_DELAYS_SECONDS.len() - 1);
+    Duration::from_secs(delay)
+}
 
 /// Apply the protocol's 64 KiB budget at the WebSocket decoder, before
 /// Tungstenite aggregates a fragmented message into a much larger allocation.
@@ -207,13 +223,12 @@ pub async fn run(
     )?;
     let mut retries = 0usize;
     loop {
+        let session_started = Instant::now();
         if let Err(code) = session(&config, &producer, &service, &source).await {
             // Error codes contain no secret, request body, URL or market data.
             tracing::warn!(reason = code, "research-only WSS disconnected");
         }
-        let seconds = [1, 3, 10, 30, 60][retries.min(4)];
-        retries = (retries + 1).min(4);
-        tokio::time::sleep(Duration::from_secs(seconds)).await;
+        tokio::time::sleep(reconnect_delay(&mut retries, session_started.elapsed())).await;
     }
 }
 

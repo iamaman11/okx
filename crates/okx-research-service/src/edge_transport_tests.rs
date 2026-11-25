@@ -16,6 +16,30 @@ fn response_with_blob(size: usize) -> AgentResponse {
 }
 
 #[test]
+fn stable_research_edge_session_resets_connection_backoff() {
+    let mut failures = 0;
+    for expected in [1, 3, 10, 30, 60, 60] {
+        assert_eq!(
+            reconnect_delay(&mut failures, Duration::from_secs(0)),
+            Duration::from_secs(expected)
+        );
+    }
+    assert_eq!(failures, 4);
+    assert_eq!(
+        reconnect_delay(&mut failures, Duration::from_secs(59)),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        reconnect_delay(&mut failures, Duration::from_secs(60)),
+        Duration::from_secs(1)
+    );
+    assert_eq!(
+        reconnect_delay(&mut failures, Duration::from_secs(1)),
+        Duration::from_secs(3)
+    );
+}
+
+#[test]
 fn research_edge_decoder_and_writer_use_the_same_finite_frame_budget() {
     let config = edge_websocket_config();
     assert_eq!(FRAME_LIMIT, 64 * 1024);
