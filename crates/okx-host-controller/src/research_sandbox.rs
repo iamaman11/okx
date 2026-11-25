@@ -155,6 +155,10 @@ mod native {
     const FINANCE_DENIED_RIGHTS: [u32; 13] = [
         0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000,
     ];
+    // FILE_READ_EA (0x8) is read-only: an RX image may legitimately allow it.
+    // Probe only mutation rights, including DELETE and security descriptor edits.
+    const IMAGE_MUTATION_RIGHTS: [u32; 8] =
+        [0x2, 0x4, 0x10, 0x40, 0x100, 0x10000, 0x40000, 0x80000];
 
     fn denied(stage: &'static str) -> HostControlError {
         HostControlError::ResearchSandboxDenied(stage)
@@ -793,12 +797,16 @@ mod native {
             executable,
             executable.parent().ok_or_else(|| denied("image_parent"))?,
         ] {
-            for right in [0x2, 0x4, 0x8, 0x10, 0x40, 0x10000, 0x40000, 0x80000] {
+            for right in IMAGE_MUTATION_RIGHTS {
                 if can_access(token, path, right)? {
                     #[cfg(test)]
                     eprintln!(
                         "OKX_S2_IMAGE_MUTABLE_ACCESS={}:0x{right:08x}",
-                        if path == executable { "FILE" } else { "DIRECTORY" }
+                        if path == executable {
+                            "FILE"
+                        } else {
+                            "DIRECTORY"
+                        }
                     );
                     return Err(denied("research_installed_image_mutable"));
                 }
@@ -1529,6 +1537,16 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn image_mutation_rights_are_disjoint_from_package_rx() {
+            const IMAGE_PACKAGE_RX: u32 = 0x0012_00a9;
+            assert_eq!(IMAGE_PACKAGE_RX & 0x8, 0x8, "FILE_READ_EA belongs to RX");
+            assert!(IMAGE_MUTATION_RIGHTS.contains(&0x100), "WRITE_ATTRIBUTES");
+            assert!(IMAGE_MUTATION_RIGHTS.contains(&0x40000), "WRITE_DAC");
+            assert!(IMAGE_MUTATION_RIGHTS.contains(&0x80000), "WRITE_OWNER");
+            assert!(IMAGE_MUTATION_RIGHTS.iter().all(|right| IMAGE_PACKAGE_RX & right == 0));
+        }
 
         struct DisposableResearchDirectory(PathBuf);
 
