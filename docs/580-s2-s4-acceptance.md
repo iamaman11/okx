@@ -120,6 +120,12 @@ SHA/tree, runner identity, test names, действительное ненуле
 | `startup` | Suspended → Job → token/canary → nonce-bound READY → одноразовый bearer; отсутствие bearer в argv/env/logs | Полный S2 |
 | `test_cases`, `summary`, `receipt_sha256` | Для каждой проверки ID, `PASS/FAIL/NOT_RUN/BLOCKED`, первая недоказанная стадия, expected/observed; число реально выполненных случаев больше нуля; SHA логов и отчёта | Smoke; полный S2 расширяет поля свидетелей |
 
+Research намеренно не содержит `CredWriteW`/`CredDeleteW`: это запрещённые
+привилегированные API по его действующему owner-contract. Текущий дочерний
+canary проверяет только `CredReadW`/`CredEnumerateW` и повторную сверку
+содержимого родителем. Физическое доказательство отказа child-write/delete
+Credential Manager пока `NOT_RUN`, не подразумевается булевым READY.
+
 Одноразовый порядок: сверить source HEAD/tree → создать чистый корень
 в `${RUNNER_TEMP}` → создать уникальные synthetic finance/CredMan canary с
 положительным чтением родителем → запускать **именно** нужные тестовые EXE

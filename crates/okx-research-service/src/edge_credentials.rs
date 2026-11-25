@@ -59,8 +59,7 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
             GENERIC_READ, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE,
         },
         Security::Credentials::{
-            CRED_PERSIST_SESSION, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredEnumerateW,
-            CredFree, CredReadW, CredWriteW,
+            CRED_TYPE_GENERIC, CREDENTIALW, CredEnumerateW, CredFree, CredReadW,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE,
@@ -134,7 +133,7 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
         return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
     }
 
-    let mut target_wide = to_wide(OsStr::new(&target));
+    let target_wide = to_wide(OsStr::new(&target));
     let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
     // SAFETY: all pointers refer to owned, NUL-terminated UTF-16 buffers or
     // writable pointer outputs. CredFree handles any successful allocation.
@@ -162,31 +161,10 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
         return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
     }
 
-    let mut synthetic_blob = [0x53u8; 32];
-    let mut synthetic_username = to_wide(OsStr::new("sandbox-negative-control"));
-    let synthetic_credential = CREDENTIALW {
-        Type: CRED_TYPE_GENERIC,
-        TargetName: target_wide.as_mut_ptr(),
-        CredentialBlob: synthetic_blob.as_mut_ptr(),
-        CredentialBlobSize: synthetic_blob.len() as u32,
-        Persist: CRED_PERSIST_SESSION,
-        UserName: synthetic_username.as_mut_ptr(),
-        ..Default::default()
-    };
-    // These are nonce-scoped *synthetic* targets created by the parent. The
-    // parent verifies their original content after the child has exited.
-    if unsafe { CredWriteW(&synthetic_credential, 0) } != 0 {
-        return Err("RESEARCH_SANDBOX_CREDMAN_EXPOSED".into());
-    }
-    if !denied_or_missing(unsafe { GetLastError() }) {
-        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
-    }
-    if unsafe { CredDeleteW(target_wide.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 {
-        return Err("RESEARCH_SANDBOX_CREDMAN_EXPOSED".into());
-    }
-    if !denied_or_missing(unsafe { GetLastError() }) {
-        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
-    }
+    // Research has no write/delete Credential Manager APIs. The parent owns
+    // the synthetic credential and verifies its contents both before and
+    // after this child's read/enumerate denial checks. Write/delete denial
+    // remains NOT_PROVEN until measured without weakening that ownership gate.
 
     for access in [GENERIC_READ, GENERIC_WRITE, DELETE, WRITE_DAC, WRITE_OWNER] {
         require_access_denied(

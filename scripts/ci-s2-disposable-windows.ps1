@@ -46,7 +46,10 @@ $receipt = [ordered]@{
     research_worker_build_feature = 's2-disposable-windows'
     research_worker_sha256 = $null
     expected_exact_test_count = $tests.Count
+    attempted_exact_test_count = 0
     executed_exact_test_count = 0
+    passed_exact_test_count = 0
+    failed_exact_test_names = @()
     tests = @()
     build_log_sha256 = $null
     failure = $null
@@ -103,45 +106,81 @@ try {
     $env:OKX_DISPOSABLE_RESEARCH_EXE = (Resolve-Path -LiteralPath $workerPath).Path
     $receipt.research_worker_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:OKX_DISPOSABLE_RESEARCH_EXE).Hash.ToLowerInvariant()
 
+    $failedTests = [System.Collections.Generic.List[string]]::new()
     foreach ($testName in $tests) {
         $shortName = ($testName -split '::')[-1]
         $testLog = Join-Path $evidenceDir "$shortName.log"
+        $testExit = -1
+        $invokeError = $null
+        $startedAt = [DateTime]::UtcNow.ToString('o')
         # One exact, explicitly ignored #[cfg(test)] in-crate Win32 proof per
         # cargo invocation. `--ignored` without `--exact` is not sufficient.
         # `--show-output` preserves the ordinary anchored `test NAME ... ok`
         # line while retaining successful-test stdout below it. `--nocapture`
         # could interleave the witness println! into that result line.
-        & cargo test --locked -p okx-host-controller --lib $testName -- --ignored --exact --show-output --test-threads 1 2>&1 |
-            Tee-Object -FilePath $testLog
-        $testExit = $LASTEXITCODE
-        $log = Get-Content -LiteralPath $testLog -Raw
+        try {
+            & cargo test --locked -p okx-host-controller --lib $testName -- --ignored --exact --show-output --test-threads 1 2>&1 |
+                Tee-Object -FilePath $testLog
+            $testExit = $LASTEXITCODE
+        } catch {
+            # A failed probe must not conceal the other five physical probes.
+            $invokeError = $_.Exception.Message
+        }
+        $receipt.attempted_exact_test_count += 1
+        $log = ''
+        $logHash = $null
+        if (Test-Path -LiteralPath $testLog -PathType Leaf) {
+            try {
+                $log = [string](Get-Content -LiteralPath $testLog -Raw)
+                $logHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $testLog).Hash.ToLowerInvariant()
+            } catch {
+                $invokeError = "S2_DISPOSABLE_LOG_READ_OR_HASH_FAILED:$($_.Exception.Message)"
+            }
+        }
+        $namedExecuted = $log -cmatch ('(?m)^test ' + [regex]::Escape($testName) + ' \.\.\. (?:ok|FAILED)$')
         $namedPass = $log -cmatch ('(?m)^test ' + [regex]::Escape($testName) + ' \.\.\. ok$')
         $onePassed = $log -cmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [1-9][0-9]* filtered out;'
         # Printed only after the assertions inside the respective Win32 test;
         # the Cargo result line by itself is not a physical-witness receipt.
         $witness = "OKX_S2_WITNESS=$shortName"
         $hasWitness = $log.Contains($witness)
+        $testPassed = $testExit -eq 0 -and $null -eq $invokeError -and
+            $namedPass -and $onePassed -and $hasWitness
+        if ($namedExecuted) {
+            $receipt.executed_exact_test_count += 1
+        }
+        if ($testPassed) {
+            $receipt.passed_exact_test_count += 1
+        } else {
+            $failedTests.Add($testName)
+            Write-Host "S2_DISPOSABLE_CASE=FAILED; NAME=$testName; EXIT=$testExit; NAMED=$namedExecuted; WITNESS=$hasWitness"
+        }
         $receipt.tests += [ordered]@{
             name = $testName
+            started_at_utc = $startedAt
+            completed_at_utc = [DateTime]::UtcNow.ToString('o')
             exit_code = $testExit
+            invocation_error = $invokeError
+            exact_named_executed = $namedExecuted
             exact_named_pass = $namedPass
             exactly_one_passed = $onePassed
             native_witness = $hasWitness
+            passed = $testPassed
             witness_marker = $witness
             log_file = "$shortName.log"
-            log_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $testLog).Hash.ToLowerInvariant()
+            log_sha256 = $logHash
         }
-        if ($testExit -ne 0 -or -not $namedPass -or -not $onePassed -or -not $hasWitness) {
-            throw "S2_DISPOSABLE_EXACT_NATIVE_WITNESS_MISSING:$shortName"
-        }
-        $receipt.executed_exact_test_count += 1
     }
-    if ($receipt.executed_exact_test_count -ne $tests.Count -or $tests.Count -ne 6) {
-        throw 'S2_DISPOSABLE_NONZERO_FULL_SIX_TEST_SET_REQUIRED'
+    $receipt.failed_exact_test_names = $failedTests.ToArray()
+    if ($receipt.attempted_exact_test_count -ne $tests.Count -or
+        $receipt.executed_exact_test_count -ne $tests.Count -or
+        $receipt.passed_exact_test_count -ne $tests.Count -or
+        $failedTests.Count -ne 0 -or $tests.Count -ne 6) {
+        throw "S2_DISPOSABLE_NONZERO_FULL_SIX_TEST_SET_REQUIRED:FAILED=$($failedTests.Count):$($failedTests -join ',')"
     }
     $receipt.result = 'PHYSICAL_SMOKE_EXECUTED_PENDING_INDEPENDENT_ACCEPTANCE'
     $exitCode = 0
-    Write-Host "S2_DISPOSABLE_SMOKE=EXECUTED; EXACT_CASES=$($tests.Count); ACCEPTANCE=NOT_PROVEN"
+    Write-Host "S2_DISPOSABLE_SMOKE=EXECUTED; EXACT_CASES=$($receipt.passed_exact_test_count)/$($tests.Count); ACCEPTANCE=NOT_PROVEN"
 } catch {
     $receipt.failure = $_.Exception.Message
     Write-Host "S2_DISPOSABLE_SMOKE=FAILED; REASON=$($receipt.failure)"
@@ -153,7 +192,10 @@ try {
         @(
             '### S2 disposable Windows smoke (not a Ready/release proof)'
             "- Result: $($receipt.result)"
-            "- Exact physical cases: $($receipt.executed_exact_test_count) / $($tests.Count)"
+            "- Attempted exact cases: $($receipt.attempted_exact_test_count) / $($tests.Count)"
+            "- Executed named cases: $($receipt.executed_exact_test_count) / $($tests.Count)"
+            "- Passed exact cases: $($receipt.passed_exact_test_count) / $($tests.Count)"
+            "- Failed cases: $($receipt.failed_exact_test_names -join ', ')"
             "- Source head: $($receipt.source_head_sha)"
             "- Source tree: $($receipt.source_tree_sha)"
             '- Receipt: artifact okx-s2-disposable-windows-*'

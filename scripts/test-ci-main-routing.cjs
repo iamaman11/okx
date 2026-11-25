@@ -185,8 +185,26 @@ function validate(yaml, fileNames, runnerScript = disposableScript) {
   assert.match(runnerScript, /\$namedPass = \$log -cmatch/);
   assert.match(runnerScript, /test result: ok\\\. 1 passed; 0 failed; 0 ignored; 0 measured; \[1-9\]\[0-9\]\* filtered out;/);
   assert.match(runnerScript, /\$hasWitness = \$log\.Contains\(\$witness\)/);
-  assert.match(runnerScript, /\$testExit -ne 0 -or -not \$namedPass -or -not \$onePassed -or -not \$hasWitness/);
-  assert.match(runnerScript, /\$receipt.executed_exact_test_count -ne \$tests.Count -or \$tests.Count -ne 6/);
+  assert.match(runnerScript, /\$testPassed = \$testExit -eq 0 -and \$null -eq \$invokeError -and\n\s+\$namedPass -and \$onePassed -and \$hasWitness/);
+  assert.match(runnerScript, /\$namedExecuted = \$log -cmatch.*\(\?:ok\|FAILED\)/);
+  assert.match(runnerScript, /\$receipt.attempted_exact_test_count \+= 1/);
+  assert.match(runnerScript, /\$receipt.executed_exact_test_count \+= 1/);
+  assert.match(runnerScript, /\$receipt.passed_exact_test_count \+= 1/);
+  assert.match(runnerScript, /\$failedTests.Add\(\$testName\)/);
+  assert.match(runnerScript, /\$receipt.failed_exact_test_names = \$failedTests.ToArray\(\)/);
+  assert.match(runnerScript,
+    /\$receipt.attempted_exact_test_count -ne \$tests.Count -or\n\s+\$receipt.executed_exact_test_count -ne \$tests.Count -or\n\s+\$receipt.passed_exact_test_count -ne \$tests.Count -or\n\s+\$failedTests.Count -ne 0 -or \$tests.Count -ne 6/,
+    'S2_ALL_SIX_MUST_BE_ATTEMPTED_EXECUTED_AND_PASSED_WITH_NO_FAILING_WITNESSES');
+  const probeLoopStart = runnerScript.indexOf('    foreach ($testName in $tests) {');
+  const probeLoopEnd = runnerScript.indexOf('    $receipt.failed_exact_test_names =', probeLoopStart);
+  assert.ok(probeLoopStart > 0 && probeLoopEnd > probeLoopStart, 'S2_PROBE_LOOP_REQUIRED');
+  const probeLoop = runnerScript.slice(probeLoopStart, probeLoopEnd);
+  assert.doesNotMatch(probeLoop, /\bthrow\b|\bbreak\b|\bcontinue\b/,
+    'S2_ONE_FAILED_PROBE_MUST_NOT_ABORT_THE_REMAINING_FIVE');
+  assert.match(probeLoop, /\$receipt.tests \+= \[ordered\]@\{/,
+    'S2_EVERY_PROBE_MUST_HAVE_ITS_OWN_RECEIPT');
+  assert.match(probeLoop, /\$testExit = -1[\s\S]*try \{\n\s+& cargo test[\s\S]*\} catch \{/,
+    'S2_NATIVE_CARGO_FAILURE_MUST_NOT_ABORT_ALL_PROBES');
   assert.match(runnerScript, /Get-FileHash -Algorithm SHA256 -LiteralPath \$testLog/);
   assert.match(runnerScript, /\$receipt \| ConvertTo-Json -Depth 8 \| Set-Content/);
   assert.doesNotMatch(runnerScript, /gh release|cargo build --locked --release|C:\\okx|gh api --method POST/);
@@ -1100,6 +1118,23 @@ for (const [before, after, reason] of [
   ['$namedPass = $log -cmatch', '$namedPass = $true #', 'S2_NAMED_PASS_REQUIRED'],
   ['$hasWitness = $log.Contains($witness)', '$hasWitness = $true #', 'S2_NATIVE_WITNESS_REQUIRED'],
   ['1 passed; 0 failed;', '0 passed; 0 failed;', 'S2_NONZERO_EXECUTED_CASE_REQUIRED'],
+  ['$failedTests.Add($testName)', 'throw "ABORT_AFTER_FIRST_FAILED_PROBE"',
+    'S2_FIRST_FAILED_LPAC_MUST_NOT_HIDE_FIVE_ACL_CASES'],
+  ['$failedTests.Add($testName)', 'break', 'S2_CANNOT_STOP_AFTER_FIRST_FAILED_TEST'],
+  ['$receipt.tests += [ordered]@{', '$null = [ordered]@{', 'S2_EACH_FAILED_TEST_NEEDS_RECEIPT'],
+  ['$receipt.attempted_exact_test_count += 1', '$null = 1',
+    'S2_ALL_ATTEMPTED_CASES_MUST_BE_COUNTED'],
+  ['$receipt.executed_exact_test_count += 1', '$null = 1',
+    'S2_FAILED_BUT_EXECUTED_NATIVE_TEST_MUST_BE_COUNTED'],
+  ['$receipt.passed_exact_test_count += 1', '$null = 1',
+    'S2_PASSED_CASES_MUST_BE_COUNTED_INDEPENDENTLY'],
+  ['$receipt.passed_exact_test_count -ne $tests.Count', '$false',
+    'S2_ANY_FAILING_CASE_MUST_FAIL_WHOLE_JOB'],
+  ['$failedTests.Count -ne 0 -or $tests.Count -ne 6', '$false -or $tests.Count -ne 6',
+    'S2_ANY_FAILED_CASE_MUST_FAIL_AGGREGATE'],
+  ['$receipt.failed_exact_test_names = $failedTests.ToArray()', '$receipt.failed_exact_test_names = @()',
+    'S2_FAILED_CASE_NAMES_MUST_APPEAR_IN_RECEIPT'],
+  ['(?:ok|FAILED)', '(?:ok)', 'S2_FAILED_NATIVE_EXECUTION_MUST_BE_RECORDED'],
   ["$tests.Count -ne 6", '$tests.Count -ne 0', 'S2_SIX_PHYSICAL_TESTS_REQUIRED'],
   ['Get-FileHash -Algorithm SHA256 -LiteralPath $testLog', '"unverified"', 'S2_LOG_SHA256_REQUIRED'],
   ['acceptance_status = \'NOT_PROVEN_UNTIL_INDEPENDENT_REVIEW\'',

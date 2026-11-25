@@ -1375,10 +1375,21 @@ mod native {
                 &mut information,
             )
         };
+        // Capture GetLastError immediately: subsequent zeroization and
+        // cleanup must not overwrite the native failure witness. Only an
+        // explicitly compiled unit-test executable may emit this code.
+        #[cfg(test)]
+        let create_last_error = if created == 0 {
+            unsafe { GetLastError() }
+        } else {
+            0
+        };
         // No other copy of this non-secret environment is retained.
         environment.zeroize();
         commandline.zeroize();
         if created == 0 {
+            #[cfg(test)]
+            eprintln!("OKX_S2_WIN32_CREATE_PROCESS_ERROR={create_last_error}");
             return Err(denied("create_suspended_appcontainer"));
         }
         if information.hProcess.is_null()
