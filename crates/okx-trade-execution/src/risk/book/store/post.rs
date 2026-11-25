@@ -21,7 +21,7 @@ use super::{
     LEGACY_MAX_SAFE_INTEGER, Result, RiskBookStore, RiskStoreError, VerifiedCensus, amount,
     apply_census_loss_for_scope, read_meta_for_scope, safe_integer, valid_digest,
 };
-use okx_domain_core::risk::{
+use crate::risk::{
     model::PostCausalProof,
     money::RiskAmount,
     rules::{RiskRuleError, validate_account_occupancy, validate_post_causality},

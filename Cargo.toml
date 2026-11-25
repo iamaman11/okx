@@ -14,11 +14,13 @@ members = [
     "crates/okx-observation",
     "crates/okx-ws",
     "crates/okx-market-runtime",
-    "crates/okx-domain-core",
+    "crates/okx-engine-domain",
+    "crates/okx-research-domain",
     "crates/okx-strategy-core",
     "crates/okx-analysis",
     "crates/okx-research",
     "crates/okx-research-service",
+    "crates/okx-research-protocol",
     "crates/okx-trade-execution",
 ]
 

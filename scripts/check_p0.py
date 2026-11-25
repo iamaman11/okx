@@ -6,12 +6,13 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import statistics
 import subprocess
 import sys
 import time
 
-from check_ci_native_scope import category
+from check_ci_native_scope import DRAFT_CHECKS, select_draft
 
 ROOT = Path(__file__).resolve().parents[1]
 MCP = ROOT / "cloudflare/okx-mcp"
@@ -21,8 +22,11 @@ WORKER_TESTS = (
     "analytics::planner::tests::market_plan_rejects_unknown_operator_before_any_source_read",
     "analytics::market::tests::interior_gap_never_imputed",
     "analytics::market::tests::c20_rolling_mean_reuses_existing_market_pipeline_without_new_routing",
+    "edge_runtime::market_tests::public_market_operations_work_from_research_owner_and_cursor_reads_persisted_job",
 )
-SCOPES = {"kernel", "strategy", "analysis", "research", "worker", "wire", "ipc", "mcp", "host", "expanded"}
+STANDALONE_MCP_TEST = (
+    "edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket",
+)
 LOCAL_COMPONENTS = {
     "strategy": "okx-strategy-core",
     "analysis": "okx-analysis",
@@ -54,39 +58,6 @@ def changes(base):
     return paths
 
 
-def select(status, path):
-    if status not in {"A", "M"}:
-        return {"expanded"}
-    if path == "README.md" or (path.startswith("docs/") and path.endswith(".md")):
-        return set()
-    if path.startswith("crates/okx-strategy-core/src/") and path.endswith(".rs"):
-        return {"strategy", "research", "worker", "analysis"}
-    # Use the exact fail-closed Ready classifier for host-only Rust ownership.
-    # Cargo manifests, installer changes and mixed diffs still expand tests.
-    if category(path) in {"host-controller", "host-launcher"}:
-        return {"host"}
-    if path in {"crates/okx-domain-core/src/" + f for f in ("operators.rs", "query_plan.rs")}:
-        return {"kernel"}
-    if path.startswith("crates/okx-analysis/src/") and path.endswith(".rs"):
-        return {"analysis", "kernel"}
-    if path.startswith("crates/okx-research/src/") and path.endswith(".rs"):
-        return {"research", "worker"}
-    if path.startswith("crates/okx-research-service/") and path.endswith(".rs") and not path.endswith("/build.rs"):
-        # The Worker owns its source adapters, telemetry and calculations.
-        # Running Agent process/financial tests for such internal changes
-        # defeats the Research-only editing boundary.  Only Worker transport
-        # and entrypoint changes must also exercise the consuming Agent.
-        if (path in {"crates/okx-research-service/src/ipc.rs", "crates/okx-research-service/src/main.rs"}
-                or path.startswith("crates/okx-research-service/src/ipc/")):
-            return {"ipc", "worker"}
-        return {"worker"}
-    if path.startswith("crates/okx-ipc-contracts/src/") and path.endswith(".rs"):
-        return {"wire", "ipc", "worker", "mcp"}
-    if path.startswith(("cloudflare/okx-mcp/src/", "cloudflare/okx-mcp/contracts/")):
-        return {"mcp", "wire", "worker"}
-    return {"expanded"}
-
-
 def report(message):
     print(message, flush=True)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -102,18 +73,20 @@ def check_counts(output, required):
     return len(passed)
 
 
-def test_command(package, target=("--lib",), required=(), exact=False, show_output=False):
+def test_command(package, target=("--lib",), required=(), exact=False, show_output=False, ignored=False):
     cmd = ["cargo", "test", "--locked", "-p", package, *target, "--message-format=json-render-diagnostics"]
     cmd.extend(["--", "--test-threads", "2"])
     if exact:
         cmd.extend(["--exact", *required])
     if show_output:
         cmd.append("--show-output")
+    if ignored:
+        cmd.append("--ignored")
     return cmd
 
 
-def tests(package, target=("--lib",), required=(), exact=False, show_output=False, extra_env=None):
-    cmd = test_command(package, target, required, exact, show_output)
+def tests(package, target=("--lib",), required=(), exact=False, show_output=False, extra_env=None, ignored=False):
+    cmd = test_command(package, target, required, exact, show_output, ignored)
     print(shlex.join(cmd), flush=True)
     started = time.monotonic()
     run = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, text=True,
@@ -365,11 +338,17 @@ def report_mcp_native_under_research(value):
 
 
 def execute(scopes):
+    if scopes & {"expanded", "mcp"}:
+        # Fast, dependency-free public product contract guard. Run before
+        # Cargo/Node setup so an unsafe Edge or Engine tool/schema change
+        # fails immediately even in a narrowly selected Draft check.
+        subprocess.run([sys.executable, "scripts/check_product_contract.py", "--self-test"], cwd=ROOT, check=True)
+        subprocess.run([sys.executable, "scripts/check_product_contract.py"], cwd=ROOT, check=True)
     if "expanded" in scopes:
         # Check the local platform and changed build inputs. Ready covers Windows and the release.
         subprocess.run(["cargo", "check", "--locked", "--workspace", "--all-targets"], cwd=ROOT, check=True)
         subprocess.run([sys.executable, "scripts/check_architecture.py"], cwd=ROOT, check=True)
-        scopes = SCOPES
+        scopes = DRAFT_CHECKS
     if "host" in scopes:
         # Host-only changes run both executables and their typed protocol;
         # the MCP bridge consumes these results without a trading Engine.
@@ -378,7 +357,7 @@ def execute(scopes):
         tests("okx-host-controller", ())
         tests("okx-bridge-mcp", ())
     if "kernel" in scopes:
-        tests("okx-domain-core")
+        tests("okx-research-domain")
     if "strategy" in scopes or "analysis" in scopes or "research" in scopes or "kernel" in scopes:
         tests("okx-strategy-core", required=(PLAN_TEST, GAP_TEST))
     if "analysis" in scopes:
@@ -387,6 +366,7 @@ def execute(scopes):
         tests("okx-research")
     if "wire" in scopes:
         tests("okx-ipc-contracts")
+        tests("okx-research-protocol")
     if "worker" in scopes:
         tests("okx-research-service", required=WORKER_TESTS)
         perf = tests("okx-research-service", required=(
@@ -399,8 +379,13 @@ def execute(scopes):
         # The exact Agent IPC test below spawns a separate, actual Miniflare
         # process. Install its existing locked dependencies before that test.
         subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=MCP, check=True)
-    if "ipc" in scopes:
+        if "worker" in scopes:
+            tests("okx-research-service", required=STANDALONE_MCP_TEST, exact=True, ignored=True)
+    if scopes & {"ipc", "worker-ipc"}:
         tests("okx-research-service", ("--test", "ipc_process"))
+    if "worker-ipc" in scopes:
+        tests("okx-research-service", ("--test", "causal_release_smoke"))
+    if "ipc" in scopes:
         # Binary renaming must preserve content-addressed legacy installations
         # and stage only the verified new Research Service image.
         tests("okx-trading-engine", required=(
@@ -416,7 +401,15 @@ def execute(scopes):
                                            cwd=ROOT, text=True)
         suffix = ".exe" if os.name == "nt" else ""
         worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-service" + suffix)
-        os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(worker)
+        # Shipping and standalone Research checks use the production host-wide
+        # singleton. Only Engine's legacy child tests can spawn this opt-in
+        # debug binary; #[cfg(test)] ResearchClient injects a per-root token.
+        subprocess.run(["cargo", "build", "--locked", "-p", "okx-research-service",
+                        "--bin", "okx-research-service", "--features", "test-isolated-singleton"],
+                       cwd=ROOT, check=True)
+        isolated_worker = worker.with_name("okx-research-service-test-isolated" + suffix)
+        shutil.copy2(worker, isolated_worker)
+        os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(isolated_worker)
         tests("okx-trading-engine", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
         tests("okx-trading-engine", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
         tests("okx-trading-engine", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)
@@ -471,11 +464,18 @@ def main():
     parser.add_argument("--base", default="origin/main", help="compare working tree with merge base")
     parser.add_argument("--plan", action="store_true", help="print selection without building")
     parser.add_argument("--expanded", action="store_true", help="also check broader semantic impact")
+    parser.add_argument("--checks", help="execute the comma-separated checks emitted by the CI classifier")
     parser.add_argument("--component", choices=sorted({*LOCAL_COMPONENTS, "mcp"}),
                         help="test one component locally")
     parser.add_argument("--repeat", type=int, default=1,
                         help="repeat the local component check in the same build directory")
     args = parser.parse_args()
+    if args.checks is not None:
+        scopes = set(args.checks.split(",")) if args.checks else set()
+        if not scopes <= DRAFT_CHECKS or args.component or args.plan or args.expanded or args.repeat != 1:
+            parser.error("--checks requires an unmodified CI check list")
+        execute(scopes)
+        return
     if args.component:
         if args.expanded or args.repeat < 1:
             parser.error("--component requires a positive --repeat and excludes --expanded")
@@ -485,14 +485,11 @@ def main():
         parser.error("--repeat requires --component")
     scopes = {"expanded"} if args.expanded else set()
     for status, path in changes(args.base):
-        selected = select(status, path)
+        selected = select_draft({"A": "added", "M": "modified"}.get(status, status), path)
         print(f"{status} {path!r}: {', '.join(sorted(selected)) or 'documentation'}", flush=True)
         scopes.update(selected)
     report(f"P0 on {git('rev-parse', 'HEAD').decode().strip()} vs {args.base}: "
            f"{', '.join(sorted(scopes)) or 'no code changes'}.")
-    if args.plan and os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-            out.write(f"code={'true' if scopes else 'false'}\n")
     if not args.plan:
         execute(scopes)
 

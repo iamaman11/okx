@@ -1,5 +1,5 @@
 use super::{AnalyticsService, RunnerGuard, jobs::SignalOutboxState};
-use okx_ipc_contracts::research_ipc::{
+use okx_research_protocol::research_ipc::{
     SignalPosition, SignalSourceDigest, StrategySignalInput, StrategySignalProposal,
 };
 use sha2::{Digest, Sha256};

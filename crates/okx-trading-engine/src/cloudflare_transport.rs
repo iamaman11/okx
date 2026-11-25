@@ -32,7 +32,6 @@ pub struct CloudflareTransportConfig {
     ws_url: String,
     runtime_id: String,
     bearer_token: Zeroizing<String>,
-    host_scope: String,
 }
 impl CloudflareTransportConfig {
     /// Isolated Miniflare fixture only. Production `new` accepts WSS exclusively;
@@ -49,7 +48,6 @@ impl CloudflareTransportConfig {
             ws_url,
             runtime_id: "windows-primary".into(),
             bearer_token: Zeroizing::new("integration-only-ephemeral-token".into()),
-            host_scope: "0".repeat(64),
         }
     }
 
@@ -57,8 +55,6 @@ impl CloudflareTransportConfig {
         ws_url: String,
         runtime_id: String,
         bearer_token: Zeroizing<String>,
-        profile: DirectRuntimeProfile,
-        host_scope: String,
     ) -> AgentResult<Self> {
         if !ws_url.starts_with("wss://") || ws_url.contains('@') || ws_url.contains('#') {
             return Err(AgentError::InvalidCloudflareWsUrl);
@@ -71,18 +67,7 @@ impl CloudflareTransportConfig {
         {
             return Err(AgentError::InvalidCloudflareRuntimeId);
         }
-        if profile != DirectRuntimeProfile::Engine {
-            return Err(AgentError::InvalidCloudflareRuntimeId);
-        }
-        if host_scope.len() != 64
-            || !host_scope
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(AgentError::InvalidCloudflareRuntimeId);
-        }
         Ok(Self {
-            host_scope,
             ws_url,
             runtime_id,
             bearer_token,
@@ -111,19 +96,6 @@ fn current_binary_sha256() -> AgentResult<String> {
         digest.update(&chunk[..count]);
     }
     Ok(format!("{:x}", digest.finalize()))
-}
-
-fn research_only_permits(operation: &AgentOperation) -> bool {
-    use okx_ipc_contracts::trading::DiagnosticsView;
-    matches!(
-        operation,
-        AgentOperation::Market { .. }
-            | AgentOperation::MarketCapabilities
-            | AgentOperation::MarketMicrostructure { .. }
-            | AgentOperation::Research { .. }
-            | AgentOperation::FindInstruments { .. }
-            | AgentOperation::MarketOverview { .. }
-    ) || matches!(operation, AgentOperation::Diagnostics { request } if request.view == Some(DiagnosticsView::Research) && request.account.is_none())
 }
 
 /// Existing 64-flight budget reserves its final slot for bounded diagnostics.
@@ -195,8 +167,9 @@ async fn run_session(
     let installation_id = ctx
         .finance
         .accounts()
-        .ok()
-        .map(|accounts| accounts.installation_id().to_owned());
+        .map_err(|_| transport("FINANCE_INSTALLATION_REQUIRED_FOR_CLOUDFLARE"))?
+        .installation_id()
+        .to_owned();
     let mut request = config
         .ws_url
         .clone()
@@ -215,29 +188,16 @@ async fn run_session(
     let binary = current_binary_sha256()?;
     let incarnation = std::env::var("OKX_CONTROL_AGENT_INCAR")
         .map_err(|_| transport("CONTROL_INCARNATION_UNAVAILABLE"))?;
-    let hello = match installation_id {
-        Some(installation_id) => F::Hello {
-            schema: SCHEMA.into(),
-            runtime_id: config.runtime_id.clone(),
-            connection_id,
-            runtime_profile: DirectRuntimeProfile::Engine,
-            installation_id,
-            contract: okx_ipc_contracts::accounts::PRODUCT_CONTRACT.into(),
-            agent_pid: std::process::id(),
-            agent_binary_sha256: binary,
-            agent_incarnation: incarnation,
-        },
-        None => F::HelloResearch {
-            schema: SCHEMA.into(),
-            runtime_id: config.runtime_id.clone(),
-            connection_id,
-            runtime_profile: DirectRuntimeProfile::Engine,
-            host_scope: config.host_scope.clone(),
-            contract: okx_ipc_contracts::accounts::PRODUCT_CONTRACT.into(),
-            agent_pid: std::process::id(),
-            agent_binary_sha256: binary,
-            agent_incarnation: incarnation,
-        },
+    let hello = F::Hello {
+        schema: SCHEMA.into(),
+        runtime_id: config.runtime_id.clone(),
+        connection_id,
+        runtime_profile: DirectRuntimeProfile::Engine,
+        installation_id,
+        contract: okx_ipc_contracts::accounts::PRODUCT_CONTRACT.into(),
+        agent_pid: std::process::id(),
+        agent_binary_sha256: binary,
+        agent_incarnation: incarnation,
     };
     run_connected_session(socket, hello, ctx, shutdown).await
 }
@@ -256,23 +216,23 @@ where
         + Unpin
         + Send,
 {
-    let installation_id = match &hello {
-        F::Hello {
-            installation_id, ..
-        } => {
-            let actual = ctx
-                .finance
-                .accounts()
-                .map_err(|_| transport("FINANCE_INSTALLATION_REQUIRED_FOR_CLOUDFLARE"))?
-                .installation_id();
-            if installation_id != actual {
-                return Err(transport("INSTALLATION_MISMATCH"));
-            }
-            Some(installation_id.clone())
-        }
-        F::HelloResearch { .. } if ctx.finance.accounts().is_err() => None,
-        _ => return Err(transport("INVALID_HELLO_MODE")),
+    let F::Hello {
+        installation_id,
+        runtime_profile: DirectRuntimeProfile::Engine,
+        ..
+    } = &hello
+    else {
+        return Err(transport("INVALID_HELLO_MODE"));
     };
+    let actual = ctx
+        .finance
+        .accounts()
+        .map_err(|_| transport("FINANCE_INSTALLATION_REQUIRED_FOR_CLOUDFLARE"))?
+        .installation_id();
+    if installation_id != actual {
+        return Err(transport("INSTALLATION_MISMATCH"));
+    }
+    let installation_id = installation_id.clone();
     let (mut sink, mut source) = socket.split();
     send(&mut sink, hello).await?;
     let hello = tokio::time::timeout(Duration::from_secs(5), source.next())
@@ -315,15 +275,14 @@ where
         match f{
         F::Ping{nonce,..}=>{challenges.retain(|_,t|t.elapsed()<Duration::from_secs(15));if challenges.len()<64{challenges.insert(nonce.clone(),Instant::now());}send(&mut sink,F::Pong{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,nonce}).await?;},
         F::Pong{..}=>{},
-        F::PolicySnapshot{snapshot,..}=>{if installation_id.is_none(){return Err(transport("RESEARCH_POLICY_FORBIDDEN"));}ctx.finance.trade().map_err(|_|transport("FINANCE_INSTALLATION_REQUIRED_FOR_CLOUDFLARE"))?.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
+        F::PolicySnapshot{snapshot,..}=>{ctx.finance.trade().map_err(|_|transport("FINANCE_INSTALLATION_REQUIRED_FOR_CLOUDFLARE"))?.update_governance(&snapshot).await.map_err(|_|transport("INVALID_POLICY_SNAPSHOT"))?;},
         F::RiskControlResult{..}=>return Err(transport("RETIRED_FINANCIAL_FRAME")),
         F::Request{request,operator_governance,..}=>{
-        if installation_id.is_none() && (!research_only_permits(&request.operation) || request.account.is_some() || operator_governance.is_some()) { return Err(transport("RESEARCH_OPERATION_FORBIDDEN")); }
         let id=request.request_id.clone();send(&mut sink,F::DeliveryAck{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,request_id:id.clone()}).await?;
         if active.contains(&id){continue;}
         let finance_view = matches!(&request.operation, AgentOperation::Diagnostics{request:diagnostic} if diagnostic.view.is_some());
         if !flight_admitted(flights.len(), finance_view) {send(&mut sink,F::Response{schema:SCHEMA.into(),session_id:session_id.clone(),connection_generation,response:response(&id,Err("NATIVE_QUEUE_FULL".into()))}).await?;continue;}
-        let governance=operator_governance.filter(|g|g.valid()&&g.session_generation==connection_generation&&installation_id.as_ref().is_some_and(|id| &g.state.installation_id==id)&&g.delivery_challenge.as_ref().and_then(|key|challenges.remove(key)).is_some_and(|t|t.elapsed()<Duration::from_secs(15)));
+        let governance=operator_governance.filter(|g|g.valid()&&g.session_generation==connection_generation&&g.state.installation_id==installation_id&&g.delivery_challenge.as_ref().and_then(|key|challenges.remove(key)).is_some_and(|t|t.elapsed()<Duration::from_secs(15)));
         let context=ctx.clone();let reads=read_capacity.clone();let fast_reads=finance_capacity.clone();active.insert(id.clone());
         flights.push(async move{
             let _permit=if finance_view {

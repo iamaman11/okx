@@ -395,11 +395,8 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn public_finance_diagnostic_does_not_queue_behind_sql_or_trace() {
-        use crate::{
-            accounts, query, research_test_support::client as research_test_client,
-            trade_service::TradeService,
-        };
-        use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
+        use crate::{accounts, query, trade_service::TradeService};
+        use okx_api::{OkxEnvironment, RateBudget, Region};
         use okx_ipc_contracts::{
             AgentOperation, AgentRequest, DataQuality,
             trading::{DiagnosticsRequest, DiagnosticsView},
@@ -441,27 +438,20 @@ mod tests {
         registry.shutdown().await;
         let resources = registry.resolve("fixture-a").await.unwrap();
         let env = OkxEnvironment::new(Region::Global, false);
-        let market = crate::market_bootstrap::MarketBootstrapper::new(
-            OkxPublicClient::with_rate_budget(env, budget.clone()).unwrap(),
-        );
         let reference =
             okx_observation::ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![])
                 .unwrap();
         let (_public, public_ws) =
             okx_market_runtime::PublicWsCoordinator::new_with_rate_budget(env, reference, budget);
-        let analytics = research_test_client(root.join("analytics"), market.clone()).unwrap();
         let trade = Arc::new(TradeService::new(
             registry.clone(),
-            public_ws.clone(),
+            public_ws,
             crate::risk_bridge::NativeRiskClient::local(
                 crate::native_finance_risk::NativeFinanceRisk::from_owner(finance_owner.clone()),
             ),
         ));
         let ctx = query::DispatchContext {
-            research: analytics,
-            public_ws,
             finance: crate::finance_dispatch::FinanceDispatch::ready(registry.clone(), trade),
-            market,
         };
         resources.finance_trace.begin(99, 100, 1);
         let request = AgentRequest {

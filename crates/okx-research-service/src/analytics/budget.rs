@@ -1,7 +1,7 @@
 //! Admission estimates for the existing research CPU owner.
 //! MiB permits cover input, intermediate, artifact staging and output headroom.
 //! These are conservative reservations, NOT observed RSS measurements.
-use okx_ipc_contracts::analytics::ResearchRequest;
+use okx_research_protocol::analytics::ResearchRequest;
 
 pub const MEMORY_TOTAL_MIB: u32 = 4096;
 const MIB: u64 = 1024 * 1024;
@@ -71,7 +71,7 @@ pub fn estimated_mib(request: &ResearchRequest) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_ipc_contracts::analytics::*;
+    use okx_research_protocol::analytics::*;
     fn job(instruments: usize, bars: u64, variants: usize) -> ResearchRequest {
         ResearchRequest::Grid {
             idempotency_key: "k9-test".into(),

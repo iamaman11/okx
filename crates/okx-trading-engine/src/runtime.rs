@@ -90,7 +90,6 @@ where
     let mut tasks = tokio::task::JoinSet::new();
     if let Ok(trade) = dispatch.finance.trade() {
         let trade = trade.clone();
-        trade.set_signal_research(dispatch.research.clone()).await;
         let signal = shutdown.clone();
         tasks.spawn(async move {
             trade.run(signal).await;
@@ -117,8 +116,7 @@ where
     let _ = tx.send(true);
     let drained = tokio::time::timeout(Duration::from_secs(9), async {
         while tasks.join_next().await.is_some() {}
-        // Financial drain starts immediately even if the separate worker is unresponsive.
-        tokio::join!(dispatch.finance.shutdown(), dispatch.research.shutdown());
+        dispatch.finance.shutdown().await;
     })
     .await
     .is_ok();

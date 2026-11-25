@@ -110,7 +110,7 @@ async fn stale_bill_coverage_blocks_settlement_after_inspect() {
 
 async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     let mut f = fixture().await;
-    let (market_stop, market_task, _socket, public) = opened_market(&mut f).await;
+    let (market_stop, market_task, _socket, _public) = opened_market(&mut f).await;
     let now = jiff::Timestamp::now().as_millisecond().to_string();
     f.feed.expect_current_public_clock();
     record_fee(&f.feed, &now);
@@ -273,23 +273,11 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
         assert_eq!(*f.feed.requests.lock().unwrap(), requests_before);
         assert_eq!(*f.feed.outbound_posts.lock().unwrap(), posts_before);
     }
-    let market = crate::market_bootstrap::MarketBootstrapper::new(
-        okx_api::OkxPublicClient::with_http_transport(
-            okx_api::OkxEnvironment::new(okx_api::Region::Global, false),
-            okx_api::RateBudget::new(),
-            f.feed.clone(),
-        )
-        .unwrap(),
-    );
     let ctx = crate::query::DispatchContext {
-        research: crate::research_test_support::client(f.root.join("analytics"), market.clone())
-            .unwrap(),
-        public_ws: public,
         finance: crate::finance_dispatch::FinanceDispatch::ready(
             f.registry.clone(),
             f.trade.clone(),
         ),
-        market,
     };
     // The old independent account SQL owner is gone. Occupied Native FIFO
     // timeout/reopen is covered by owner_diagnostic_busy_tests. Here the public

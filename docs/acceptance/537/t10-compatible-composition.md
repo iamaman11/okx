@@ -1,10 +1,18 @@
 # #537 / #518 T10 — accepted-origin Research v2 candidate
 
+> **Historical evidence only (superseded by #580 S2/S3).** The mixed-origin
+> v2 composer and its negative fixture remain available for audit, but CI no
+> longer runs the `research-composition-evidence` Draft job, and CONTROL no
+> longer accepts a v2 bundle for `DeployResearch`. Current Research deployment
+> requires the strict three-file `okx.windows.research-component/v1` PR Ready
+> artifact; see `docs/windows-installation.md`. Nothing in this archived T10
+> candidate constitutes present-day deployment authorization.
+
 This is a **candidate-only** acceptance. It does not install software, restart
 Agent/Engine, activate Worker, alter accounts, or certify physical T10. Its top
-source identity is the current PR head/tree; the installed CONTROL will permit
-promotion only after the same tree is merged to `main`, mandatory Ready checks
-pass, and the exact GitHub PR CI artifact is available.
+source identity was the candidate PR head/tree. Its then-proposed CONTROL
+promotion mechanism has since been retired; the modern accepted-artifact
+boundary is described separately in #580.
 
 ## Fixed accepted origins (22 November 2026)
 
@@ -35,17 +43,16 @@ component SHA256/size/IPC/storage version. It emits a v2 bundle of **exactly**
 
 Each Native component retains its `44912048553/14710029752` source origin;
 Worker retains `45057675543/14769181785`. The top-level candidate source
-HEAD/tree is the tested composition PR HEAD/tree. This is precisely the
-mixed-origin format checked by the current installed `DeployResearch`; it is
-never passed to a full-Agent deployment operation.
+HEAD/tree is the tested composition PR HEAD/tree. This was the mixed-origin
+format proposed for the former `DeployResearch` path; **current CONTROL
+rejects it**. It must not be passed to a full-Agent deployment operation as a
+substitute for a verified Agent origin.
 
-The `research-composition-evidence` PR label triggers the isolated Windows
-candidate job in `CI` for Draft review. This job **does not compile** any EXE
-or weaken the ordinary Ready Native/Finance gate. Its artifact is named
-`okx-windows-bundle-<PR_HEAD>` to retain the CONTROL GitHub origin convention;
-the separate proof gives all file hashes and source IDs. The 14-day Actions
-retention is **not** a durable independent release; long-term retention and
-activation are separate tasks in #537 §1.1.
+Historically, the `research-composition-evidence` PR label triggered an isolated
+Windows candidate job in Draft CI, producing `okx-windows-bundle-<PR_HEAD>`.
+That job and artifact path have been **removed**. The historical verification
+scripts and proof fixtures remain as regression evidence, but are not a
+deployable Research component or a durable independent release.
 
 ## Negative acceptance and exact boundary
 
@@ -57,9 +64,8 @@ Real downloads add the GitHub/merged-tree readback unavailable to pure fixtures.
 The packager then repeats five negative substitutions against the **actual
 downloaded component bytes** and records each typed refusal in the proof file.
 
-The test uses the **existing** CONTROL source schema and per-component rules,
-but does not call the installed CONTROL operation: a successful actual
-`DeployResearch` would stage a candidate and could activate the running child.
-Final installed verification requires a separately accepted/merged release and
+The test uses the **historical** CONTROL v2 schema and per-component rules,
+but does not call the installed CONTROL operation. Final installed verification
+requires a separately accepted/merged **v1 standalone Research** release and
 readback of Agent PID/SHA, Research PID/SHA, source/storage I/O, peak RSS,
 Windows committed-memory pressure, cancellation and recovery under load.

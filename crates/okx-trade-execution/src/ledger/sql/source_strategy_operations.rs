@@ -1,6 +1,68 @@
 //! Original strategy projections and decision journal on one account-scoped snapshot.
 use super::super::*;
 impl AccountStore {
+    pub(crate) fn verify_strategy_activation_sql(
+        db: &Connection,
+        scope: (&str, &str),
+        instance_id: &str,
+        activation_revision: i64,
+    ) -> StoreResult<()> {
+        let current = Self::instance_sql(db, Some(scope), instance_id)?
+            .ok_or(StoreError::Invalid("STRATEGY_INSTANCE_NOT_FOUND"))?;
+        if !current.enabled {
+            return Err(StoreError::Invalid("STRATEGY_STOPPED"));
+        }
+        if current.policy_revision != activation_revision {
+            return Err(StoreError::Invalid("STRATEGY_ACTIVATION_CHANGED"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_strategy_send_sql(
+        tx: &rusqlite::Transaction<'_>,
+        scope: (&str, &str),
+        intent: &StoredIntent,
+        activation_revision: i64,
+        now: i64,
+    ) -> StoreResult<()> {
+        let operation = format!("strategy-send:{}", intent.intent_id);
+        Self::insert_strategy_receipt_sql(
+            tx,
+            Some(scope),
+            &operation,
+            "STRATEGY_SEND_ACTIVATION",
+            &intent.request_hash,
+            &activation_revision.to_string(),
+            now,
+        )
+    }
+
+    pub(crate) fn verify_strategy_send_sql(
+        tx: &rusqlite::Transaction<'_>,
+        scope: (&str, &str),
+        intent_id: &str,
+    ) -> StoreResult<()> {
+        let operation = format!("strategy-send:{intent_id}");
+        let Some(receipt) = Self::operation_sql(tx, Some(scope), &operation)? else {
+            return Ok(());
+        };
+        let (instance, hash): (String, String) = tx.query_row(
+            "SELECT p.strategy_instance,i.request_hash FROM intent_plans p
+             JOIN intents i USING(installation_id,account_key,intent_id)
+             WHERE p.installation_id=?1 AND p.account_key=?2 AND p.intent_id=?3",
+            params![scope.0, scope.1, intent_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if receipt.kind != "STRATEGY_SEND_ACTIVATION" || receipt.request_hash != hash {
+            return Err(StoreError::Invalid("STRATEGY_SEND_ACTIVATION_CORRUPT"));
+        }
+        let activation_revision = receipt
+            .result_ref
+            .parse()
+            .map_err(|_| StoreError::Invalid("STRATEGY_SEND_ACTIVATION_CORRUPT"))?;
+        Self::verify_strategy_activation_sql(tx, scope, &instance, activation_revision)
+    }
+
     pub(crate) fn strategy_status_sql(
         db: &Connection,
         scope: Option<(&str, &str)>,
@@ -49,9 +111,13 @@ impl AccountStore {
         let partial = positions.len() > 50;
         positions.truncate(50);
         let initialized_at = Self::source_capture_state_sql(db, scope)?.initialized_at;
-        Ok(
-            serde_json::json!({"instance":instance,"definition":Self::strategy_definition_sql(db,scope,id)?,"positions":positions,"positions_partial":partial,"limits":{"allocated_budget_usd":instance.budget,"policy_revision":instance.policy_revision},"nav":Self::nav_summary_sql(db,scope,initialized_at,now,&[id.into()],&["USD".into()])?,"capital_scope":if id=="manual" {"account"} else {"strategy"},"risk":Self::financial_risk_sql(db,scope,now,if id=="manual" {None} else {Some(id)})?}),
-        )
+        let mut result = serde_json::json!({"instance":instance,"definition":Self::strategy_definition_sql(db,scope,id)?,"positions":positions,"positions_partial":partial,"limits":{"allocated_budget_usd":instance.budget,"policy_revision":instance.policy_revision},"nav":Self::nav_summary_sql(db,scope,initialized_at,now,&[id.into()],&["USD".into()])?,"capital_scope":if id=="manual" {"account"} else {"strategy"},"risk":Self::financial_risk_sql(db,scope,now,if id=="manual" {None} else {Some(id)})?});
+        if let Some((_, account)) = scope.filter(|_| id != "manual") {
+            result["account"] = serde_json::json!(account);
+            result["configuration_digest"] =
+                serde_json::json!(instance.configuration_digest(account)?);
+        }
+        Ok(result)
     }
     fn latest_strategy_claim_sql(
         db: &Connection,
@@ -330,6 +396,46 @@ mod tests {
         let mut updated = a.clone();
         updated.parameters = "{\"fast\":3}".into();
         updated.policy_revision = 2;
+        let changes = tx.total_changes();
+        assert!(matches!(
+            AccountStore::mutate_instance_sql(
+                &tx,
+                scope,
+                "update",
+                "update-hash",
+                "update",
+                &updated,
+                Some(1),
+                4,
+            ),
+            Err(StoreError::Invalid("STRATEGY_UPDATE_REQUIRES_STOPPED"))
+        ));
+        assert_eq!(tx.total_changes(), changes);
+        assert!(
+            AccountStore::operation_sql(&tx, scope, "update")
+                .unwrap()
+                .is_none()
+        );
+
+        let mut stopped = a.clone();
+        stopped.policy_revision = 2;
+        let receipt = AccountStore::mutate_instance_sql(
+            &tx,
+            scope,
+            "stop",
+            "stop-hash",
+            "stop",
+            &stopped,
+            Some(1),
+            5,
+        )
+        .unwrap();
+        let stopped: StrategyInstance = serde_json::from_str(&receipt.result_ref).unwrap();
+        assert!(!stopped.enabled);
+        assert_eq!(stopped.definition_version, a.definition_version);
+
+        updated.enabled = stopped.enabled;
+        updated.policy_revision = 3;
         let receipt = AccountStore::mutate_instance_sql(
             &tx,
             scope,
@@ -337,8 +443,8 @@ mod tests {
             "update-hash",
             "update",
             &updated,
-            Some(1),
-            4,
+            Some(stopped.policy_revision),
+            6,
         )
         .unwrap();
         let updated: StrategyInstance = serde_json::from_str(&receipt.result_ref).unwrap();
@@ -351,24 +457,11 @@ mod tests {
                 "hash",
                 "update",
                 &updated,
-                Some(1),
-                5
+                Some(stopped.policy_revision),
+                7
             ),
             Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"))
         ));
-        let mut stopped = updated.clone();
-        stopped.policy_revision = 3;
-        AccountStore::mutate_instance_sql(
-            &tx,
-            scope,
-            "stop",
-            "stop-hash",
-            "stop",
-            &stopped,
-            Some(2),
-            6,
-        )
-        .unwrap();
         for index in 0..51 {
             tx.execute("INSERT INTO position_lots VALUES('installation','strategy-A',?1,'same-instance',NULL,NULL,'BTC-USDT-SWAP','long','1','100',5)",[format!("lot-{index:03}")]).unwrap();
         }

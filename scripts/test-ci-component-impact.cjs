@@ -6,20 +6,20 @@ const {analyze, changedFiles, markdown} = require('./ci-component-impact.cjs');
 
 const cwd = process.cwd();
 const names = [
-  'okx-trading-engine', 'okx-trade-execution', 'okx-domain-core',
-  'okx-ipc-contracts', 'okx-research-service', 'okx-strategy-core',
+  'okx-trading-engine', 'okx-trade-execution', 'okx-engine-domain', 'okx-research-domain',
+  'okx-ipc-contracts', 'okx-research-service', 'okx-research-protocol', 'okx-strategy-core',
   'okx-research', 'okx-analysis', 'okx-host-controller', 'okx-host-launcher', 'okx-api',
   'okx-host-protocol', 'okx-bridge-mcp',
 ];
 const e = (pkg, kind = null) => ({pkg, dep_kinds: [{kind, target: null}]});
 const edges = {
   'okx-trading-engine': [e('okx-trade-execution'), e('okx-ipc-contracts'), e('okx-api')],
-  'okx-trade-execution': [e('okx-domain-core')],
-  'okx-ipc-contracts': [e('okx-domain-core')],
-  'okx-research-service': [e('okx-research'), e('okx-strategy-core'), e('okx-ipc-contracts'), e('okx-api', 'dev')],
+  'okx-ipc-contracts': [e('okx-engine-domain'), e('okx-research-protocol')],
+  'okx-research-service': [e('okx-research'), e('okx-strategy-core'), e('okx-research-protocol'), e('okx-api', 'dev')],
   'okx-research': [e('okx-analysis')],
   'okx-analysis': [e('okx-strategy-core')],
-  'okx-strategy-core': [e('okx-domain-core')],
+  'okx-strategy-core': [e('okx-research-protocol')],
+  'okx-research-protocol': [e('okx-research-domain')],
   'okx-host-controller': [e('okx-host-launcher'), e('okx-host-protocol'), e('okx-ipc-contracts')],
   'okx-host-protocol': [e('okx-ipc-contracts')],
   'okx-bridge-mcp': [e('okx-host-protocol'), e('okx-ipc-contracts')],
@@ -32,6 +32,7 @@ const metadata = {
 };
 const files = (...paths) => [[...paths.map(filename => ({filename, status: 'modified'}))]];
 const binaries = report => report.potentially_affected_windows_binaries.map(x => x.binary).sort();
+const testRoots = report => report.potentially_affected_windows_test_roots.map(x => x.root).sort();
 const all = ['okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe'].sort();
 
 const research = analyze(metadata, files('crates/okx-strategy-core/src/operators.rs'));
@@ -52,12 +53,31 @@ assert.deepEqual(binaries(analyze(metadata, files('crates/okx-trade-execution/sr
   ['okx-agent.exe']);
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-strategy-core/src/time_series.rs'))),
   ['okx-research-service.exe']);
-assert.deepEqual(binaries(analyze(metadata, files('crates/okx-domain-core/src/risk/money.rs'))),
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-trade-execution/src/risk/money.rs'))),
+  ['okx-agent.exe']);
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-engine-domain/src/fee_model.rs'))),
+  ['okx-agent.exe', 'okx-host-control.exe']);
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-research-domain/src/lib.rs'))),
   ['okx-agent.exe', 'okx-host-control.exe', 'okx-research-service.exe']);
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-ipc-contracts/src/lib.rs'))),
+  ['okx-agent.exe', 'okx-host-control.exe']);
+assert.deepEqual(binaries(analyze(metadata, files('crates/okx-research-protocol/src/strategy_contract.rs'))),
   ['okx-agent.exe', 'okx-host-control.exe', 'okx-research-service.exe']);
+assert.deepEqual(testRoots(analyze(metadata, files('crates/okx-research-protocol/src/strategy_contract.rs'))),
+  ['okx-host-controller', 'okx-research-service', 'okx-trading-engine']);
 // A dev-only Research dependency must not be attributed to its release EXE.
 assert.deepEqual(binaries(analyze(metadata, files('crates/okx-api/src/lib.rs'))), ['okx-agent.exe']);
+
+// After the Engine production split, a retained dev-only T06–T10 Research
+// fixture still requires Engine test execution for Research protocol edits.
+// The diagnostics must distinguish this from shipping-EXE compilation.
+const devResearch = structuredClone(metadata);
+devResearch.resolve.nodes.find(n => n.id === 'okx-ipc-contracts').deps = [e('okx-engine-domain')];
+devResearch.resolve.nodes.find(n => n.id === 'okx-trading-engine').deps.push(e('okx-research-protocol', 'dev'));
+const protocol = analyze(devResearch, files('crates/okx-research-protocol/src/strategy_contract.rs'));
+assert.deepEqual(binaries(protocol), ['okx-research-service.exe']);
+assert.deepEqual(testRoots(protocol), ['okx-research-service', 'okx-trading-engine']);
+assert.match(markdown(protocol), /Normal\/build\/dev dependency paths/);
 
 const cloudflare = analyze(metadata, files('cloudflare/okx-mcp/src/mcp.ts', 'docs/a.md'));
 assert.deepEqual(binaries(cloudflare), []);

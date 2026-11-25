@@ -10,6 +10,7 @@ pub mod job;
 pub mod legacy_bootstrap;
 pub mod lifecycle_executor;
 pub mod provenance;
+pub mod research_supervisor;
 pub mod root_migration;
 pub mod runtime;
 pub mod single_instance;
@@ -95,6 +96,36 @@ pub enum HostControlError {
 
     #[error("desired lifecycle state is corrupt or unsupported")]
     DesiredStateCorrupt,
+
+    #[error("independent Research desired state is corrupt or unsupported")]
+    ResearchStateCorrupt,
+
+    #[error("independent Research active/installed image or generation does not match request")]
+    ResearchIdentityMismatch,
+
+    #[error("independent Research process generation overflow")]
+    ResearchGenerationExhausted,
+
+    #[error("Research image activation failed and the previous image was restored")]
+    ResearchActivationRolledBack,
+
+    #[error("Research image transition could not prove restoration of the previous image")]
+    ResearchRollbackUnconfirmed,
+
+    #[error("Research image pointer global Windows lock is unavailable or abandoned")]
+    ResearchPointerLockUnavailable,
+
+    #[error("the verified Engine image must expose the independent Engine runtime contract")]
+    IndependentEngineRequired,
+
+    #[error("existing Research catalog requires its expected scope fingerprint")]
+    ResearchCatalogScopeRequired,
+
+    #[error("expected existing Research catalog is missing")]
+    ResearchCatalogMissing,
+
+    #[error("Research catalog roots or selected bindings conflict")]
+    ResearchCatalogConflict,
 
     #[error("account metadata catalog is corrupt or invalid")]
     AccountCatalogInvalid,
@@ -185,6 +216,16 @@ impl HostControlError {
             Self::ArtifactHashMismatch => "ARTIFACT_HASH_MISMATCH",
             Self::InvalidExecutionPath => "INVALID_EXECUTION_PATH",
             Self::DesiredStateCorrupt => "DESIRED_STATE_CORRUPT",
+            Self::ResearchStateCorrupt => "RESEARCH_STATE_CORRUPT",
+            Self::ResearchIdentityMismatch => "RESEARCH_IDENTITY_MISMATCH",
+            Self::ResearchGenerationExhausted => "RESEARCH_GENERATION_EXHAUSTED",
+            Self::ResearchActivationRolledBack => "RESEARCH_ACTIVATION_ROLLED_BACK",
+            Self::ResearchRollbackUnconfirmed => "RESEARCH_ROLLBACK_UNCONFIRMED",
+            Self::ResearchPointerLockUnavailable => "RESEARCH_POINTER_LOCK_UNAVAILABLE",
+            Self::IndependentEngineRequired => "INDEPENDENT_ENGINE_REQUIRED",
+            Self::ResearchCatalogScopeRequired => "RESEARCH_CATALOG_SCOPE_REQUIRED",
+            Self::ResearchCatalogMissing => "RESEARCH_CATALOG_MISSING",
+            Self::ResearchCatalogConflict => "RESEARCH_CATALOG_CONFLICT",
             Self::JobAssignment(_) => "JOB_ASSIGNMENT_FAILED",
             Self::ControllerAlreadyRunning => "CONTROLLER_ALREADY_RUNNING",
             Self::WindowsIdentityUnavailable => "WINDOWS_IDENTITY_UNAVAILABLE",

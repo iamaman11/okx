@@ -9,7 +9,7 @@ const root = '/tmp/ci-head';
 const base = '/tmp/ci-base';
 const owners = ['okx-trading-engine', 'okx-trade-execution', 'okx-host-controller',
   'okx-host-launcher', 'okx-host-protocol', 'okx-research-service', 'okx-research', 'okx-strategy-core',
-  'okx-ipc-contracts'];
+  'okx-ipc-contracts', 'okx-research-protocol', 'okx-research-domain'];
 const external = name => `registry+https://github.com/rust-lang/crates.io-index#${name}@1.0.0`;
 const edge = (pkg, kind = null, target = null) => ({name: pkg.split('#')[0], pkg,
   dep_kinds: [{kind, target}]});
@@ -20,6 +20,7 @@ const dependencies = {
   'okx-host-protocol': [edge('okx-ipc-contracts')],
   'okx-research-service': [edge('okx-research'), edge('okx-strategy-core'), edge('okx-ipc-contracts')],
   'okx-research': [edge('okx-strategy-core')],
+  'okx-research-protocol': [edge('okx-research-domain')],
 };
 function metadata(workspaceRoot = root) {
   const externalNames = ['sqlite', 'serde'];
@@ -45,12 +46,28 @@ const host = files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock');
 const head = metadata(), before = metadata(base);
 
 assert.equal(verify(before, head, research, 'research').protected_closures_identical, true);
+assert.equal(verify(before, head, files('crates/okx-research-protocol/src/analytics.rs'),
+  'research').protected_closures_identical, true);
+assert.equal(verify(before, head, files('crates/okx-research-domain/src/numeric.rs'),
+  'research').protected_closures_identical, true);
 assert.equal(verify(before, head, files('crates/okx-research-service/Cargo.toml',
   'crates/okx-research-service/src/edge_runtime.rs',
   'crates/okx-research-service/tests/edge_wss.rs'), 'research').protected_closures_identical, true);
 assert.equal(verify(before, head, host, 'host-controller').target, 'x86_64-pc-windows-msvc');
 assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock',
   'cloudflare/okx-mcp/src/mcp.ts'), 'host-controller').protected_closures_identical, true);
+assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml',
+  'crates/okx-host-controller/src/research_supervisor.rs',
+  'crates/okx-host-protocol/src/lib.rs'), 'host-controller').protected_closures_identical, true);
+assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml',
+  'crates/okx-host-controller/tests/research_process.rs',
+  'crates/okx-host-protocol/tests/research_wire.rs'), 'host-controller').protected_closures_identical, true);
+for (const unsafeHostDiff of [
+  files('crates/okx-host-controller/Cargo.toml', 'crates/okx-ipc-contracts/src/lib.rs'),
+  files('crates/okx-host-controller/Cargo.toml', 'crates/okx-research-service/src/edge_runtime.rs'),
+  files('crates/okx-host-controller/Cargo.toml', 'crates/okx-host-controller/src/research_supervisor.json'),
+]) assert.throws(() => verify(before, head, unsafeHostDiff, 'host-controller'),
+  /MIXED_OR_UNSAFE_CARGO_DIFF/);
 assert.equal(verify(before, head, files('crates/okx-host-launcher/Cargo.toml'),
   'host-launcher').protected_closures_identical, true);
 
@@ -113,7 +130,21 @@ const includedBefore = structuredClone(before);
 includedBefore.resolve.nodes.find(n => n.id === 'okx-trading-engine').deps.push(edge('okx-research-service'));
 assert.throws(() => verify(includedBefore, included,
   files('crates/okx-research-service/Cargo.toml'), 'research'),
-  /EDITED_MANIFEST_IN_PROTECTED_CARGO_CLOSURE/);
+  /EDITED_SOURCE_IN_PROTECTED_CARGO_CLOSURE/);
+
+// A source-only Research protocol change cannot skip Engine if the protocol
+// remains in *any* Engine closure, including dev-only test dependencies. This
+// explicitly protects the temporary legacy T06–T10 Rust test arrangement.
+const legacyBase = structuredClone(before), legacyHead = structuredClone(head);
+for (const graph of [legacyBase, legacyHead]) {
+  graph.resolve.nodes.find(n => n.id === 'okx-trading-engine')
+    .deps.push(edge('okx-research-protocol', 'dev'));
+}
+for (const source of ['crates/okx-research-protocol/src/analytics.rs',
+  'crates/okx-research-domain/src/numeric.rs']) {
+  assert.throws(() => verify(legacyBase, legacyHead, files(source), 'research'),
+    /EDITED_SOURCE_IN_PROTECTED_CARGO_CLOSURE/);
+}
 
 console.log('CI_WINDOWS_CARGO_CLOSURE_NEGATIVE_CONTROLS=PASS');
 if (process.argv[2]) {

@@ -1,4 +1,4 @@
-use okx_domain_core::observation_model::{FeeScheduleSnapshot, InstrumentRulesSnapshot};
+use okx_research_domain::observation_model::{FeeScheduleSnapshot, InstrumentRulesSnapshot};
 use rust_decimal::Decimal;
 use serde::Serialize;
 

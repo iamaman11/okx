@@ -1,6 +1,6 @@
 use okx_analysis::operators::{Operator, registry};
 use okx_analysis::query_plan::{Filter, QueryPlan, Rank};
-use okx_ipc_contracts::analytics::MarketRequest;
+use okx_research_protocol::analytics::MarketRequest;
 use std::collections::BTreeSet;
 #[derive(Debug, Clone)]
 pub struct AnalysisPlan {

@@ -1,6 +1,12 @@
 import {mcpApi,projectNativeResponse} from './mcp.js';
 import {payloadFixtures} from './execution_tools.test.js';
 const ctx={auth:{scope:['mcp:use']}};
+for(const unauthorized of [{}, {auth:{scope:['research:read']}}, {auth:{scope:[]}}]){
+ const forbidden=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+  jsonrpc:'2.0',id:101,method:'tools/call',params:{name:'research',arguments:{action:'benchmark',idempotency_key:'test_auth_deny_01'}}
+ })}),{RUNTIME:{idFromName:()=>{throw Error('unauthorized request reached Research');}}} as any,unauthorized);
+ if(forbidden.status!==403)throw Error('Research MCP request bypassed authenticated mcp:use scope');
+}
 // Model-visible trading operations are separately named and have no caller
 // action selector. The legacy test fixtures continue to describe native calls.
 const publicArgs=(name:string,args:any)=>{
@@ -24,6 +30,11 @@ if(body.result.tools.some((t:any)=>t.name==='trade'))throw Error('generic trade 
 
 if(body.result.tools.length!==13||bytes>24576)throw Error(`tools budget ${bytes}`);
 for(const fixture of payloadFixtures){const r:any=await(await call('tools/call',publicArgs(fixture.tool,fixture.negative[0]))).json();if(r.error?.code!==-32602)throw Error('negative dispatched');}
+const unconfirmedStart:any=await(await call('tools/call',{name:'strategies',arguments:{
+ action:'start',account:'fixture',instance_id:'alpha',idempotency_key:'start_fixture'
+}})).json();
+if(unconfirmedStart.error?.code!==-32602||!unconfirmedStart.error.message.includes('configuration_digest'))
+ throw Error('old strategy start must explain the missing confirmation');
 console.log(`tools_list_actual_serialized PASS 13 tools ${bytes} bytes`);
 
 const fixture=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!;
@@ -183,7 +194,7 @@ const researchRoutes:[string,any,string,boolean][]=[
  ['market',{action:'microstructure',instrument:'BTC-USDT'},'market_microstructure',true],
  ['market',payloadFixtures.find(f=>f.tool==='market'&&f.action==='screen')!.positive,'market',true],
  ['research',{action:'capabilities'},'research',true],
- ['diagnostics',{action:'explain',view:'research',reference:'deployment'},'diagnostics',true],
+ ['diagnostics',{action:'explain',view:'research',reference:'job_fixture'},'diagnostics',true],
  ['diagnostics',{action:'explain',view:'finance',reference:'intent_fixture'},'diagnostics',false],
  ['portfolio',payloadFixtures.find(f=>f.tool==='portfolio'&&f.action==='scenario')!.positive,'portfolio_scenario',true],
  ['portfolio',payloadFixtures.find(f=>f.tool==='portfolio'&&f.action==='summary')!.positive,'portfolio',false],
@@ -203,7 +214,7 @@ for(const configured of [false,true]){
   if(reply.error||reply.result?.structuredContent?.status!=='completed')
    throw Error(`routing fixture rejected ${name}.${args.action}: ${JSON.stringify(reply)}`);
   const sent=seen.at(-1);
-  if(sent?.operation?.type!==operation || sent.target_owner!==(configured&&researchOwned?'research':undefined))
+  if(sent?.operation?.type!==operation || sent.target_owner!==(researchOwned?'research':undefined))
    throw Error(`incorrect ${configured?'configured':'legacy'} owner route for ${name}.${args.action}`);
  }
  if(seen.length!==researchRoutes.length)throw Error('owner routing test lost a native dispatch');
@@ -217,7 +228,7 @@ for(const forbidden of [
  })}),{RESEARCH_RUNTIME_TOKEN_SHA256:'f'.repeat(64)} as any,ctx)).json();
  if(reply.error?.code!==-32602)throw Error('MCP caller tried to override authenticated target owner');
 }
-console.log('mcp_configured_research_owner_routes_and_legacy PASS');
+console.log('mcp_research_owner_routes_independent_of_credential PASS');
 
 // P0 #537: an optional user graph must reach the Native request unchanged.
 // Otherwise different hypotheses can silently reuse the flat market job.
@@ -287,11 +298,12 @@ if(nativeReadCount!==100||maxInFlightRead<2||hundred.length!==100||
  throw Error('100 concurrent Worker read-only fixture requests lost or incorrectly projected');
 console.log('worker_100_concurrent_readonly_fixture PASS 100 native fixture reads zero real POST');
 
-// Eleven real Worker MCP routes through an in-memory DO with NO exchange access.
+// Worker MCP mutation routes through an in-memory DO with NO exchange access.
 // Success and business refusal: route fidelity, identity, retries, bounded shell.
 const fakeMutationActions:[string,string][]=[
  ['accounts','connect'],['accounts','pause'],['accounts','resume'],['accounts','set_limits'],
  ['strategies','create'],['strategies','update'],['strategies','start'],['strategies','stop'],
+ ['strategies','restore_configuration'],
  ['trade','execute'],['trade','cancel'],['trade','close'],
 ];
 for(const [tool,action] of fakeMutationActions){
@@ -351,7 +363,7 @@ for(const [tool,action] of fakeMutationActions){
   }else if(visits.length!==1)throw Error('mutation dispatched repeatedly '+tool+'.'+action);
  }
 }
-console.log('mcp_fake_venue_mutation_routes PASS 11 actions positive/negative 0 real exchange POST');
+console.log(`mcp_fake_venue_mutation_routes PASS ${fakeMutationActions.length} actions positive/negative 0 real exchange POST`);
 
 const connectFixture=payloadFixtures.find(x=>x.tool==='accounts'&&x.action==='connect')!;
 const attachArgs={...connectFixture.positive,enabled:false};
@@ -456,6 +468,14 @@ const deliveredUnknown=await mcpResponse('trade',payloadFixtures.find(x=>x.tool=
  {schema:'okx.direct-transport.result/v1',status:'FAILED',reason:'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT',retryable:false});
 if(deliveredUnknown.status!=='unknown'||deliveredUnknown.retryable!==false||
  deliveredUnknown.next_action!=='inspect_exact_intent')throw Error('UNKNOWN exchange outcome can be retried');
+const researchOutcomeUnknown=await mcpResponse('research',{action:'benchmark',idempotency_key:'research_benchmark_01'},
+ {schema:'okx.direct-transport.result/v1',status:'UNKNOWN',reason:'RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB',
+  scope:'research',retryable:false,next_action:'inspect_research_job_or_idempotency_receipt'});
+if(researchOutcomeUnknown.status!=='unknown'||researchOutcomeUnknown.retryable!==false||
+ researchOutcomeUnknown.scope!=='research'||researchOutcomeUnknown.reason_code!=='RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB'||
+ researchOutcomeUnknown.next_action!=='inspect_research_job_or_idempotency_receipt'||
+ researchOutcomeUnknown.next_action==='inspect_exact_intent')
+ throw Error('Research outcome unknown incorrectly became a trade reconciliation or blind retry');
 const deterministicUnknown=projectNativeResponse({status:'FAILED',reason:'UNKNOWN_ACCOUNT',retryable:false});
 if(deterministicUnknown.status!=='failed'||deterministicUnknown.reason_code!=='UNKNOWN_ACCOUNT')
  throw Error('deterministic unknown reason incorrectly became uncertain POST');
@@ -489,23 +509,75 @@ if(corruptRuntime.status!=='failed'||corruptRuntime.reason_code!=='INVALID_RUNTI
 console.log('diagnostics_runtime_freshness_and_negative PASS');
 
 const deploymentTree='a'.repeat(40);
-for(const correlated of [true,false]){
+for(const [transportStatus,connected,sessionFresh] of [
+ ['PASS',true,true],['STALE',true,false],['OFFLINE',false,false]
+] as const){
+ const verifiedEdge=transportStatus==='PASS';
  const deploymentEnv:any={RELEASE_SOURCE_TREE:deploymentTree,RUNTIME:{idFromName:()=>0,get:()=>({
-  fetch:async(_url:string,init:RequestInit)=>{
-   const native=JSON.parse(String(init.body));
-   if(native.operation.type!=='diagnostics'||native.operation.request.reference!=='deployment'||native.operation.request.view!=='research')
-    throw Error('deployment diagnostic did not reach the native owner');
-   return Response.json({schema:'okx.agent.response/v1',request_id:correlated?native.request_id:'wrong-id',
-    status:'completed',quality:'FRESH',warnings:[],result:{schema:'okx.research.deployment/v1',engine_pid:27,
-     research:{active:'b'.repeat(64),active_pid:31,draining:false},read_only:true}});
+  fetch:async(url:string)=>{
+   if(!url.includes('/status?probe=1&owner=research'))throw Error('deployment must observe Research transport');
+   return Response.json({schema:'okx.direct-transport.status/v1',owner:'research',status:transportStatus,
+    connected,session_fresh:sessionFresh,agent_pid:connected?31:null,
+    agent_binary_sha256:connected?'b'.repeat(64):null,
+    ...(connected?{runtime_profile:'research'}:{})});
   }
  })}};
  const response:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
   jsonrpc:'2.0',id:96,method:'tools/call',params:{name:'diagnostics',arguments:{action:'explain',view:'research',reference:'deployment'}}
  })}),deploymentEnv,ctx)).json();
- const data=response.result.structuredContent.data;
- if(data.engine_pid!==27||data.research.active_pid!==31||
-    (correlated?(data.edge?.release_source_tree!==deploymentTree||data.edge?.engine_response_received!==true):data.edge!==undefined))
-  throw Error('deployment must retain native process evidence, with Edge identity only for a correlated reply');
+ const result=response.result.structuredContent, data=result.data;
+ if(result.status!=='partial'||data.schema!=='okx.research.deployment-edge/v1'||
+    data.edge.release_source_tree!==deploymentTree||data.edge.research_transport.connected!==connected||
+    data.edge.research_transport.agent_reported_pid!==(connected?31:null)||
+    data.edge.research_transport.agent_reported_binary_sha256!==(connected?'b'.repeat(64):null)||
+    data.control.status!=='unavailable'||data.control.evidence!=='NOT_PERFORMED'||
+    data.control.pid!==null||data.control.active_worker_sha256!==null||
+    data.control.installed_worker_sha256!==null||data.control.process_generation!==null||
+    data.control.reason_code!=='CONTROL_EVIDENCE_UNAVAILABLE'||
+    data.verification.edge_authenticated_session!==(verifiedEdge?'PASS':'UNVERIFIED')||
+    data.verification.control_process_proof!=='NOT_PERFORMED'||
+    data.verification.first_unproven_stage!==(verifiedEdge?'CONTROL_PID_SHA_GENERATION':'EDGE_AUTHENTICATED_SESSION')||
+    data.verification.next_action!==(verifiedEdge?'inspect_control_research_status':'inspect_research_connection'))
+  throw Error('deployment must report Edge observation and unavailable CONTROL evidence');
 }
-console.log('diagnostics_research_deployment_native_and_edge_readback PASS');
+// Two stopped native applications are a valid installation state: both
+// read-only diagnostics must remain available and must not attempt a hidden
+// dispatch, start, credential lookup, or fallback to the other owner.
+{
+ const observed:string[]=[];
+ const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(url:string,init?:RequestInit)=>{
+  observed.push(url);
+  if(init?.method==='POST'||url.includes('/dispatch'))throw Error('status started a native owner');
+  const research=url.includes('owner=research');
+  return Response.json({schema:'okx.direct-transport.status/v1',owner:research?'research':'engine',
+   status:'OFFLINE',connected:false,session_fresh:false});
+ }})}};
+ const read=async(args:unknown)=>{
+  const response:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+   jsonrpc:'2.0',id:142,method:'tools/call',params:{name:'diagnostics',arguments:args}
+  })}),env,ctx)).json();
+  if(response.error)throw Error('stopped owner diagnostic rejected');
+  return response.result.structuredContent;
+ };
+ const engine=await read({action:'runtime'});
+ const research=await read({action:'explain',view:'research',reference:'deployment'});
+ if(engine.status!=='partial'||engine.data.transport.connected!==false||
+    engine.data.transport.status!=='OFFLINE'||research.status!=='partial'||
+    research.data.verification.edge_authenticated_session!=='UNVERIFIED'||
+    research.data.verification.first_unproven_stage!=='EDGE_AUTHENTICATED_SESSION'||
+    research.data.control.evidence!=='NOT_PERFORMED'||
+    observed.length!==2||!observed[0].includes('/status?probe=1')||
+    !observed[1].includes('/status?probe=1&owner=research'))
+  throw Error('both native owners stopped: read-only diagnostic must be honest and side-effect free');
+}
+const deploymentRead={action:'explain',view:'research',reference:'deployment'};
+const wrongOwner=await mcpResponse('diagnostics',deploymentRead,
+ {schema:'okx.direct-transport.status/v1',owner:'engine',runtime_profile:'engine',
+  status:'PASS',connected:true,session_fresh:true});
+if(wrongOwner.reason_code!=='INVALID_RUNTIME_STATUS')
+ throw Error('Engine transport cannot be used as Research deployment evidence');
+const accountDeployment=await mcpResponse('diagnostics',{...deploymentRead,account:'scope-not-applicable'},
+ {schema:'okx.direct-transport.status/v1',owner:'research',status:'OFFLINE',connected:false,session_fresh:false});
+if(accountDeployment.reason_code!=='RESEARCH_OPERATION_FORBIDDEN')
+ throw Error('Research deployment cannot select a trading account');
+console.log('diagnostics_research_deployment_edge_only_readback PASS');

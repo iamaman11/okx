@@ -309,7 +309,7 @@ pub(crate) fn test_stage_scoped_begin_post(
     cohort: &[&str],
     expected_sequence: u64,
 ) -> Result<u64, String> {
-    use okx_domain_core::risk::{
+    use crate::risk::{
         model::{PostAccountRead, PostCausalProof},
         money::RiskAmount,
     };
@@ -385,7 +385,7 @@ pub(crate) fn test_stage_scoped_begin_post(
 #[cfg(test)]
 mod diagnostic_contract_tests {
     use super::{original_finance_error, store::RiskStoreError};
-    use okx_domain_core::risk::{money::MoneyError, rules::RiskRuleError};
+    use crate::risk::{money::MoneyError, rules::RiskRuleError};
 
     #[test]
     fn risk_book_contract_domain_reason_survives_finance_boundary() {

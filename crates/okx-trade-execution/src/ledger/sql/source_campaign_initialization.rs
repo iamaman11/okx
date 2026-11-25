@@ -1,7 +1,7 @@
 //! Original scoped RiskBook tables, one caller-owned transaction.
 use crate::account_worker::{NativeCampaignPolicy, NativeCampaignPolicyReceipt};
+use crate::risk::money::RiskAmount;
 use crate::{AccountStore, StoreError, StoreResult};
-use okx_domain_core::risk::money::RiskAmount;
 use rusqlite::{OptionalExtension, Transaction, params};
 
 fn require(value: bool, reason: &'static str) -> StoreResult<()> {

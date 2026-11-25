@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Only for CI's non-shipping debug Research EXE. Engine test clients use
+# isolated fixtures while accepted Release binaries enforce one global Worker.
+test-isolated-singleton = []
+
 [[bin]]
 name = "okx-research-service"
 path = "src/main.rs"
@@ -18,9 +23,9 @@ futures-util = { version = "0.3", features = ["sink"] }
 bytes = "1"
 getrandom = "0.4"
 okx-analysis = { path = "../okx-analysis" }
-okx-domain-core = { path = "../okx-domain-core" }
+okx-research-domain = { path = "../okx-research-domain" }
 okx-strategy-core = { path = "../okx-strategy-core" }
-okx-ipc-contracts = { path = "../okx-ipc-contracts" }
+okx-research-protocol = { path = "../okx-research-protocol" }
 okx-research = { path = "../okx-research" }
 rusqlite = { version = "=0.43.0", features = ["bundled"] }
 reqwest = { version = "0.13", default-features = false, features = ["query", "rustls"] }
@@ -37,13 +42,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
 zeroize = "1"
 
-[dev-dependencies]
-okx-api = { path = "../okx-api" }
-okx-market-runtime = { path = "../okx-market-runtime" }
-
 [target.'cfg(windows)'.dependencies]
+keyring = { package = "keyring-core", version = "1" }
+windows-native-keyring-store = "1.1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+tempfile = "3"

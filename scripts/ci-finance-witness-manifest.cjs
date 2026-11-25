@@ -11,7 +11,7 @@ const path = require('node:path');
 
 const sourcePath = path.join(__dirname, '..', 'crates', 'okx-native-finance-check',
   'src', 'manifest.rs');
-const packages = new Set(['okx-domain-core', 'okx-trade-execution',
+const packages = new Set(['okx-engine-domain', 'okx-trade-execution',
   'okx-trading-engine', 'okx-ipc-contracts', 'okx-market-runtime', 'repository']);
 
 function extract(source) {

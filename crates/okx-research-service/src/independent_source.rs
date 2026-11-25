@@ -1,7 +1,7 @@
 //! Research-owned, public-only OKX market source. No Engine, keys, private
 //! endpoints, arbitrary URLs or venue mutations are reachable from this API.
 use crate::source_api::{PublicSourceProvider, SourceFuture};
-use okx_ipc_contracts::research_ipc::{
+use okx_research_protocol::research_ipc::{
     FundingHistoryEvent, HistoryCandle, MAX_FRAME_BYTES, PublicCandleCapture, PublicCatalogCapture,
     PublicFundingCapture, PublicReferenceCapture, PublicReferenceInstrument,
     PublicSourceHttpDelivery, PublicSourceReply, PublicSourceRequest, ResearchOpenInterest,
@@ -22,11 +22,11 @@ const PUBLIC_CANDLES_PATH: &str = "/api/v5/market/history-candles";
 const PUBLIC_ORIGIN: &str = "https://www.okx.com";
 const MAX_PUBLIC_BYTES: usize = MAX_FRAME_BYTES / 8;
 
-type GetFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>>;
+pub(crate) type GetFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>>;
 
 /// Narrow injection point for recorded public HTTP responses in offline tests.
 /// The production implementation is GET-only on a compile-time fixed origin.
-trait PublicGet: Send + Sync {
+pub(crate) trait PublicGet: Send + Sync {
     fn get(&self, path: &'static str, parameters: Vec<(&'static str, String)>) -> GetFuture<'_>;
 }
 
@@ -81,6 +81,9 @@ impl PublicGet for BoundedHttpsGet {
 /// independent of `MarketBootstrapper` and the installed trading Agent.
 pub struct IndependentOkxPublicSource {
     get: Arc<dyn PublicGet>,
+    pub(crate) public_market_ws: crate::public_ws::PublicMarketWs,
+    #[cfg(test)]
+    market_ws_test_endpoint: Option<String>,
 }
 
 impl IndependentOkxPublicSource {
@@ -95,12 +98,48 @@ impl IndependentOkxPublicSource {
                 client,
                 permits: tokio::sync::Semaphore::new(4),
             }),
+            public_market_ws: Default::default(),
+            #[cfg(test)]
+            market_ws_test_endpoint: Some(crate::public_ws::PUBLIC_URL.to_owned()),
         })
     }
 
+    pub(crate) async fn get_bytes(
+        &self,
+        path: &'static str,
+        query: Vec<(&'static str, String)>,
+    ) -> Result<Vec<u8>, String> {
+        self.get.get(path, query).await
+    }
+
+    pub(crate) fn public_get(&self) -> &Arc<dyn PublicGet> {
+        &self.get
+    }
+
+    pub(crate) fn market_ws_endpoint(&self) -> Option<&str> {
+        #[cfg(test)]
+        {
+            self.market_ws_test_endpoint.as_deref()
+        }
+        #[cfg(not(test))]
+        {
+            Some(crate::public_ws::PUBLIC_URL)
+        }
+    }
+
     #[cfg(test)]
-    fn with_get(get: Arc<dyn PublicGet>) -> Self {
-        Self { get }
+    pub(crate) fn with_get(get: Arc<dyn PublicGet>) -> Self {
+        Self {
+            get,
+            public_market_ws: Default::default(),
+            market_ws_test_endpoint: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_market_ws_endpoint(mut self, endpoint: String) -> Self {
+        self.market_ws_test_endpoint = Some(endpoint);
+        self
     }
 }
 
@@ -283,7 +322,7 @@ struct Envelope<T> {
     data: Vec<T>,
 }
 
-fn rows<T: DeserializeOwned>(
+pub(crate) fn rows<T: DeserializeOwned>(
     raw: &[u8],
     max_rows: usize,
     error: &'static str,
@@ -298,7 +337,7 @@ fn rows<T: DeserializeOwned>(
     Ok(envelope.data)
 }
 
-fn one<T: DeserializeOwned>(raw: &[u8], error: &'static str) -> Result<T, String> {
+pub(crate) fn one<T: DeserializeOwned>(raw: &[u8], error: &'static str) -> Result<T, String> {
     rows(raw, 1, error)?.pop().ok_or_else(|| error.into())
 }
 
@@ -453,39 +492,59 @@ fn parse_candles(raw: &[u8], max_rows: usize) -> Result<Vec<HistoryCandle>, Stri
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use crate::source_api::PublicSourceClient;
     use std::sync::Mutex;
 
-    const RECORDED: &str = r#"{"code":"0","msg":"","data":[["1700000060000","100","120","90","110","2","200","220","1"],["1700000000000","100","110","95","105","1","100","1"]]}"#;
+    pub(crate) type RecordedRoute = (&'static str, Vec<(&'static str, String)>);
 
-    type RecordedRoute = (String, Vec<(&'static str, String)>);
-
-    struct RecordedGet {
-        raw: Vec<u8>,
-        routes: Mutex<Vec<RecordedRoute>>,
+    pub(crate) struct RecordedGet {
+        pages: Vec<Vec<u8>>,
+        pub(crate) routes: Mutex<Vec<RecordedRoute>>,
     }
+
+    impl RecordedGet {
+        pub(crate) fn new(pages: Vec<Vec<u8>>) -> Arc<Self> {
+            Arc::new(Self {
+                pages,
+                routes: Mutex::new(Vec::new()),
+            })
+        }
+
+        pub(crate) fn client(self: &Arc<Self>) -> PublicSourceClient {
+            PublicSourceClient::new(Arc::new(IndependentOkxPublicSource::with_get(self.clone())))
+        }
+    }
+
     impl PublicGet for RecordedGet {
         fn get(
             &self,
             path: &'static str,
             parameters: Vec<(&'static str, String)>,
         ) -> GetFuture<'_> {
-            self.routes.lock().unwrap().push((path.into(), parameters));
-            Box::pin(async { Ok(self.raw.clone()) })
+            let mut routes = self.routes.lock().unwrap();
+            let page = self
+                .pages
+                .get(routes.len())
+                .unwrap_or_else(|| panic!("unexpected public GET to {path}"))
+                .clone();
+            routes.push((path, parameters));
+            Box::pin(async move { Ok(page) })
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{test_support::RecordedGet, *};
+
+    const RECORDED: &str = r#"{"code":"0","msg":"","data":[["1700000060000","100","120","90","110","2","200","220","1"],["1700000000000","100","110","95","105","1","100","1"]]}"#;
 
     #[tokio::test]
     async fn public_candles_do_not_require_engine_or_private_client() {
-        let transport = Arc::new(RecordedGet {
-            raw: RECORDED.as_bytes().to_vec(),
-            routes: Mutex::new(Vec::new()),
-        });
-        let client = PublicSourceClient::new(Arc::new(IndependentOkxPublicSource::with_get(
-            transport.clone(),
-        )));
+        let transport = RecordedGet::new(vec![RECORDED.as_bytes().to_vec()]);
+        let client = transport.client();
         let result = client
             .research_candles_page("BTC-USDT-SWAP", "1m", None, None, 100)
             .await
@@ -505,13 +564,11 @@ mod tests {
         use crate::analytics::AnalyticsService;
         use serde_json::json;
 
-        let transport = Arc::new(RecordedGet {
-            raw: RECORDED
-                .replace("1700000000000", "1699999980000")
-                .replace("1700000060000", "1700000040000")
-                .into_bytes(),
-            routes: Mutex::new(Vec::new()),
-        });
+        let raw = RECORDED
+            .replace("1700000000000", "1699999980000")
+            .replace("1700000060000", "1700000040000")
+            .into_bytes();
+        let transport = RecordedGet::new(vec![raw]);
         let root = std::env::temp_dir().join(format!(
             "okx-independent-market-{}-{}",
             std::process::id(),
@@ -521,10 +578,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&root).unwrap();
-        let source = PublicSourceClient::new(Arc::new(IndependentOkxPublicSource::with_get(
-            transport.clone(),
-        )));
-        let service = AnalyticsService::new(root.clone(), source).unwrap();
+        let service = AnalyticsService::new(root.clone(), transport.client()).unwrap();
         let request = serde_json::from_value(json!({
             "action": "screen",
             "instruments": ["BTC-USDT-SWAP"],
@@ -544,10 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn public_source_rejects_untrusted_requests_without_network() {
-        let transport = Arc::new(RecordedGet {
-            raw: RECORDED.as_bytes().to_vec(),
-            routes: Mutex::new(Vec::new()),
-        });
+        let transport = RecordedGet::new(Vec::new());
         let source = IndependentOkxPublicSource::with_get(transport.clone());
         assert_eq!(
             source
@@ -643,10 +694,7 @@ mod tests {
         ];
         for (request, path, row, variant, field, expected) in request_cases {
             let raw = serde_json::to_vec(&json!({"code":"0","msg":"","data":[row]})).unwrap();
-            let transport = Arc::new(RecordedGet {
-                raw,
-                routes: Mutex::new(Vec::new()),
-            });
+            let transport = RecordedGet::new(vec![raw]);
             let source = IndependentOkxPublicSource::with_get(transport.clone());
             let response = serde_json::to_value(source.request(request).await.unwrap()).unwrap();
             assert_eq!(response["type"], variant);
@@ -654,7 +702,7 @@ mod tests {
                 response.pointer(field).and_then(|value| value.as_str()),
                 Some(expected)
             );
-            assert_eq!(*transport.routes.lock().unwrap()[0].0, *path);
+            assert_eq!(transport.routes.lock().unwrap()[0].0, path);
         }
     }
 

@@ -15,10 +15,30 @@ impl UnifiedFinanceHandle {
         decision: Decision,
         intent: NewIntent,
     ) -> StoreResult<StoredIntent> {
+        self.prepare_admission_with_activation(deadline, account, decision, intent, None)
+            .await
+    }
+    pub async fn prepare_admission_with_activation(
+        &self,
+        deadline: Instant,
+        account: String,
+        decision: Decision,
+        intent: NewIntent,
+        activation_revision: Option<i64>,
+    ) -> StoreResult<StoredIntent> {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             super::finance_authority::require_preparation_authority(&tx, &installation)?;
+            let scope = (installation.as_str(), account.as_str());
+            if let Some(revision) = activation_revision {
+                AccountStore::verify_strategy_activation_sql(
+                    &tx,
+                    scope,
+                    &intent.plan.strategy_instance,
+                    revision,
+                )?;
+            }
             if intent.plan.strategy_instance == "manual" {
                 AccountStore::ensure_manual_instance_sql(
                     &tx,
@@ -26,6 +46,7 @@ impl UnifiedFinanceHandle {
                     super::opening_ingress::owner_now_ms()?,
                 )?;
             }
+            let decision_at = decision.decision_at;
             let receipt = apply_original_unified_finance_transaction(
                 &tx,
                 &installation,
@@ -35,7 +56,11 @@ impl UnifiedFinanceHandle {
                     intent,
                 },
             )?;
-            let UnifiedFinanceWriteReceipt::Prepared { intent_id, .. } = receipt else {
+            let UnifiedFinanceWriteReceipt::Prepared {
+                intent_id,
+                inserted,
+            } = receipt
+            else {
                 return Err(StoreError::Invalid("UNIFIED_PREPARE_RECEIPT_UNEXPECTED"));
             };
             let stored = AccountStore::find_intent_sql(
@@ -45,6 +70,9 @@ impl UnifiedFinanceHandle {
                 &intent_id,
             )?
             .ok_or(StoreError::Invalid("UNIFIED_PREPARED_INTENT_MISSING"))?;
+            if let (true, Some(revision)) = (inserted, activation_revision) {
+                AccountStore::bind_strategy_send_sql(&tx, scope, &stored, revision, decision_at)?;
+            }
             tx.commit().map_err(|_| {
                 StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
             })?;

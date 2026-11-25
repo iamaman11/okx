@@ -74,6 +74,14 @@ impl InstalledAgentProvenanceStore {
     }
 
     pub fn save(&self, provenance: &InstalledAgentProvenance) -> HostControlResult<()> {
+        let staged = self.stage(provenance)?;
+        self.publish_staged(&staged)
+    }
+
+    pub(crate) fn stage(
+        &self,
+        provenance: &InstalledAgentProvenance,
+    ) -> HostControlResult<PathBuf> {
         if !provenance.valid() {
             return Err(HostControlError::ArtifactVerification(
                 "installed agent provenance is invalid",
@@ -95,7 +103,11 @@ impl InstalledAgentProvenanceStore {
         file.sync_all()?;
         drop(file);
 
-        atomic_replace(&temp, &self.path)
+        Ok(temp)
+    }
+
+    pub(crate) fn publish_staged(&self, staged: &Path) -> HostControlResult<()> {
+        atomic_replace(staged, &self.path)
     }
 
     pub fn status_value(&self, binary_path: &Path) -> Value {
@@ -322,6 +334,18 @@ mod tests {
         assert_eq!(status["state"], "VERIFIED");
         assert_eq!(status["reason"], "HASH_MATCH");
         assert_eq!(status["binary_sha256"], hash);
+
+        let next = b"accepted successor";
+        let next_hash = format!("{:x}", Sha256::digest(next));
+        let staged = reopened.stage(&fixture(next_hash.clone())).expect("stage");
+        assert_eq!(reopened.status_value(&binary)["binary_sha256"], hash);
+        assert_eq!(reopened.status_value(&binary)["state"], "VERIFIED");
+        assert!(reopened.publish_staged(&root.join("missing")).is_err());
+        assert_eq!(reopened.load().unwrap().unwrap().agent_sha256, hash);
+        fs::write(&binary, next).expect("successor");
+        reopened.publish_staged(&staged).expect("publish");
+        assert_eq!(reopened.status_value(&binary)["state"], "VERIFIED");
+        assert_eq!(reopened.load().unwrap().unwrap().agent_sha256, next_hash);
 
         let _ = fs::remove_dir_all(root);
     }

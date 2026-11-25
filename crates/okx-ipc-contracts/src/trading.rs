@@ -117,10 +117,22 @@ pub enum StrategyRequest {
         expected_revision: u64,
         parameters: serde_json::Value,
         budget_usd: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instruments: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeframe_ms: Option<u64>,
+    },
+    RestoreConfiguration {
+        idempotency_key: String,
+        instance_id: String,
+        expected_revision: u64,
+        source_revision: u64,
     },
     Start {
         idempotency_key: String,
         instance_id: String,
+        expected_revision: u64,
+        configuration_digest: String,
     },
     Stop {
         idempotency_key: String,
@@ -146,65 +158,6 @@ pub enum PortfolioAction {
     History,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScenarioPosition {
-    pub instrument: String,
-    pub side: PositionSide,
-    pub notional_usd: String,
-    pub margin_usd: String,
-    pub price_shock_bps: i32,
-    pub volatility_bps: u32,
-    pub liquidity_cost_bps: u32,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScenarioCorrelation {
-    pub left: usize,
-    pub right: usize,
-    pub rho: f64,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortfolioScenarioRequest {
-    pub equity_usd: String,
-    pub positions: Vec<ScenarioPosition>,
-    pub correlations: Vec<ScenarioCorrelation>,
-}
-impl PortfolioScenarioRequest {
-    pub fn valid(&self) -> bool {
-        if !decimal(&self.equity_usd)
-            || self.positions.is_empty()
-            || self.positions.len() > 8
-            || self.correlations.len() != self.positions.len() * (self.positions.len() - 1) / 2
-        {
-            return false;
-        }
-        let mut pairs = std::collections::BTreeSet::new();
-        for p in &self.positions {
-            if !name(&p.instrument)
-                || !decimal(&p.notional_usd)
-                || !decimal(&p.margin_usd)
-                || !(-10000..=10000).contains(&p.price_shock_bps)
-                || p.volatility_bps > 10000
-                || p.liquidity_cost_bps > 10000
-            {
-                return false;
-            }
-        }
-        for c in &self.correlations {
-            if c.left >= c.right
-                || c.right >= self.positions.len()
-                || !c.rho.is_finite()
-                || !(-1.0..=1.0).contains(&c.rho)
-                || !pairs.insert((c.left, c.right))
-            {
-                return false;
-            }
-        }
-        true
-    }
-}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsRequest {
@@ -564,11 +517,33 @@ impl StrategyRequest {
             Self::Start {
                 idempotency_key,
                 instance_id,
+                expected_revision,
+                configuration_digest,
+            } => {
+                id(idempotency_key)
+                    && name(instance_id)
+                    && *expected_revision > 0
+                    && configuration_digest.len() == 64
+                    && configuration_digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             }
-            | Self::Stop {
+            Self::Stop {
                 idempotency_key,
                 instance_id,
             } => id(idempotency_key) && name(instance_id),
+            Self::RestoreConfiguration {
+                idempotency_key,
+                instance_id,
+                expected_revision,
+                source_revision,
+            } => {
+                id(idempotency_key)
+                    && name(instance_id)
+                    && instance_id != "manual"
+                    && *source_revision > 0
+                    && source_revision < expected_revision
+            }
             Self::Create {
                 idempotency_key,
                 instance_id,
@@ -596,6 +571,8 @@ impl StrategyRequest {
                 instance_id,
                 parameters,
                 budget_usd,
+                instruments,
+                timeframe_ms,
                 ..
             } => {
                 id(idempotency_key)
@@ -603,6 +580,10 @@ impl StrategyRequest {
                     && StrategyParametersV1::parse(parameters).is_some()
                     && parameters.to_string().len() <= 4096
                     && decimal(budget_usd)
+                    && instruments.as_ref().is_none_or(|values| {
+                        !values.is_empty() && values.len() <= 32 && values.iter().all(|v| name(v))
+                    })
+                    && timeframe_ms.is_none_or(|value| value >= 1000)
             }
         }
     }

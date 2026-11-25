@@ -1,4 +1,4 @@
-use okx_ipc_contracts::{
+use okx_research_protocol::{
     analytics::MarketRequest,
     research_ipc::{MAX_FRAME_BYTES, ResearchScope},
 };
@@ -20,12 +20,42 @@ async fn main() {
         Ok(()) => std::process::exit(0),
         Err(error) => {
             eprintln!("OKX Research Service: {error}");
-            std::process::exit(1);
+            std::process::exit(exit_code(&error));
         }
+    }
+}
+
+/// Startup failures are observable by CONTROL without reading stderr or
+/// sharing Research credentials. A live WSS authentication failure does not
+/// exit this process and must not be misreported as a local credential error.
+fn exit_code(error: &str) -> i32 {
+    match error {
+        "RESEARCH_CATALOG_MISSING" => 70,
+        "RESEARCH_SCOPE_MISMATCH" => 71,
+        "RESEARCH_CATALOG_SCOPE_UNBOUND" => 72,
+        "RESEARCH_ROOT_LOCKED" => 73,
+        "RESEARCH_WORKER_ALREADY_ACTIVE" => 74,
+        "RESEARCH_EDGE_CREDENTIAL_NOT_FOUND"
+        | "RESEARCH_EDGE_CREDENTIAL_READ_FAILED"
+        | "RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE" => 75,
+        "RESEARCH_EDGE_ORIGIN_UNTRUSTED"
+        | "INVALID_RESEARCH_EDGE_WSS_URL"
+        | "INVALID_RESEARCH_BEARER"
+        | "RESEARCH_EDGE_TOKEN_INVALID" => 76,
+        _ => 1,
     }
 }
 async fn run() -> Result<(), String> {
     let all_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if all_args
+        .first()
+        .is_some_and(|arg| arg == "--set-edge-token")
+    {
+        if all_args.len() != 1 {
+            return Err("INVALID_ARGUMENT".into());
+        }
+        return provision_research_edge_token();
+    }
     if all_args
         .first()
         .is_some_and(|arg| arg == "--public-candles")
@@ -38,6 +68,7 @@ async fn run() -> Result<(), String> {
     let mut independent_source = false;
     let mut market_request = false;
     let mut edge_runtime = false;
+    let mut existing_catalog = false;
     while let Some(arg) = args.next() {
         if arg == "--root" && root.is_none() {
             root = Some(PathBuf::from(args.next().ok_or("MISSING_ROOT")?));
@@ -55,28 +86,41 @@ async fn run() -> Result<(), String> {
             independent_source = true;
         } else if arg == "--market-request" && !market_request {
             market_request = true;
+        } else if arg == "--existing-catalog" && !existing_catalog {
+            existing_catalog = true;
         } else if arg == "--edge-runtime" && !edge_runtime {
             edge_runtime = true;
         } else {
             return Err("INVALID_ARGUMENT".into());
         }
     }
+    if existing_catalog && !edge_runtime {
+        return Err("INVALID_ARGUMENT".into());
+    }
+    if edge_runtime {
+        if independent_source || market_request || root.is_none() || scope.is_none() {
+            return Err("INVALID_ARGUMENT".into());
+        }
+        // CONTROL has not yet assigned its own Windows Job at process spawn.
+        // Wait for its post-assignment receipt before creating our nested,
+        // more restrictive memory Job. No secrets travel on this pipe.
+        okx_research_service::edge_runtime::await_supervisor_job().await?;
+    }
     // Scoped to this Research process. Do not run the Worker without its OS
-    // memory fence on Windows; native Finance/Engine retains its own owner.
+    // memory and CPU fences on Windows; Finance/Engine retain their own owners.
     let _memory_guard = okx_research_service::process_memory::JobMemoryGuard::enforce()?;
     #[cfg(windows)]
     tracing::info!(
         commit_limit_bytes = okx_research_service::process_memory::limit_bytes(),
+        cpu_rate_basis_points =
+            okx_research_service::process_memory::RESEARCH_CPU_RATE_BASIS_POINTS,
         isolation = "nested_windows_job_object",
-        "research worker OS commit fence verified"
+        "research worker OS memory and CPU fences verified"
     );
     let root = root.ok_or("MISSING_ROOT")?;
     let scope = scope.ok_or("MISSING_SCOPE")?;
     if edge_runtime {
-        if independent_source || market_request {
-            return Err("INVALID_ARGUMENT".into());
-        }
-        return okx_research_service::edge_runtime::run(root, scope).await;
+        return okx_research_service::edge_runtime::run(root, scope, existing_catalog).await;
     }
     if market_request {
         if independent_source {
@@ -91,6 +135,30 @@ async fn run() -> Result<(), String> {
     } else {
         okx_research_service::ipc::serve(input, output, root, scope).await
     }
+}
+
+/// Single-purpose credential provisioner: no root, scope, inherited Engine
+/// credential, bearer argv value, process ownership or financial state.
+/// CONTROL sends a freshly generated Research bearer through stdin and reads
+/// only the exit status; neither stdout nor logs echo the token or its hash.
+fn provision_research_edge_token() -> Result<(), String> {
+    use std::io::Read as _;
+    let mut token = zeroize::Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .take(1027)
+        .read_to_end(&mut token)
+        .map_err(|_| "RESEARCH_EDGE_TOKEN_STDIN_READ_FAILED")?;
+    if token.ends_with(b"\r\n") {
+        let without_crlf = token.len() - 2;
+        token.truncate(without_crlf);
+    } else if token.ends_with(b"\n") {
+        token.pop();
+    }
+    // CONTROL normally denies rotation while Research is running. The native
+    // provisioner enforces the same rule even when invoked directly, without
+    // requiring the financial Engine or opening the Research catalog.
+    let _exclusive = okx_research_service::process_memory::ResearchInstanceLease::acquire()?;
+    okx_research_service::edge_credentials::store(&token)
 }
 
 /// Read one MarketRequest as JSON from stdin and write the Research result.
@@ -146,4 +214,33 @@ async fn run_public_candles(args: &[std::ffi::OsString]) -> Result<(), String> {
         serde_json::to_string(&capture).map_err(|_| "PUBLIC_CANDLES_SERIALIZATION_FAILED")?;
     println!("{encoded}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_code;
+
+    #[test]
+    fn supervisor_startup_exit_codes_are_typed_and_credential_safe() {
+        for (reason, expected) in [
+            ("RESEARCH_CATALOG_MISSING", 70),
+            ("RESEARCH_SCOPE_MISMATCH", 71),
+            ("RESEARCH_CATALOG_SCOPE_UNBOUND", 72),
+            ("RESEARCH_ROOT_LOCKED", 73),
+            ("RESEARCH_WORKER_ALREADY_ACTIVE", 74),
+            ("RESEARCH_EDGE_CREDENTIAL_NOT_FOUND", 75),
+            ("RESEARCH_EDGE_CREDENTIAL_READ_FAILED", 75),
+            ("RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE", 75),
+            ("RESEARCH_EDGE_ORIGIN_UNTRUSTED", 76),
+            ("INVALID_RESEARCH_EDGE_WSS_URL", 76),
+            ("INVALID_RESEARCH_BEARER", 76),
+            ("RESEARCH_EDGE_TOKEN_INVALID", 76),
+        ] {
+            assert_eq!(exit_code(reason), expected, "{reason}");
+        }
+        // Remote Edge errors are retried and cannot be inferred from a
+        // credential-only exit code. Unknown failure remains generic.
+        assert_eq!(exit_code("RESEARCH_HELLO_ACK_REQUIRED"), 1);
+        assert_eq!(exit_code("RESEARCH_PUBLIC_TRANSPORT_FAILED"), 1);
+    }
 }

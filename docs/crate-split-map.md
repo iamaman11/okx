@@ -10,43 +10,19 @@ Research или Host. Торговый Engine из этих маршрутов �
 
 ## 1. Граф Cargo на Windows
 
-В таблице приведены пересечения границ, важные для CI. Стрелка идёт от
-потребителя к зависимости.
-
-| Пакет или бинарник | Зависимости, определяющие границу |
+| Компонент | Пакеты, определяющие границу |
 | --- | --- |
-| `okx-trading-engine` → `okx-agent.exe` | `okx-trade-execution`, `okx-ipc-contracts`, `okx-domain-core` и торговые адаптеры |
-| `okx-research-service` → `okx-research-service.exe` | `okx-research`, `okx-analysis`, `okx-strategy-core`, `okx-ipc-contracts`, `okx-domain-core` |
-| `okx-host-controller` → `okx-host-control.exe` | `okx-host-launcher`, `okx-host-protocol`, `okx-ipc-contracts`, `okx-github`; `okx-domain-core` транзитивно |
-| `okx-host-launcher` → `okx-host-launcher.exe` | Внешние зависимости, без других крейтов workspace |
-| `okx-bridge-mcp` → Rust MCP Bridge | `okx-host-protocol`, `okx-ipc-contracts`, `okx-github`; `okx-domain-core` транзитивно |
+| Engine · `okx-agent.exe` | `okx-trade-execution`, `okx-engine-domain`, `okx-ipc-contracts` и торговые адаптеры |
+| Research · `okx-research-service.exe` | `okx-research`, `okx-analysis`, `okx-strategy-core`, `okx-research-protocol`, `okx-research-domain` |
+| CONTROL · `okx-host-control.exe` | `okx-host-controller`, `okx-host-launcher`, `okx-host-protocol`, `okx-ipc-contracts`, `okx-github` |
+| Launcher · `okx-host-launcher.exe` | Внешние зависимости |
+| Edge | `cloudflare/okx-mcp` и Rust MCP Bridge |
 
-Графы релиза подтверждены командой `cargo tree --locked -p <package>
---target x86_64-pc-windows-msvc -e normal,build`. Полное замыкание Engine
-в обоих деревьях содержит восемь локальных зависимостей: `okx-api`,
-`okx-domain-core`, `okx-github`, `okx-ipc-contracts`, `okx-market-runtime`,
-`okx-observation`, `okx-trade-execution` и `okx-ws`.
-Rust MCP Bridge находится за пределами четырёхкомпонентного Windows-пакета.
-TypeScript-приложение `cloudflare/okx-mcp` проходит свой маршрут.
-
-```mermaid
-flowchart LR
-    Engine["okx-trading-engine"] --> Execution["okx-trade-execution"]
-    Engine --> IPC["okx-ipc-contracts"]
-    Execution --> Domain["okx-domain-core"]
-    Research["okx-research-service"] --> IPC
-    Research --> Analysis["okx-analysis"]
-    Research --> Strategy["okx-strategy-core · time_series"]
-    Analysis --> Strategy
-    Strategy --> Domain
-    Host["okx-host-controller"] --> Launcher["okx-host-launcher"]
-    Host --> IPC
-    Host --> Control["okx-host-protocol"]
-    Bridge["okx-bridge-mcp"] --> Control
-    Bridge --> IPC
-    Control --> IPC
-    IPC --> Domain
-```
+Проверить каждый бинарник можно командой `cargo tree --locked -p <package>
+--target x86_64-pc-windows-msvc -e normal,build,dev`. Research собирается
+со своими моделями рынка и аналитическими входами. Старый IPC-маршрут
+Engine использует протокол Research транзитивно через `okx-ipc-contracts`.
+Адаптация типов публичных наблюдений находится в этом маршруте.
 
 ## 2. Перенос A — временные ряды в Strategy Core
 

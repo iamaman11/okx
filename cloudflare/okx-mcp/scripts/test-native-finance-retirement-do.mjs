@@ -16,6 +16,8 @@ const configuration={schema:"okx.governance/v3",revision:0,installation_id:"inst
 const installation={contract:FRAME_SCHEMA,release_sha256:"f".repeat(64),operation_id:"install_integration_001",configuration};
 const token = "integration-only-ephemeral-token";
 const tokenHash = createHash("sha256").update(token).digest("hex");
+const researchToken = "integration-only-research-token";
+const researchTokenHash = createHash("sha256").update(researchToken).digest("hex");
 // Miniflare 5 uses the build-output worker manifest and typed bindings.
 const makeOptions = (bundleContents) => ({
   resourcePersistencePath: join(root, "sqlite-do"),
@@ -38,6 +40,7 @@ const makeOptions = (bundleContents) => ({
           exportName: "RuntimeSession",
         },
         RUNTIME_TOKEN_SHA256: { type: "text", value: tokenHash },
+        RESEARCH_RUNTIME_TOKEN_SHA256: { type: "text", value: researchTokenHash },
       },
       exports: {
         RuntimeSession: { type: "durable-object", storage: "sqlite" },
@@ -156,6 +159,24 @@ try {
  first.ws.send({...bound,type:"delivery_ack",request_id:delivered.request.request_id});
  first.ws.send({...bound,type:"response",response:{request_id:delivered.request.request_id,status:"completed",data:{transport_fixture:true}}});
  assert.equal((await dispatched).body.status,"completed","request ACK and response cross actual WSS");
+ const researchHello={type:"hello_research",schema:FRAME_SCHEMA,runtime_id:"windows-primary",connection_id:"native_"+"a".repeat(32),contract:"okx.product/v1",host_scope:"a".repeat(64),runtime_profile:"research",agent_pid:12346,agent_binary_sha256:"b".repeat(64),agent_incarnation:"ctl_"+"e".repeat(32)};
+ const legacyReply=await mf.dispatchFetch("http://localhost/runtime",{headers:{upgrade:"websocket",authorization:"Bearer "+token}});
+ const legacy=frames(legacyReply.webSocket);const legacyClosed=legacy.closed();
+ legacy.send({...researchHello,runtime_profile:"engine"});
+ assert.equal(await legacyClosed,1008,"Engine bearer cannot establish Research hello");
+ assert.equal((await request(mf,"/dispatch","POST",{schema:"okx.agent.request/v1",request_id:"research_offline_001",operation:{type:"research",request:{action:"capabilities"}}})).body.reason,"RESEARCH_RUNTIME_OFFLINE");
+ const researchReply=await mf.dispatchFetch("http://localhost/runtime",{headers:{upgrade:"websocket",authorization:"Bearer "+researchToken}});
+ const research=frames(researchReply.webSocket);research.send(researchHello);
+ const researchAck=await research.next(f=>f.type==="hello_ack");
+ const researchDispatch=request(mf,"/dispatch","POST",{schema:"okx.agent.request/v1",request_id:"research_direct_001",operation:{type:"research",request:{action:"capabilities"}}});
+ const researchPing=await research.next(f=>f.type==="ping");research.send({...researchPing,type:"pong"});
+ const researchRequest=await research.next(f=>f.type==="request");
+ assert.equal(researchRequest.request.request_id,"research_direct_001");
+ const researchBound={schema:FRAME_SCHEMA,session_id:researchAck.session_id,connection_generation:researchAck.connection_generation};
+ research.send({...researchBound,type:"delivery_ack",request_id:researchRequest.request.request_id});
+ research.send({...researchBound,type:"response",response:{request_id:researchRequest.request.request_id,status:"completed"}});
+ assert.equal((await researchDispatch).body.status,"completed");research.close();
+ console.log("actual_workerd_research_ownership PASS legacy hello rejected, offline fails closed, Research ACK and response");
  const closed=first.ws.closed();
  first.ws.send({type:"risk_control",schema:FRAME_SCHEMA,session_id:first.hello.session_id,connection_generation:first.hello.connection_generation-1,command:{}});
  assert.equal(await closed,1008,"stale frame closed before RPC denial");

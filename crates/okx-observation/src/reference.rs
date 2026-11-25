@@ -1,4 +1,4 @@
-pub use okx_domain_core::observation_model::{
+pub use okx_engine_domain::observation_model::{
     InstrumentRulesSnapshot, InstrumentSpec, UpcomingRuleChange,
 };
 
@@ -8,7 +8,7 @@ use okx_api::{
     Instrument as AccountInstrument, InstrumentType, MaxOrderSize, PublicInstrument,
     PublicPriceLimit, SystemStatus,
 };
-pub use okx_domain_core::observation_model::FundingRequirement;
+pub use okx_engine_domain::observation_model::FundingRequirement;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;

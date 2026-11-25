@@ -1,11 +1,11 @@
 //! Pure economic research oracle: typed units, settlement currencies and
 //! independent portfolios; no venue/account access or durable job mutation.
 use super::*;
-use okx_ipc_contracts::analytics::{EconomicCase, EconomicProduct, EconomicSide};
 use okx_research::economics::{
     InverseContract, LinearContract, QuoteAmount, SettlementCashflow, SpotPair,
     group_settlement_cashflows,
 };
+use okx_research_protocol::analytics::{EconomicCase, EconomicProduct, EconomicSide};
 use rust_decimal::Decimal;
 use std::{collections::BTreeMap, str::FromStr};
 

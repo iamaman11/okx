@@ -21,96 +21,68 @@ The source owner is `iamaman11/okx`, pinned repository ID `1388071566`.
 `okx-host-launcher`, `okx-research-service`) in one Windows bundle and records
 their SHA-256, exact source HEAD/tree and Rust version in `manifest.json`.
 The existing CONTROL operations deploy Agent, stage/activate controller and
-upgrade Launcher from an explicitly identified GitHub run/artifact.
+upgrade Launcher from an explicitly identified GitHub run/artifact. **This is
+the full Native release path, not the Research-only release format.**
 
 ### Research-only component update
 
-**One-time migration from the installed legacy CONTROL:** The #545 controller
-requires the v2 archive's Research entry to be named
-`okx-research-worker.exe`, while the new native release names it
-`okx-research-service.exe`. It therefore rejects the new full v2 archive with
-`ARTIFACT_VERIFICATION_FAILED: missing component` before staging its
-replacement. Do not retry the incompatible release, rename files in the
-archive, or replace installed binaries manually. The existing CI packager
-supports a single tree-pinned `.github/windows-legacy-control-bridge.txt`
-marker that emits a verified *v1 three-EXE* bundle for the old CONTROL to
-stage the updated controller. Agent/Launcher can be deferred until the next
-accepted full v2 release, avoiding a redundant Agent installation. This bridge
-contains no Research executable and cannot certify Research activation. After
-the Controller handoff is physically confirmed, remove the marker on a newly
-tested source tree to restore the ordinary v2 Service artifact. That release
-must pass the full Native/financial gate; stage its matching Controller, then
-install Launcher, Agent, and Research through authenticated CONTROL and verify
-all four installed identities. Finally test a separate Research-only update
-and rollback. Engine PID continuity begins at the post-migration baseline,
-not at the pre-migration process: a Controller handoff can replace the Agent's
-owned process even without changing Agent executable bytes.
+The standalone Research artifact is **not** a four-EXE composition and does not
+borrow the installed Engine or a pinned Native-base archive. The Research-only
+Windows job builds only `okx-research-service.exe` and uploads the raw GitHub
+PR `CI` Actions artifact named `okx-research-component-<PR_HEAD_SHA>`, with
+exactly these three root files:
 
-`HostControlOperation::DeployResearch` takes `run_id`, `artifact_id`, and
-`expected_source_tree`. CONTROL fetches the accepted GitHub archive and verifies
-its v2 composition, component bytes and origins, source tree, and compatibility.
-It checks the reused Agent and Controller against their installed provenance and
-executable hashes, and checks Launcher bytes. A verified Worker is staged in a
-content-addressed location and `installed-research.json` records the candidate.
-The running Agent's `ResearchClient` separately drains the old child and activates
-the verified candidate; installation and active worker are distinct states. A
-failed validation does not authorize activation or a financial Engine restart.
-Use the existing authenticated CONTROL operation, not an unverified local EXE.
+- `Cargo.lock`
+- `manifest.json` (`okx.windows.research-component/v1`)
+- `okx-research-service.exe`
 
-When an already verified Research image is replaced, CONTROL first validates
-its saved provenance and content-addressed binary, then persists
-`runtime/rollback-research.json` before atomically publishing the new
-`runtime/installed-research.json`. An exact redeploy retains the rollback slot.
-The typed `RollbackResearch` operation requires both the exact current Worker
-SHA-256 and the exact saved rollback Worker SHA-256. It validates both images,
-rejects an absent, corrupted, linked, or mismatched rollback image, and
-atomically restores the saved pointer without touching Agent, Controller,
-Launcher, Engine lifecycle, or financial state. This operation intentionally
-does not compare the old image's tree with the *current* `main`: older verified
-Research versions would otherwise become impossible to restore. CONTROL
-records a terminal ACK; the Agent independently verifies the selected bytes
-before the next child activation. A rollback ACK alone does **not** prove that
-the old child became active, nor does it certify unchanged running Engine
-SHA-256/PID: obtain both physical readbacks before and after a Research-only
-update and its rollback.
+The strict manifest binds repository ID `1388071566`, exact tested head/tree,
+Rust 1.100.0, complete Cargo.lock SHA-256, Research executable SHA-256 and
+length, protocol version 1 and storage version 1. Extra entries, absent files,
+unbounded bytes and unknown manifest fields fail closed. **No Agent, Engine,
+CONTROL or Launcher executable belongs in this component artifact.**
 
-Successful Research deploy and rollback receipts include `timing_ms` for CONTROL
-verification and pointer publication. Deploy also measures the initial artifact
-fetch. `activation: "requires_engine_observation"` marks the next step. Measure
-time to the expected active PID/SHA separately through the Engine's
-[Research deployment diagnostic](research-boundaries.md#installation-versus-activation).
+On a Research-only merge with an identical tested/merged source tree, the
+protected `main` CI job rechecks the same accepted Ready PR run attempt,
+required job results, immutable raw Actions ZIP digest and source provenance.
+It publishes the unchanged bytes under the append-only GitHub release tag
+`research-component-<MERGE_SHA>` with exactly
+`okx-research-component.zip`, `published-research-origin.json` and
+`SHA256SUMS.txt`. An existing tag is never overwritten. This public Release
+is immutable distribution/provenance, **not** a deployment or a second build.
 
-For a captured update or rollback, save the CONTROL `status` result and the
-MCP diagnostic `structuredContent` both before and after the operation. Save
-the terminal CONTROL deploy or rollback result as `change.json`. Check them
-from the repository with:
+`HostControlOperation::DeployResearch {run_id, artifact_id,
+expected_source_tree}` authorizes CONTROL to fetch the **raw accepted PR CI
+artifact**, not to silently substitute Release ZIP bytes. CONTROL checks the
+same-attempt Ready gates, artifact name/digest, exact GitHub tested and current
+main trees, three-file format, manifest compatibility and active Controller
+identity. It stages the Research executable in the existing content-addressed
+Research storage and records the selected image. The separate CONTROL
+`StartResearch`/`StopResearch` and Research-owned Edge WSS path own the process
+lifecycle; no Engine `ResearchClient`, Engine restart, trading authority or SQL
+writer is involved. A deployed image or `StatusResearch` process receipt alone
+does not prove a successful authenticated Edge session or completed job replay.
 
-```powershell
-python scripts/check-research-handoff.py before-control.json before-research.json change.json after-control.json after-research.json
-```
+Research-only installation **requires a previously installed, verified
+CONTROL + Launcher root** and its matching active Controller version. It does
+not install those prerequisites. In particular the virgin-host path is
+**NOT_PROVEN**: `scripts/windows-bootstrap-release.ps1` currently recovers
+CONTROL from a full Native bundle, while `InstallLauncherRoot`/root migration
+requires a valid existing Scheduler policy; on a clean Windows host that task
+may be absent. Do not bypass the Scheduler checks, install an unverified EXE,
+create a new Engine/account SQL installation, or claim physical S2 acceptance
+until a disposable Windows bootstrap and a real installed handoff have passed.
 
-This checks the selected Research SHA against the active post-switch child and
-compares the Engine PID, incarnation and verified binary SHA across the change.
-Both Research diagnostics must contain the native `observed_at_ms` capture time;
-the verifier rejects snapshots taken out of order or a handshake reported after
-its own capture. An invalid candidate appearing during Drain restores the last
-verified Research image with a new child process, rather than leaving the old
-process permanently unable to admit jobs. This recovery is not a successful
-update or rollback receipt and must be diagnosed separately.
-The report covers the captured handoff. Separate workload and financial tests
-cover position protection and SQLite continuity.
+Preserve prior Research scope, job IDs, catalog/artifacts and stopped-worker
+rollback provenance. Verify CONTROL's installed and active Research hashes,
+process generation, Windows Job/CPU/RAM limits, authenticated WSS readback,
+existing-job status/result, stopped/restarted behavior and a genuine
+Research-only update/rollback **on the exact accepted installed candidate**.
+The artifact and CI controls above establish CODE paths only; physical Windows
+and user-facing Edge acceptance remain **NOT_PROVEN**.
 
-This describes the implemented path, not installed acceptance. #512 r15 checks
-the separate Worker build and existing verification/staging/handoff contracts.
-The first release requires full CI, merge and the existing accepted manifest;
-later Research-only releases reuse that verified, merged base. The successful
-first full-build CI on `dacab8c5` does not itself exercise the separate
-`research-service-tests-windows` branch, which requires an explicitly selected accepted
-base. Actual host installation, process/PID continuity and physical/live acceptance
-remain under #449. An expired or missing origin artifact is rejected; there is
-no additional credential-backed archive cache or recovery installer.
-
-Production installation/update must retain all of these checks:
+Full Native installation/update must retain all of these checks (Research-only
+component validation follows the distinct three-file rules above):
 
 1. Canonical repository/owner identity; successful, completed PR `CI` run.
 2. Unexpired artifact named `okx-windows-bundle-<exact-tested-head>` in that run.

@@ -1,5 +1,5 @@
 //! Narrow public-data source capability supplied by the authenticated host.
-use okx_ipc_contracts::research_ipc::*;
+use okx_research_protocol::research_ipc::*;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -274,22 +274,6 @@ struct WireTrade {
     #[serde(rename = "sz")]
     size: String,
     side: TradeSide,
-}
-
-// Legacy host-source conformance tests share MarketBootstrapper's adapter.
-// Independent read-only public GETs are isolated in `independent_source`;
-// this Research process never receives the Engine's private venue keys.
-#[cfg(test)]
-impl From<okx_market_runtime::market_bootstrap::MarketBootstrapper> for PublicSourceClient {
-    fn from(value: okx_market_runtime::market_bootstrap::MarketBootstrapper) -> Self {
-        struct Source(okx_market_runtime::market_bootstrap::MarketBootstrapper);
-        impl PublicSourceProvider for Source {
-            fn request(&self, request: PublicSourceRequest) -> SourceFuture<'_> {
-                Box::pin(self.0.research_source(request))
-            }
-        }
-        Self::new(Arc::new(Source(value)))
-    }
 }
 
 #[cfg(test)]

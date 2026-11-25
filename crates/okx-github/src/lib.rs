@@ -263,6 +263,9 @@ impl GitHubError {
 pub struct WorkflowRun {
     pub id: u64,
     pub name: String,
+    /// A rerun may have different check results than its previous attempt.
+    pub run_attempt: u64,
+    pub path: String,
     pub event: String,
     pub status: String,
     pub conclusion: Option<String>,
@@ -274,6 +277,26 @@ pub struct WorkflowArtifact {
     pub id: u64,
     pub name: String,
     pub expired: bool,
+    /// GitHub's artifact SHA-256 digest. Absent for old artifacts only.
+    pub digest: Option<String>,
+    pub workflow_run: Option<WorkflowArtifactRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowArtifactRun {
+    pub id: u64,
+    pub repository_id: u64,
+    pub head_repository_id: u64,
+    pub head_sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowJob {
+    pub run_id: u64,
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub head_sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -861,6 +884,8 @@ impl GitHubClient {
         Ok(WorkflowRun {
             id: run.id,
             name: run.name,
+            run_attempt: run.run_attempt,
+            path: run.path,
             event: run.event,
             status: run.status,
             conclusion: run.conclusion,
@@ -897,7 +922,40 @@ impl GitHubClient {
             id: artifact.id,
             name: artifact.name,
             expired: artifact.expired,
+            digest: artifact.digest,
+            workflow_run: artifact.workflow_run.map(|run| WorkflowArtifactRun {
+                id: run.id,
+                repository_id: run.repository_id,
+                head_repository_id: run.head_repository_id,
+                head_sha: run.head_sha,
+            }),
         })
+    }
+
+    /// Return one bounded, exact workflow *attempt* job set. Fail closed on
+    /// pagination, duplicates and malformed job identity rather than silently
+    /// accepting a successful Draft-only or previous-attempt run.
+    pub async fn workflow_run_attempt_jobs(
+        &self,
+        run_id: u64,
+        run_attempt: u64,
+    ) -> Result<Vec<WorkflowJob>, GitHubError> {
+        if run_id == 0 || run_attempt == 0 {
+            return Err(GitHubError::UntrustedWorkflowRun);
+        }
+        let url = format!(
+            "{GITHUB_API_BASE}/repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100"
+        );
+        let response = self
+            .send_checked(
+                self.http
+                    .get(url)
+                    .bearer_auth(self.token.as_str())
+                    .header("Accept", "application/vnd.github+json"),
+            )
+            .await?;
+        let body: RawWorkflowJobs = decode_workflow_json(response, "workflow_attempt_jobs").await?;
+        validated_workflow_jobs(body, run_id)
     }
 
     pub async fn download_artifact_zip(&self, artifact_id: u64) -> Result<Vec<u8>, GitHubError> {
@@ -1396,6 +1454,10 @@ struct RawIssueMetadata {
 struct RawWorkflowRun {
     id: u64,
     name: String,
+    #[serde(default)]
+    run_attempt: u64,
+    #[serde(default)]
+    path: String,
     event: String,
     status: String,
     conclusion: Option<String>,
@@ -1412,6 +1474,119 @@ struct RawWorkflowArtifact {
     id: u64,
     name: String,
     expired: bool,
+    #[serde(default)]
+    digest: Option<String>,
+    #[serde(default)]
+    workflow_run: Option<RawWorkflowArtifactRun>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawWorkflowArtifactRun {
+    id: u64,
+    #[serde(default)]
+    repository_id: u64,
+    #[serde(default)]
+    head_repository_id: u64,
+    #[serde(default)]
+    head_sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawWorkflowJobs {
+    total_count: usize,
+    jobs: Vec<RawWorkflowJob>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawWorkflowJob {
+    run_id: u64,
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    head_sha: String,
+}
+
+fn validated_workflow_jobs(
+    body: RawWorkflowJobs,
+    expected_run_id: u64,
+) -> Result<Vec<WorkflowJob>, GitHubError> {
+    if body.total_count == 0 || body.total_count > 100 || body.jobs.len() != body.total_count {
+        return Err(GitHubError::UntrustedWorkflowRun);
+    }
+    let mut names = std::collections::BTreeSet::new();
+    let mut jobs = Vec::with_capacity(body.jobs.len());
+    for job in body.jobs {
+        if job.run_id != expected_run_id
+            || job.name.trim().is_empty()
+            || job.name.len() > 256
+            || !is_commit_sha(&job.head_sha)
+            || !names.insert(job.name.clone())
+        {
+            return Err(GitHubError::UntrustedWorkflowRun);
+        }
+        jobs.push(WorkflowJob {
+            run_id: job.run_id,
+            name: job.name,
+            status: job.status,
+            conclusion: job.conclusion,
+            head_sha: job.head_sha,
+        });
+    }
+    Ok(jobs)
+}
+
+#[cfg(test)]
+mod release_attempt_jobs_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_exact_typed_current_attempt_jobs() {
+        let json = serde_json::json!({
+            "total_count": 2,
+            "jobs": [
+                {"run_id":11, "name": "classify", "status": "completed", "conclusion": "success", "head_sha": "a".repeat(40)},
+                {"run_id":11, "name": "research-service-tests-windows", "status": "completed", "conclusion": "success", "head_sha": "a".repeat(40)}
+            ]
+        });
+        let jobs = validated_workflow_jobs(serde_json::from_value(json).unwrap(), 11).unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].name, "classify");
+    }
+
+    #[test]
+    fn rejects_truncated_duplicate_and_malformed_jobs() {
+        let valid = serde_json::json!({
+            "total_count": 1,
+            "jobs": [{"run_id":11,"name":"classify", "status":"completed", "conclusion":"success", "head_sha":"a".repeat(40)}]
+        });
+        for total in [0, 2, 101] {
+            let mut candidate = valid.clone();
+            candidate["total_count"] = serde_json::json!(total);
+            assert!(
+                validated_workflow_jobs(serde_json::from_value(candidate).unwrap(), 11).is_err()
+            );
+        }
+        let mut candidate = valid.clone();
+        candidate["total_count"] = serde_json::json!(2);
+        candidate["jobs"]
+            .as_array_mut()
+            .unwrap()
+            .push(valid["jobs"][0].clone());
+        assert!(validated_workflow_jobs(serde_json::from_value(candidate).unwrap(), 11).is_err());
+        let mut candidate = valid;
+        candidate["jobs"][0]["head_sha"] = serde_json::json!("not-sha");
+        assert!(validated_workflow_jobs(serde_json::from_value(candidate).unwrap(), 11).is_err());
+        let mut candidate = serde_json::json!({
+            "total_count":1,
+            "jobs":[{"run_id":12,"name":"classify","status":"completed","conclusion":"success","head_sha":"a".repeat(40)}]
+        });
+        assert!(
+            validated_workflow_jobs(serde_json::from_value(candidate.clone()).unwrap(), 11)
+                .is_err()
+        );
+        candidate["jobs"][0]["run_id"] = serde_json::json!(11);
+        assert!(validated_workflow_jobs(serde_json::from_value(candidate).unwrap(), 11).is_ok());
+    }
 }
 
 #[derive(Debug, Deserialize)]

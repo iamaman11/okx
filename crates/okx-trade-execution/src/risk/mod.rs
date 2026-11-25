@@ -1,11 +1,15 @@
 pub mod admission;
+pub(crate) mod model;
+pub(crate) mod money;
 mod native_sizing;
+pub(crate) mod rules;
+pub(crate) mod settlement;
 pub mod stops;
+pub use crate::risk::model::{PostAccountRead, PostCausalProof};
 pub use admission::*;
 pub use native_sizing::{
     NativeReservedLoss, UsdEntryUpper, UsdLoss, UsdtLoss, native_reserved_loss,
 };
-pub use okx_domain_core::risk::model::{PostAccountRead, PostCausalProof};
 pub use stops::*;
 
 // #510 r4.1: the original AccountStore+RiskBook financial rules are

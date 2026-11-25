@@ -1,6 +1,6 @@
 'use strict';
 const path = require('node:path');
-const {verify, verifyEngineInputs} = require('./ci-cargo-closure-proof.cjs');
+const {verify, verifyEngineInputs, verifyUnchangedOwnerInputs} = require('./ci-cargo-closure-proof.cjs');
 // These are the CI-only changes introduced *after* the last fully tested
 // Windows binary baseline. They cannot affect Rust production crate output.
 // They still trigger full CI if changed in the current PR (file classifier).
@@ -13,8 +13,27 @@ const baselineCiOnly = new Set([
 ]);
 const safe = file => typeof file === 'string' && file.length <= 512 && !file.startsWith('/') && !file.includes('\\') && file.split('/').every(p => /^[A-Za-z0-9_.-]+$/.test(p) && p !== '.' && p !== '..');
 const nonNative = file => file === 'README.md' || (file.startsWith('docs/') && file.endsWith('.md')) || file.startsWith('cloudflare/okx-mcp/') || baselineCiOnly.has(file);
-const researchSource = file => /^crates\/okx-(analysis|research-service|research|strategy-core)\/src\/.+\.rs$/.test(file);
+const researchSource = file => /^crates\/okx-(analysis|research-service|research|strategy-core|research-domain|research-protocol)\/(src|tests)\/.+\.rs$/.test(file);
+const protectedResearchSource = file => /^crates\/okx-research-(domain|protocol)\/(src|tests)\/.+\.rs$/.test(file);
 const hostSource = file => /^crates\/okx-host-(controller|launcher|protocol)\/src\/.+\.rs$/.test(file);
+const engineSource = file => /^crates\/okx-(trading-engine|trade-execution)\/(src|tests)\/.+\.rs$/.test(file);
+
+function checkEngine(baseMetadata, metadata, changed) {
+  if (!Array.isArray(changed) || changed.length < 1 || changed.length > 500 ||
+      new Set(changed).size !== changed.length || !changed.every(safe) ||
+      !changed.some(engineSource) ||
+      !changed.every(file => engineSource(file) || nonNative(file)))
+    throw Error('ENGINE_ONLY_ACCEPTED_BASE_DIFF_INVALID');
+  // Reuse is bound to the actual accepted Native base, not just the PR base.
+  // Compare normal/build/dev closures and changed paths of *all* other
+  // deployable Windows owners. A dev-only consumer is still a real compiler
+  // dependency and must prevent a false source-isolation claim.
+  const protectedDirs = verifyUnchangedOwnerInputs(baseMetadata, metadata, changed,
+    ['okx-research-service', 'okx-host-controller', 'okx-host-launcher']);
+  return {scope:'engine', protected_workspace_dirs: protectedDirs,
+    changed_files:changed.length, other_windows_cargo_closures_identical:true,
+    release_is_complete:false};
+}
 
 function checkMixed(baseMetadata, metadata, changed) {
   if (!Array.isArray(changed) || changed.length > 500 ||
@@ -56,12 +75,15 @@ function check(metadata, changed, cargoProof = null) {
   });
   if (!Array.isArray(changed) || !changed.length || changed.length > 500) throw Error('EMPTY_OR_UNBOUNDED_RESEARCH_DIFF');
   const manifests = new Set(['crates/okx-research/Cargo.toml', 'crates/okx-analysis/Cargo.toml',
-    'crates/okx-research-service/Cargo.toml', 'crates/okx-strategy-core/Cargo.toml']);
+    'crates/okx-research-service/Cargo.toml', 'crates/okx-strategy-core/Cargo.toml',
+    'crates/okx-research-domain/Cargo.toml', 'crates/okx-research-protocol/Cargo.toml']);
   const dependencyChange = changed.some(file => file === 'Cargo.lock' || file.endsWith('/Cargo.toml'));
-  if (dependencyChange && (!cargoProof || cargoProof.schema !== 'okx.560.windows-cargo-closure-proof/v1' ||
+  const protectedSourceChange = changed.some(protectedResearchSource);
+  if ((dependencyChange || protectedSourceChange) && (!cargoProof || cargoProof.schema !== 'okx.560.windows-cargo-closure-proof/v1' ||
       cargoProof.scope !== 'research' || cargoProof.target !== 'x86_64-pc-windows-msvc' ||
       cargoProof.protected_closures_identical !== true ||
-      !changed.some(file => manifests.has(file)))) throw Error('RESEARCH_MANIFEST_WITHOUT_PROTECTED_WINDOWS_CLOSURE_PROOF');
+      (!protectedSourceChange && !changed.some(file => manifests.has(file)))))
+    throw Error('RESEARCH_CHANGE_WITHOUT_PROTECTED_WINDOWS_CLOSURE_PROOF');
   let touchedResearch = false;
   for (const file of changed) {
     if (!safe(file)) throw Error('INVALID_DIFF_PATH');
@@ -71,7 +93,7 @@ function check(metadata, changed, cargoProof = null) {
     if (manifests.has(file) && cargoProof) { touchedResearch = true; continue; }
     if (file === 'Cargo.lock' || file.endsWith('/Cargo.toml') || file === 'Cargo.toml' || file.startsWith('.cargo/')) throw Error('DEPENDENCY_CONFIGURATION_CHANGED');
     if (protectedDirs.some(dir => file.startsWith(dir))) throw Error('PRODUCTION_DEPENDENCY_CHANGED');
-    if (file.startsWith('crates/okx-analysis/') || file.startsWith('crates/okx-research-service/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/')) {
+    if (file.startsWith('crates/okx-analysis/') || file.startsWith('crates/okx-research-service/') || file.startsWith('crates/okx-research/') || file.startsWith('crates/okx-strategy-core/') || file.startsWith('crates/okx-research-protocol/') || file.startsWith('crates/okx-research-domain/')) {
       if (file.endsWith('/build.rs')) throw Error('RESEARCH_BUILD_SCRIPT_CHANGED');
       touchedResearch = true;
       continue;
@@ -88,12 +110,13 @@ if (require.main === module) {
     const metadata = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
     const changed = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
     const baseline = process.argv[4] ? JSON.parse(fs.readFileSync(process.argv[4], 'utf8')) : null;
-    if (process.argv[5] !== undefined && process.argv[5] !== '--mixed-host')
+    if (process.argv[5] !== undefined && !['--mixed-host', '--engine-only'].includes(process.argv[5]))
       throw Error('RESEARCH_SCOPE_ARGUMENTS_INVALID');
-    const result = process.argv[5] === '--mixed-host' ? checkMixed(baseline, metadata, changed) :
+    const result = process.argv[5] === '--engine-only' ? checkEngine(baseline, metadata, changed) :
+      process.argv[5] === '--mixed-host' ? checkMixed(baseline, metadata, changed) :
       check(metadata, changed, baseline ? verify(baseline, metadata, changed, 'research') : null);
     process.stdout.write(JSON.stringify(result) + '\n');
   }
   catch (e) { console.error(e.message); process.exitCode = 1; }
 }
-module.exports = { check, checkMixed };
+module.exports = { check, checkMixed, checkEngine };

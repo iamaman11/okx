@@ -144,37 +144,6 @@ pub async fn diagnostics(
     if request.view == Some(DiagnosticsView::Storage) {
         return storage_diagnostics(ctx, request, account).await;
     }
-    if request.view == Some(DiagnosticsView::Research) {
-        if request.cycle_id.is_some() || request.limit.is_some() {
-            return Err("INVALID_DIAGNOSTICS_VIEW".into());
-        }
-        // Research belongs to the authenticated installation, not an account.
-        if request.account.is_some() || account.is_some() {
-            return Err("RESEARCH_DIAGNOSTICS_ACCOUNT_NOT_APPLICABLE".into());
-        }
-        let id = request
-            .reference
-            .as_deref()
-            .ok_or("JOB_REFERENCE_REQUIRED")?;
-        if id == "deployment" {
-            return Ok(json!({
-                "schema": "okx.research.deployment/v1",
-                "engine_pid": std::process::id(),
-                "observed_at_ms": jiff::Timestamp::now().as_millisecond(),
-                "research": ctx.research.deployment_status(),
-                "evidence": "cached_engine_observation",
-                "read_only": true
-            }));
-        }
-        if id.len() != 64
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err("INVALID_JOB_REFERENCE".into());
-        }
-        return ctx.research.diagnostic_job(id).await;
-    }
     if request.view == Some(DiagnosticsView::Operation) {
         return Ok(operation_diagnostics(ctx, request, account)
             .await
@@ -445,17 +414,6 @@ async fn diagnostics_inner(
             .ok_or("ACCOUNT_UNAVAILABLE")?;
         if a.configuration.account_key != b.configuration.account_key {
             return Err("ACCOUNT_ROUTE_MISMATCH".into());
-        }
-    }
-    if let Some(reference) = &request.reference
-        && reference.len() == 64
-        && reference.bytes().all(|b| b.is_ascii_hexdigit())
-        && let Ok(job) = ctx.research.diagnostic_job(reference).await
-    {
-        // The worker owns the bounded diagnostic projection. Do not reinterpret
-        // it as a fresh SQL status or turn an unknown projection into failure.
-        if job["job"].is_object() {
-            return Ok(job);
         }
     }
     if let Some(key) = explicit {
@@ -809,10 +767,9 @@ mod tests {
     use crate::{
         accounts,
         query::{self, DispatchContext},
-        research_test_support::client as research_test_client,
         trade_service::TradeService,
     };
-    use okx_api::{OkxEnvironment, OkxPublicClient, RateBudget, Region};
+    use okx_api::{OkxEnvironment, RateBudget, Region};
     use okx_ipc_contracts::{
         AgentOperation, AgentRequest,
         trading::{DiagnosticsRequest, DiagnosticsView},
@@ -908,10 +865,6 @@ mod tests {
         );
 
         let environment = OkxEnvironment::new(Region::Global, false);
-        let market = crate::market_bootstrap::MarketBootstrapper::new(
-            OkxPublicClient::with_http_transport(environment, budget.clone(), feed_a.clone())
-                .unwrap(),
-        );
         let reference =
             okx_observation::ReferenceRegistry::from_public("2026-10-31T00:00:00Z", vec![])
                 .unwrap();
@@ -921,19 +874,15 @@ mod tests {
             budget,
             Arc::new(accounts::recorded_support::OfflineSocket),
         );
-        let analytics = research_test_client(root.join("analytics"), market.clone()).unwrap();
         let trade = Arc::new(TradeService::new(
             registry.clone(),
-            public_ws.clone(),
+            public_ws,
             crate::risk_bridge::NativeRiskClient::local(
                 crate::native_finance_risk::NativeFinanceRisk::from_owner(owner.clone()),
             ),
         ));
         let ctx = DispatchContext {
-            research: analytics,
-            public_ws,
             finance: crate::finance_dispatch::FinanceDispatch::ready(registry.clone(), trade),
-            market,
         };
         let make_request = |request_id: &str, body_account: &str, reference: &str| AgentRequest {
             schema: okx_ipc_contracts::AGENT_REQUEST_SCHEMA_V1.into(),

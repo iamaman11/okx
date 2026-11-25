@@ -283,9 +283,7 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
         .await
         .unwrap();
     let now = jiff::Timestamp::now().as_millisecond().to_string();
-    fixture
-        .feed
-        .expect_public_clock(envelope(json!([{"ts":now}])));
+    fixture.feed.expect_current_public_clock();
     // Each observation belongs to a concrete production assessment. The
     // post-HELD assessment must perform NEW signed reads; it cannot borrow
     // either earlier phase's source. There are no spare/optional responses.

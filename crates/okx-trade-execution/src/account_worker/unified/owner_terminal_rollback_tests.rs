@@ -32,7 +32,7 @@ fn proof() -> EntrySettlementEvidence {
     }
 }
 fn input() -> crate::risk::TerminalResolveInput {
-    let amount = |v| okx_domain_core::risk::money::RiskAmount::parse(v).unwrap();
+    let amount = |v| crate::risk::money::RiskAmount::parse(v).unwrap();
     crate::risk::TerminalResolveInput {
         account: account(),
         intent: INTENT.into(),

@@ -49,7 +49,7 @@ pub(in crate::analytics) fn safe_reason(error: &str) -> &'static str {
         "CPU_QUEUE_FULL" => "CPU_QUEUE_FULL",
         "LIVE_SOURCE_DEADLINE" => "LIVE_SOURCE_DEADLINE",
         "UNSUPPORTED_STRATEGY" => "UNSUPPORTED_STRATEGY",
-        _ if okx_ipc_contracts::research_ipc::is_retryable_source_defer(error) => {
+        _ if okx_research_protocol::research_ipc::is_retryable_source_defer(error) => {
             "MARKET_SOURCE_RETRYABLE"
         }
         _ if error.starts_with("RESOURCE_BUSY:") => "RESOURCE_BUSY",
@@ -65,7 +65,7 @@ struct Snapshot {
     progress: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_progress: Option<super::super::candidate_progress::CandidateProgress>,
-    origin_invocation: Option<okx_ipc_contracts::research_ipc::InvocationId>,
+    origin_invocation: Option<okx_research_protocol::research_ipc::InvocationId>,
     producer: Option<crate::producer::Producer>,
     result_ref: Option<String>,
     error_code: Option<String>,

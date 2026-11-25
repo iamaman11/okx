@@ -17,8 +17,6 @@ jiff = "1.0"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.4"
 futures-util = "0.3"
-bytes = "1"
-tokio-util = { version = "0.7", features = ["codec", "rt"] }
 okx-api = { path = "../okx-api" }
 okx-github = { path = "../okx-github" }
 okx-trade-execution = { path = "../okx-trade-execution" }
@@ -31,7 +29,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "process", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "ansi"] }
@@ -39,8 +37,15 @@ zeroize = { version = "1", features = ["derive"] }
 
 # Native crash acceptance additionally controls Tokio time in isolated tests.
 [dev-dependencies]
+bytes = "1"
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
 reqwest = { version = "0.13", default-features = false }
 tokio = { version = "1", features = ["process", "io-util", "test-util"] }
+# Explicit, temporary pre-cutover cross-owner test debt (T06–T10). These
+# features do not participate in `cargo build -p okx-trading-engine --release`.
+okx-ipc-contracts = { path = "../okx-ipc-contracts", features = ["legacy-research-test"] }
+okx-market-runtime = { path = "../okx-market-runtime", features = ["legacy-research-test"] }
+okx-research-protocol = { path = "../okx-research-protocol" }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { package = "keyring-core", version = "1" }

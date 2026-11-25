@@ -26,15 +26,15 @@ async fn drain_waits_for_runner_after_durable_cancellation() {
     assert_eq!(service.begin_drain().await.unwrap().active_jobs, 0);
 }
 pub(super) fn service() -> (PathBuf, AnalyticsService) {
+    let transport = crate::independent_source::test_support::RecordedGet::new(Vec::new());
+    service_with_source(transport.client())
+}
+
+pub(super) fn service_with_source(
+    source: crate::source_api::PublicSourceClient,
+) -> (PathBuf, AnalyticsService) {
     let root = unique_fixture_root();
-    let client =
-        okx_api::OkxPublicClient::new(okx_api::OkxEnvironment::new(okx_api::Region::Global, false))
-            .unwrap();
-    let service = AnalyticsService::new(
-        root.clone(),
-        okx_market_runtime::market_bootstrap::MarketBootstrapper::new(client),
-    )
-    .unwrap();
+    let service = AnalyticsService::new(root.clone(), source).unwrap();
     (root, service)
 }
 // market() promises a bounded synchronous response, NOT completion within
@@ -117,7 +117,7 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
         .unwrap();
 
     let variants = (2..66)
-        .map(|lookback| okx_ipc_contracts::analytics::BreakoutParameters { lookback }.into())
+        .map(|lookback| okx_research_protocol::analytics::BreakoutParameters { lookback }.into())
         .collect::<Vec<_>>();
     let mut request = ResearchRequest::Grid {
         idempotency_key: "typed-breakout-grid".into(),
@@ -138,7 +138,7 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
     };
     assert!(request.valid());
     if let ResearchRequest::Grid { variants, .. } = &mut request {
-        variants.push(okx_ipc_contracts::analytics::BreakoutParameters { lookback: 66 }.into());
+        variants.push(okx_research_protocol::analytics::BreakoutParameters { lookback: 66 }.into());
     }
     assert!(!request.valid());
     assert_eq!(
@@ -1790,7 +1790,29 @@ async fn immutable_result_pages_and_restart_catalog() {
         matches!(jobs::Jobs::open(root.join("research-catalog.sqlite")), Err(e) if e == "RESEARCH_ROOT_LOCKED")
     );
     drop(s);
-    let s = AnalyticsService::new(root.clone(), bootstrap).unwrap();
+    let scope =
+        okx_research_protocol::research_ipc::ResearchScope::new("fixture-scope".into()).unwrap();
+    drop(AnalyticsService::new_scoped(root.clone(), bootstrap.clone(), &scope).unwrap());
+    let producer = crate::producer::Producer::new("a".repeat(64), None, None).unwrap();
+    let s = AnalyticsService::new_existing_scoped_with_producer(
+        root.clone(),
+        bootstrap,
+        &scope,
+        producer,
+    )
+    .unwrap();
+    let adopted_page = crate::edge_runtime::dispatch_research_for_test(
+        &s,
+        ResearchRequest::Result {
+            job_id: id.clone(),
+            cursor: None,
+            limit: 1,
+            view: ResearchResultView::Trades,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(adopted_page["total_rows"], 120);
     assert_eq!(s.jobs.get(&id).unwrap().state, jobs::State::Completed);
     let legacy = s
         .result_page(id.clone(), None, 1, ResearchResultView::Export)

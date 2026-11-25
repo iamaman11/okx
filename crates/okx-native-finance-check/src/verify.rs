@@ -211,8 +211,8 @@ mod tests {
         assert!(artifacts(repo, b"").is_err());
         assert!(artifacts(repo, b"old success text\n").is_err());
         let mut artifact = json!({"reason":"compiler-artifact", "profile":{"test":true},
-            "executable":std::env::current_exe().unwrap(), "manifest_path":repo.join("crates/okx-domain-core/Cargo.toml"),
-            "target":{"name":"okx_domain_core","kind":["lib"]}});
+            "executable":std::env::current_exe().unwrap(), "manifest_path":repo.join("crates/okx-trade-execution/Cargo.toml"),
+            "target":{"name":"okx_trade_execution","kind":["lib"]}});
         assert!(matches!(
             artifacts(repo, format!("{artifact}\n{artifact}\n").as_bytes()),
             Err("BUILD_DUPLICATE_EXECUTABLE")

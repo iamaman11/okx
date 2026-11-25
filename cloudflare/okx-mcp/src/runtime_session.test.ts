@@ -1,10 +1,29 @@
 import {RuntimeSession} from "./runtime_session.js";
-import {FRAME_SCHEMA} from "./shared.js";
+import {FRAME_SCHEMA,MAX_BODY_BYTES} from "./shared.js";
 import {initial,account} from "./account_governance.test.js";
 function check(v:boolean,label:string){if(!v)throw Error(label);}
 const generation=4;
 const attachment={runtimeId:"windows-primary",sessionId:"session_test_012345",generation,hello:true,
  runtimeProfile:"engine",connectedAtMs:Date.now(),lastPongAtMs:Date.now()};
+// A 42 Ki-character Cyrillic JSON frame fits the old UTF-16 length check but
+// exceeds the native 64 KiB UTF-8 WSS limit. Reject it before parsing or
+// dispatch, independent of whether the sender claims Engine or Research.
+{
+ const oversize=JSON.stringify({type:"ping",schema:FRAME_SCHEMA,nonce:"я".repeat(40_000)});
+ check(oversize.length<MAX_BODY_BYTES&&new TextEncoder().encode(oversize).byteLength>MAX_BODY_BYTES,
+  "negative Unicode frame must exceed UTF-8 limit without exceeding UTF-16 count");
+ for(const profile of ["engine","research"]){
+  let closedCode=0,closedReason="";
+  const ws={close:(code:number,reason:string)=>{closedCode=code;closedReason=reason;},
+   deserializeAttachment:()=>{throw Error("oversize frame reached session owner");}};
+  const runtime=new RuntimeSession({getWebSockets:()=>{throw Error("oversize frame queried sockets");}} as any,{} as any);
+  await runtime.webSocketMessage(ws,oversize);
+  check(closedCode===1009&&closedReason==="frame too large",`${profile} Unicode oversize rejected`);
+ }
+ let binaryCode=0;
+ await new RuntimeSession({} as any,{} as any).webSocketMessage({close:(code:number)=>{binaryCode=code;}},new ArrayBuffer(5));
+ check(binaryCode===1003,"binary native frame rejected independently of byte size");
+}
 async function fixture(mode:"before_ack"|"after_ack"|"complete"|"stale"|"ping_send_failure"|"request_send_failure"|"duplicate"|"paused_complete"){
  const map=new Map<string,unknown>([["account_access_v1",{...initial,revision:1,accounts:[mode==="paused_complete"?{...account,explicit_pause:true}:account]}]]);
  let owner:any;
@@ -19,7 +38,7 @@ async function fixture(mode:"before_ack"|"after_ack"|"complete"|"stale"|"ping_se
     if(mode==="after_ack"){void owner.webSocketClose(ws);return;}
     if(mode==="stale"){
       owner.resolvePending(`response:${frame.request.request_id}`,generation-1,{status:"WRONG"});
-      check(owner.pending.has(`response:${frame.request.request_id}`),"old_generation_cannot_complete_new_request");
+      check(owner.pending.has(`${generation}:response:${frame.request.request_id}`),"old_generation_cannot_complete_new_request");
     }
     owner.resolvePending(`response:${frame.request.request_id}`,generation,{status:"completed"});
    });
@@ -31,7 +50,7 @@ async function fixture(mode:"before_ack"|"after_ack"|"complete"|"stale"|"ping_se
  const running=owner.dispatch(request);
  if(mode==="duplicate")check((await owner.dispatch(request)).reason==="REQUEST_ALREADY_IN_FLIGHT","duplicate request rejected before async freshness");
  const result=await running;
- check(owner.pending.size===0&&owner.inflight===0,"all stages settle and capacity is released");
+ check(owner.pending.size===0&&owner.admissions.engine.inflight===0,"all stages settle and capacity is released");
  return result;
 }
 const before=await fixture("before_ack");
@@ -48,6 +67,39 @@ check((await fixture("request_send_failure")).status==="FAILED","synchronous req
 check((await fixture("duplicate")).status==="completed","duplicate request cannot clear original pending stages");
 
 check((await fixture("paused_complete")).status==="completed","pause_allows_native_verified_close_delivery");
+
+// Every durable Research mutation has its own recovery owner. Losing either
+// acknowledgement or response cannot become a retryable source read and must
+// never suggest reconciling an exchange order. No Engine socket is installed.
+for(const action of ["backtest","grid","benchmark","cancel","record_decision"]){
+ for(const acknowledged of [false,true]){
+  const researchGeneration=41;
+  const researchAttachment={...attachment,sessionMode:"research_only" as const,
+    runtimeProfile:"research" as const,credentialOwner:"research" as const,
+    generation:researchGeneration,sessionId:"research_ack_lost_41"};
+  let owner:any;
+  const sent:string[]=[];
+  const ws={deserializeAttachment:()=>({...researchAttachment}),close:()=>{},
+   send:(text:string)=>{
+    const frame=JSON.parse(text);sent.push(frame.type);
+    if(frame.type==="ping")queueMicrotask(()=>owner.resolvePending(`pong:${frame.nonce}`,researchGeneration,{}));
+    if(frame.type==="request")queueMicrotask(()=>{
+     if(acknowledged)owner.resolvePending(`ack:${frame.request.request_id}`,researchGeneration,{});
+     void owner.webSocketClose(ws);
+    });
+   }};
+  owner=new RuntimeSession({storage:{get:async()=>{throw Error("Research read financial governance");}},
+    getWebSockets:()=>[ws]} as any,{} as any);
+  const result:any=await owner.dispatch({schema:"okx.agent.request/v1",request_id:`research_${action}_${acknowledged}`,
+    operation:{type:"research",request:{action,idempotency_key:"research_retry_receipt_001"}}});
+  check(result.status==="UNKNOWN"&&result.retryable===false&&result.scope==="research"&&
+    result.reason==="RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB"&&
+    result.next_action==="inspect_research_job_or_idempotency_receipt",
+    `Research ${action} lost ${acknowledged?"response":"ACK"} must reconcile job only`);
+  check(sent.includes("request")&&owner.admissions.research.inflight===0&&owner.pending.size===0,
+    "Research interrupted request cleans generation and admission");
+ }
+}
 
 // Windows CONTROL is the sole owner of native binary installation evidence.
 // Runtime status reports authenticated liveness, not independent file proof.
@@ -76,7 +128,7 @@ console.log('runtime_native_owner_and_wss_separation PASS');
 
 // The bearer-authenticated scope is a namespace claim, not key attestation.
 {
- let stored:any={runtimeId:"windows-primary",sessionId:"session_research_0123",generation:9,hello:false,connectedAtMs:Date.now()};
+ let stored:any={runtimeId:"windows-primary",sessionId:"session_research_0123",generation:9,hello:false,credentialOwner:"research",connectedAtMs:Date.now()};
  let closed=""; const sent:any[]=[]; let instance:any;
  const ws:any={deserializeAttachment:()=>({...stored}),serializeAttachment:(v:any)=>{stored=v;},close:(_:number,why:string)=>{closed=why;},send:(text:string)=>{
    const frame=JSON.parse(text);sent.push(frame);
@@ -84,7 +136,7 @@ console.log('runtime_native_owner_and_wss_separation PASS');
    if(frame.type==="request")queueMicrotask(()=>{instance.resolvePending(`ack:${frame.request.request_id}`,9,{});instance.resolvePending(`response:${frame.request.request_id}`,9,{status:"completed"});});
  }};
  instance=new RuntimeSession({storage:{get:async()=>undefined},getWebSockets:()=>[ws]} as any,{} as any);
- const hello:any={type:"hello_research",schema:FRAME_SCHEMA,runtime_id:"windows-primary",connection_id:"native_0123456789abcdef0123456789abcdef",runtime_profile:"engine",host_scope:"a".repeat(64),contract:"okx.product/v1",agent_pid:12,agent_binary_sha256:"b".repeat(64),agent_incarnation:"ctl_"+"c".repeat(32)};
+ const hello:any={type:"hello_research",schema:FRAME_SCHEMA,runtime_id:"windows-primary",connection_id:"native_0123456789abcdef0123456789abcdef",runtime_profile:"research",host_scope:"a".repeat(64),contract:"okx.product/v1",agent_pid:12,agent_binary_sha256:"b".repeat(64),agent_incarnation:"ctl_"+"c".repeat(32)};
  await instance.webSocketMessage(ws,JSON.stringify({...hello,installation_id:"fake_install"}));
  check(closed==="invalid research hello"&&!stored.hello,"mixed finance claim rejected");
  closed="";await instance.webSocketMessage(ws,JSON.stringify({...hello,host_scope:"BAD"}));
@@ -209,8 +261,8 @@ console.log('runtime_native_owner_and_wss_separation PASS');
    "Engine bearer research_only never masquerades as independent Research");
  sockets=[legacyResearch];
  const legacyRequest={schema:"okx.agent.request/v1",request_id:"legacy_research_21",operation:{type:"research",request:{action:"capabilities"}}};
- check((await owner.dispatch(legacyRequest)).owner==="legacy",
-   "unmarked legacy research_only remains available during cutover without finance permission");
+ check((await owner.dispatch(legacyRequest)).reason==="RESEARCH_RUNTIME_OFFLINE",
+   "unmarked Research never falls back to legacy Engine sessions");
  const nextIndependent=mk("research",{runtimeId:"windows-primary",sessionId:"research_22",generation:22,hello:false,credentialOwner:"research",connectedAtMs:Date.now()});
  sockets.push(nextIndependent);
  await owner.webSocketMessage(nextIndependent,JSON.stringify(hello));
@@ -218,9 +270,7 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  check((await owner.dispatch(req("direct_research_7","research",{type:"research",request:{action:"capabilities"}}))).owner==="research",
    "explicit Research route chooses separately credentialed Research, not legacy");
 
- // Configuring a distinct Research credential turns owner separation on for
- // every unmarked internal dispatch as well as the public MCP tool facade.
- ownerEnv.RESEARCH_RUNTIME_TOKEN_SHA256="f".repeat(64);
+ // Separation holds even with no Research credential configured.
  sockets=[financeWs,legacyResearch];
  const unmarked=(id:string,operation:any,account?:string)=>({schema:"okx.agent.request/v1",request_id:id,
    ...(account?{account}:{}),operation});
@@ -257,4 +307,13 @@ console.log('runtime_native_owner_and_wss_separation PASS');
  check((await owner.dispatch(unmarked("configured_top_account",{type:"research",request:{action:"capabilities"}},"finance_account"))).reason==="RESEARCH_OPERATION_FORBIDDEN",
    "top-level finance account in Research operation fails closed before socket delivery");
  check(countSent()===sentBeforeForged,"forged account selector never reaches either owner");
+ // Research cancellation needs priority even while ordinary job admissions
+ // saturate; protecting it must never make an Engine command cross owners.
+ owner.admissions.research.normalInflight=10;
+ const cancelBefore=countSent();
+ check((await owner.dispatch(unmarked("research_priority_cancel",{type:"research",request:{action:"cancel",job_id:"a".repeat(64)}}))).owner==="research",
+   "Research cancellation remains deliverable above normal Research saturation");
+ check(countSent()===cancelBefore+1&&nativeRequests().at(-1)?.owner==="research",
+   "priority cancellation cannot route through financial Engine");
+ owner.admissions.research.normalInflight=0;
 }

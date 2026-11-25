@@ -19,12 +19,12 @@ pub mod sources;
 mod strategy_signal;
 
 use futures_util::{StreamExt, stream};
-use okx_ipc_contracts::analytics::*;
-use okx_ipc_contracts::research_ipc::{SignalDecision, SignalPosition, SignalRequest};
 use okx_research::{
     ResearchArtifactStore,
     strategy_registry::{self as replay, Costs, Mechanics, ReplaySpec},
 };
+use okx_research_protocol::analytics::*;
+use okx_research_protocol::research_ipc::{SignalDecision, SignalPosition, SignalRequest};
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -116,7 +116,7 @@ impl AnalyticsService {
     pub fn new_scoped(
         root: PathBuf,
         bootstrapper: impl Into<crate::source_api::PublicSourceClient>,
-        scope: &okx_ipc_contracts::research_ipc::ResearchScope,
+        scope: &okx_research_protocol::research_ipc::ResearchScope,
     ) -> Result<Self, String> {
         let jobs = jobs::Jobs::open_scoped(root.join("research-catalog.sqlite"), scope)?;
         Self::with_jobs(root, bootstrapper.into(), jobs)
@@ -124,10 +124,22 @@ impl AnalyticsService {
     pub fn new_scoped_with_producer(
         root: PathBuf,
         bootstrapper: impl Into<crate::source_api::PublicSourceClient>,
-        scope: &okx_ipc_contracts::research_ipc::ResearchScope,
+        scope: &okx_research_protocol::research_ipc::ResearchScope,
         producer: crate::producer::Producer,
     ) -> Result<Self, String> {
         let jobs = jobs::Jobs::open_scoped(root.join("research-catalog.sqlite"), scope)?
+            .with_producer(Some(producer.clone()));
+        let mut service = Self::with_jobs(root, bootstrapper.into(), jobs)?;
+        service.producer = Some(producer);
+        Ok(service)
+    }
+    pub fn new_existing_scoped_with_producer(
+        root: PathBuf,
+        bootstrapper: impl Into<crate::source_api::PublicSourceClient>,
+        scope: &okx_research_protocol::research_ipc::ResearchScope,
+        producer: crate::producer::Producer,
+    ) -> Result<Self, String> {
+        let jobs = jobs::Jobs::open_existing_scoped(root.join("research-catalog.sqlite"), scope)?
             .with_producer(Some(producer.clone()));
         let mut service = Self::with_jobs(root, bootstrapper.into(), jobs)?;
         service.producer = Some(producer);
@@ -160,12 +172,12 @@ impl AnalyticsService {
     }
     pub async fn begin_drain(
         &self,
-    ) -> Result<okx_ipc_contracts::research_ipc::DrainStatus, String> {
+    ) -> Result<okx_research_protocol::research_ipc::DrainStatus, String> {
         let jobs = self.jobs.clone();
         let active_jobs = tokio::task::spawn_blocking(move || jobs.begin_drain())
             .await
             .map_err(|_| "RESEARCH_DRAIN_FAILED")??;
-        Ok(okx_ipc_contracts::research_ipc::DrainStatus {
+        Ok(okx_research_protocol::research_ipc::DrainStatus {
             active_jobs: drain_count(active_jobs, &self.runners),
         })
     }
@@ -625,9 +637,9 @@ fn research_capabilities() -> Value {
             "stop_under_load":"two_actual_causal_grids_with_cooperative_cancel",
             "mcp_and_finance_under_load":"not_evaluated"},
         "ipc_isolation":{"scheduling":"shared_typed_command_lane_in_protocol_agent_and_worker",
-            "critical_in_flight":okx_ipc_contracts::research_ipc::CRITICAL_IN_FLIGHT,
-            "observation_in_flight":okx_ipc_contracts::research_ipc::OBSERVATION_IN_FLIGHT,
-            "work_in_flight":okx_ipc_contracts::research_ipc::MAX_IN_FLIGHT,
+            "critical_in_flight":okx_research_protocol::research_ipc::CRITICAL_IN_FLIGHT,
+            "observation_in_flight":okx_research_protocol::research_ipc::OBSERVATION_IN_FLIGHT,
+            "work_in_flight":okx_research_protocol::research_ipc::MAX_IN_FLIGHT,
             "critical_commands":["cancel","drain","shutdown"],
             "observation_commands":["explain","capabilities","status"],
             "read_only_observation":"no_venue_trade_or_finance_authority",

@@ -10,6 +10,7 @@ data always require the full native financial gate.
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -18,20 +19,50 @@ import sys
 _PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 # The core is linked only by Research/Analysis; the architecture DAG gate
 # rejects any transitive Native Agent dependency before this fast path is used.
-_RESEARCH_DIRS = ("crates/okx-research/", "crates/okx-research-service/", "crates/okx-strategy-core/", "crates/okx-analysis/")
+_RESEARCH_DIRS = (
+    "crates/okx-research/", "crates/okx-research-service/",
+    "crates/okx-strategy-core/", "crates/okx-analysis/",
+)
+_RESEARCH_PROTECTED_SOURCES = (
+    "crates/okx-research-protocol/", "crates/okx-research-domain/",
+)
+_ENGINE_DIRS = ("crates/okx-trading-engine/", "crates/okx-trade-execution/")
 _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
 _HOST_CONTROL_SRC = "crates/okx-host-controller/src/"
 _HOST_LAUNCHER_SRC = "crates/okx-host-launcher/src/"
 _HOST_PROTOCOL_SRC = "crates/okx-host-protocol/src/"
+_HOST_CONTROL_TEST = "crates/okx-host-controller/tests/"
+_HOST_LAUNCHER_TEST = "crates/okx-host-launcher/tests/"
+_HOST_PROTOCOL_TEST = "crates/okx-host-protocol/tests/"
 _RESEARCH_MANIFESTS = {
     "crates/okx-research/Cargo.toml",
     "crates/okx-analysis/Cargo.toml",
     "crates/okx-research-service/Cargo.toml",
     "crates/okx-strategy-core/Cargo.toml",
+    "crates/okx-research-protocol/Cargo.toml",
+    "crates/okx-research-domain/Cargo.toml",
 }
 _HOST_MANIFESTS = {
     "crates/okx-host-controller/Cargo.toml",
     "crates/okx-host-launcher/Cargo.toml",
+}
+DRAFT_CHECKS = frozenset({
+    "kernel", "strategy", "analysis", "research", "worker", "worker-ipc",
+    "wire", "ipc", "mcp", "host", "expanded",
+})
+# Research starts separately, but the Windows resource policy and process
+# entrypoint can still affect the measured Finance-vs-Research load boundary.
+_ENGINE_RESEARCH_RUNTIME_POLICY = {
+    "crates/okx-research-service/src/process_memory.rs",
+    "crates/okx-research-service/src/main.rs",
+}
+# These Host implementation files own the trading Engine process/Job as well
+# as Research. Host-only CI would not exercise the Engine financial lifecycle
+# after an edit here. Keep them in the native matrix until that shared owner
+# is physically split into independently testable modules.
+_ENGINE_HOST_LIFECYCLE = {
+    "crates/okx-host-controller/src/job.rs",
+    "crates/okx-host-controller/src/lifecycle_executor.rs",
 }
 
 
@@ -45,17 +76,33 @@ def category(path):
         return "docs"
     if path.startswith(_CLOUDFLARE_DIR):
         return "cloudflare"
+    if path in _ENGINE_RESEARCH_RUNTIME_POLICY or path in _ENGINE_HOST_LIFECYCLE:
+        return "full"
     # Only Rust implementation files may use the host-only gate. Changes to
-    # manifests, assets, scripts, protocols or packaging still require full CI.
-    if path.startswith((_HOST_CONTROL_SRC, _HOST_PROTOCOL_SRC)) and path.endswith(".rs"):
+    # manifests, assets, scripts, shared IPC or packaging still require full
+    # CI. Only Host-owned protocol source under okx-host-protocol may be scoped.
+    if path.endswith(".rs") and path.startswith((
+        _HOST_CONTROL_SRC, _HOST_PROTOCOL_SRC, _HOST_CONTROL_TEST, _HOST_PROTOCOL_TEST,
+    )):
         return "host-controller"
-    if path.startswith(_HOST_LAUNCHER_SRC) and path.endswith(".rs"):
+    if path.endswith(".rs") and path.startswith((_HOST_LAUNCHER_SRC, _HOST_LAUNCHER_TEST)):
         return "host-launcher"
     # A scoped Research change must be Rust source or an integration test.
     # Arbitrary configs, SQL fixtures, generated code and build inputs can
     # affect the installed product; they must not bypass the Native gate.
     if _research_source(path):
         return "research"
+    # These new Research crates are still included by an Engine dev-only
+    # compatibility test. They become Research-only *only after* the exact
+    # before/after Windows test closure proves the dependency removed.
+    if _research_protected_source(path):
+        return "full"
+    # Engine/Execution are both owned by the single financial writer. Their
+    # source-only changes still require every financial property; only the
+    # *shipping* executable may be narrowed after accepted-base proof.
+    if path.endswith(".rs") and any(path.startswith(root + owner)
+                                   for root in _ENGINE_DIRS for owner in ("src/", "tests/")):
+        return "engine"
     return "full"
 
 
@@ -93,18 +140,16 @@ def classify(pages):
     files = verified_entries(pages)
     if files is None:
         return "full"
-    categories = set()
-    for item in files:
-        path = item["filename"]
-        kind = category(path)
-        if kind == "full":
-            return "full"
-        categories.add(kind)
+    return _scope({category(item["filename"]) for item in files})
+
+
+def _scope(categories):
+    if "full" in categories:
+        return "full"
+    if "engine" in categories:
+        return "engine" if categories <= {"engine", "docs", "cloudflare"} else "full"
     if "research" in categories:
         if categories & {"host-controller", "host-launcher"}:
-            if any(category(path) == "research" and not _research_source(path) for path in
-                   (entry["filename"] for entry in files)):
-                return "full"
             return "research-host"
         return "research"
     if categories & {"host-controller", "host-launcher"}:
@@ -123,6 +168,77 @@ def _research_source(path):
     )
 
 
+def _research_protected_source(path):
+    return path.endswith(".rs") and any(
+        path.startswith(root + owner) for root in _RESEARCH_PROTECTED_SOURCES
+        for owner in ("src/", "tests/")
+    )
+
+
+def draft_checks(path, kind):
+    """Map the classified owner to its short Draft checks."""
+    if kind == "docs":
+        return set()
+    if kind == "cloudflare":
+        return {"mcp", "wire", "worker"}
+    if kind in {"host-controller", "host-launcher"}:
+        return {"host"}
+    if kind == "research":
+        if path.startswith("crates/okx-strategy-core/src/"):
+            return {"strategy", "research", "worker", "analysis"}
+        if path.startswith("crates/okx-analysis/src/"):
+            return {"analysis", "kernel"}
+        if path.startswith("crates/okx-research/src/"):
+            return {"research", "worker"}
+        if path.startswith(("crates/okx-research-service/src/ipc/", "crates/okx-research-service/tests/")) or (
+            path == "crates/okx-research-service/src/ipc.rs"
+        ):
+            return {"worker", "worker-ipc"}
+        if path.startswith("crates/okx-research-service/src/"):
+            return {"worker"}
+        if path.startswith(("crates/okx-research-protocol/", "crates/okx-research-domain/")):
+            return {"wire", "strategy", "research", "worker"}
+    if kind == "engine":
+        return {"expanded"}
+    if path == "crates/okx-research-service/src/main.rs":
+        return {"ipc", "worker"}
+    if path == "crates/okx-research-service/src/process_memory.rs":
+        return {"worker"}
+    if path == "crates/okx-research-protocol/src/strategy_contract.rs":
+        return {"wire", "ipc", "worker", "mcp", "strategy", "research", "analysis"}
+    if path.startswith(("crates/okx-ipc-contracts/src/", "crates/okx-research-protocol/src/")) and path.endswith(".rs"):
+        return {"wire", "ipc", "worker", "mcp"}
+    return {"expanded"}
+
+
+def select_draft(status, path):
+    return draft_checks(path, category(path)) if status in {"added", "modified"} else {"expanded"}
+
+
+def github_plan(pages, *, allow_dependency_candidate):
+    files = verified_entries(pages)
+    scope, candidate, edge, checks = "full", "none", False, {"expanded"}
+    if files is not None:
+        owners = [(entry, category(entry["filename"])) for entry in files]
+        scope = _scope({kind for _, kind in owners})
+        candidate = dependency_candidate(pages) if allow_dependency_candidate else "none"
+        edge = any(kind == "cloudflare" for _, kind in owners)
+        checks = set()
+        for entry, kind in owners:
+            checks.update(draft_checks(entry["filename"], kind)
+                          if entry["status"] != "removed" else {"expanded"})
+        if "expanded" in checks:
+            checks = {"expanded"}
+    return {
+        "scope": scope,
+        "manifest_candidate": candidate,
+        "edge_changed": str(edge).lower(),
+        "draft_checks": ",".join(sorted(checks)),
+        "draft_mcp": str(bool(checks & {"mcp", "expanded"})).lower(),
+        "diff_verified": str(files is not None).lower(),
+    }
+
+
 def edge_changed(pages):
     files = verified_entries(pages)
     return files is not None and any(category(entry["filename"]) == "cloudflare" for entry in files)
@@ -139,15 +255,20 @@ def dependency_candidate(pages):
         return "none"
     manifests = [entry["filename"] for entry in files
                  if entry["filename"] in _RESEARCH_MANIFESTS | _HOST_MANIFESTS]
-    if not manifests or any(entry["status"] != "modified" for entry in files
-                            if entry["filename"] in _RESEARCH_MANIFESTS | _HOST_MANIFESTS | {"Cargo.lock"}):
+    protected_sources = [entry["filename"] for entry in files
+                         if _research_protected_source(entry["filename"])]
+    if (not manifests and not protected_sources) or any(
+        entry["status"] != "modified" for entry in files
+        if entry["filename"] in _RESEARCH_MANIFESTS | _HOST_MANIFESTS | {"Cargo.lock"}
+        or _research_protected_source(entry["filename"])
+    ):
         return "none"
     kinds = set()
     for entry in files:
         path = entry["filename"]
         if path == "Cargo.lock":
             continue
-        if path in _RESEARCH_MANIFESTS or category(path) == "research":
+        if path in _RESEARCH_MANIFESTS or category(path) == "research" or _research_protected_source(path):
             kinds.add("research")
         elif path in _HOST_MANIFESTS or category(path) in {"host-controller", "host-launcher"}:
             kinds.add("host")
@@ -163,17 +284,55 @@ def dependency_candidate(pages):
 
 def _self_test() -> None:
     # Post-merge reuse must skip Research compilation, not just full Native.
-    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
+    repository = Path(__file__).resolve().parents[1]
+    workflow = (repository / ".github/workflows/ci.yml").read_text()
+    # Named Ready witnesses must exist in actual test sources. Checking only
+    # workflow strings would allow a harmless Rust rename to turn a 10-minute
+    # Windows matrix into an avoidable missing-witness failure.
+    source_witnesses = {
+        "crates/okx-host-controller/tests/research_process_independence.rs": (
+            "one_process_job_can_be_terminated_without_touching_the_other",
+            "nested_job_assignment_waits_for_parent_ready_receipt",
+            "research_control_root_is_independent_and_start_requires_verified_installation",
+            "corrupted_and_hash_mismatched_research_image_never_launch",
+            "standalone_research_status_is_typed_and_does_not_claim_edge_online",
+            "standalone_research_lifecycle_requires_exact_image_and_process_generation",
+        ),
+        "crates/okx-host-controller/src/research_supervisor.rs": (
+            "research_state_is_strict_and_independent_of_engine_state",
+        ),
+        "crates/okx-host-protocol/src/lib.rs": (
+            "typed_research_rollback_requires_two_distinct_exact_hashes",
+            "standalone_research_lifecycle_requires_exact_image_and_process_generation",
+            "standalone_research_status_is_typed_and_does_not_claim_edge_online",
+            "research_token_provision_command_has_no_bearer_fields",
+        ),
+        "crates/okx-bridge-mcp/src/lib.rs": (
+            "control_bridge_denies_research_mutations_before_network",
+        ),
+        "crates/okx-research-service/src/edge_credentials.rs": (
+            "research_token_validation_is_bounded_and_ascii_only",
+            "research_native_target_is_distinct_from_engine",
+            "mock_store_never_exposes_research_bearer_to_engine_target",
+        ),
+        "crates/okx-research-service/src/edge_runtime.rs": (
+            "research_starts_only_after_finite_supervisor_job_receipt",
+            "installed_research_bearer_is_pinned_to_control_edge_origin",
+        ),
+    }
+    for source_file, names in source_witnesses.items():
+        source = (repository / source_file).read_text(encoding="utf-8")
+        for name in names:
+            assert re.search(r"(?m)^\s*(?:async\s+)?fn\s+" + re.escape(name) + r"\s*\(", source), (
+                f"CI_NAMED_RESEARCH_WITNESS_NOT_IN_SOURCE:{source_file}:{name}"
+            )
     # The Actions shell guard must accept exactly the names produced by this
     # classifier. A stale host-control spelling once rejected host-controller
     # source changes before their dedicated short Windows job could start.
-    expected_scopes = {"docs", "cloudflare", "research", "research-host", "host-controller", "host-launcher", "full"}
+    expected_scopes = {"docs", "cloudflare", "engine", "research", "research-host", "host-controller", "host-launcher", "full"}
     scope_guards = re.findall(r'case "\$scope" in ([a-z|-]+)\)', workflow)
-    assert len(scope_guards) == 2, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
-    for entry in scope_guards:  # raw file scope and final Cargo-proven scope
-        guard_scopes = entry.split("|")
-        assert len(guard_scopes) == len(set(guard_scopes))
-        assert set(guard_scopes) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
+    assert len(scope_guards) == 1, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
+    assert set(scope_guards[0].split("|")) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
     assert "component_scope: ${{ steps.proven_scope.outputs.scope }}" in workflow
     assert 'research_only: ${{ steps.classify.outputs.research_only }}' in workflow
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
@@ -189,9 +348,27 @@ def _self_test() -> None:
     assert "needs.component_impact.outputs.component_scope == 'host-launcher'" in host
     assert "cargo build --locked --release -p okx-host-launcher -p okx-host-controller" in host
     assert "cargo build --locked --release -p okx-trading-engine" not in host
+    assert "one_process_job_can_be_terminated_without_touching_the_other" in host, "HOST_RESEARCH_ENGINE_PROCESS_JOB_ISOLATION_REQUIRED"
+    assert "nested_job_assignment_waits_for_parent_ready_receipt" in host, "HOST_RESEARCH_NESTED_JOB_READINESS_REQUIRED"
+    assert "research_control_root_is_independent_and_start_requires_verified_installation" in host, "HOST_RESEARCH_INSTALLATION_IDENTITY_REQUIRED"
+    assert "corrupted_and_hash_mismatched_research_image_never_launch" in host, "HOST_RESEARCH_FAIL_CLOSED_START_REQUIRED"
+    assert "research_state_is_strict_and_independent_of_engine_state" in host, "HOST_RESEARCH_OWNER_STATE_SEPARATION_REQUIRED"
+    assert "typed_research_rollback_requires_two_distinct_exact_hashes" in host, "HOST_RESEARCH_ROLLBACK_IDENTITY_REQUIRED"
+    assert "standalone_research_lifecycle_requires_exact_image_and_process_generation" in host, "HOST_LIFECYCLE_TYPED_WITNESS_REQUIRED"
+    assert "standalone_research_status_is_typed_and_does_not_claim_edge_online" in host, "HOST_RESEARCH_STATUS_TYPED_WITNESS_REQUIRED"
+    assert "research_token_provision_command_has_no_bearer_fields" in host, "HOST_RESEARCH_SECRET_WIRE_WITNESS_REQUIRED"
+    assert "control_bridge_denies_research_mutations_before_network" in host, "HOST_BRIDGE_MUTATION_DENIAL_WITNESS_REQUIRED"
     research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  required_windows:\n", 1)[0]
-    assert "if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
+    assert "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
+    for witness in (
+        "research_token_validation_is_bounded_and_ascii_only",
+        "research_native_target_is_distinct_from_engine",
+        "mock_store_never_exposes_research_bearer_to_engine_target",
+        "research_starts_only_after_finite_supervisor_job_receipt",
+        "installed_research_bearer_is_pinned_to_control_edge_origin",
+    ):
+        assert witness in research, f"RESEARCH_WINDOWS_SECRET_WITNESS_REQUIRED:{witness}"
     assert "cargo fmt --all -- --check" in research, "SCOPED_RESEARCH_MUST_VERIFY_RUST_FORMATTING"
     # Reuse the same established Cargo cache action and one target directory.
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
@@ -204,9 +381,10 @@ def _self_test() -> None:
         "docs": [files("docs/acceptance/518/t01-t15-evidence-matrix.md"), files("README.md", "docs/arch.md")],
         "cloudflare": [files("cloudflare/okx-mcp/src/runtime_session.ts"), files("cloudflare/okx-mcp/src/mcp.test.ts", "docs/okx.md")],
         "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/time_series.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md"), files("crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-research-service/tests/edge_wss.rs")],
-        "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-protocol/src/lib.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md")],
-        "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
-        "research-host": [files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs"), files("crates/okx-host-controller/src/lifecycle.rs", "crates/okx-research-service/tests/edge_wss.rs")],
+        "engine": [files("crates/okx-trading-engine/src/query.rs"), files("crates/okx-trade-execution/src/risk/mod.rs", "README.md"), files("crates/okx-trading-engine/src/trade_service/strategies.rs", "cloudflare/okx-mcp/src/mcp.ts")],
+        "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-protocol/src/lib.rs"), files("crates/okx-host-controller/src/research_supervisor.rs"), files("crates/okx-host-protocol/src/research.rs"), files("crates/okx-host-controller/tests/research_supervisor.rs"), files("crates/okx-host-protocol/tests/research_wire.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md"), files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-host-protocol/src/lib.rs", "cloudflare/okx-mcp/src/mcp.ts")],
+        "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/tests/launcher_process.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
+        "research-host": [files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs"), files("crates/okx-host-controller/src/lifecycle.rs", "crates/okx-research-service/tests/edge_wss.rs"), files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-host-protocol/src/research.rs", "crates/okx-research-service/src/edge_credentials.rs")],
     }
     for wanted, selections in cases.items():
         assert all(classify(pages) == wanted for pages in selections)
@@ -217,15 +395,26 @@ def _self_test() -> None:
     assert not edge_changed(files("crates/okx-host-controller/src/main.rs", "README.md"))
     unsafe = [
         [], [[]], [[{}]],
-        files("crates/okx-domain-core/src/query_plan.rs"),
+        files("crates/okx-trading-engine/src/query.rs", "crates/okx-research-protocol/src/analytics.rs"),
+        files("crates/okx-research-protocol/src/analytics.rs"),
+        files("crates/okx-research-domain/src/numeric.rs"),
+        files("crates/okx-trade-execution/src/risk/mod.rs", "crates/okx-host-controller/src/research_supervisor.rs"),
+        files("crates/okx-research-service/src/process_memory.rs"),
+        files("crates/okx-research-service/src/main.rs"),
+        files("crates/okx-research-service/src/process_memory.rs", "crates/okx-host-controller/src/research_supervisor.rs"),
+        files("crates/okx-host-controller/src/job.rs"),
+        files("crates/okx-host-controller/src/lifecycle_executor.rs"),
+        files("crates/okx-host-controller/src/lifecycle_executor.rs", "crates/okx-research-service/src/edge_runtime.rs"),
         files("crates/okx-ipc-contracts/src/lib.rs"),
-        files("crates/okx-trading-engine/src/trade_service/execute.rs"),
-        files("crates/okx-trade-execution/src/lib.rs"),
         files("crates/okx-host-controller/Cargo.toml"),
         files("crates/okx-host-protocol/Cargo.toml"),
         files("crates/okx-host-launcher/Cargo.toml"),
         files("crates/okx-host-controller/build.rs"),
         files("crates/okx-host-controller/assets/config.json"),
+        files("crates/okx-host-controller/src/research_supervisor.json"),
+        files("crates/okx-host-controller/tests/research_supervisor.json"),
+        files("crates/okx-host-protocol/tests/research_wire_fixture.json"),
+        files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-ipc-contracts/src/lib.rs"),
         files("crates/okx-host-controller/src/migration.json"),
         files("crates/okx-host-launcher/src/main.rs", "crates/okx-trading-engine/src/main.rs"),
         files("crates/okx-host-controller/src/main.rs", "crates/okx-ipc-contracts/src/lib.rs"),
@@ -245,7 +434,7 @@ def _self_test() -> None:
         files("docs/a.yml"), files("crates/okx-trading-engine/src/readme.md"),
         files("docs/../crates/okx-trading-engine/README.md"), files("docs//a.md"),
         files("cloudflare/okx-mcp/../okx-trading-engine/src/a.ts"),
-        files("docs/a.md", "crates/okx-domain-core/src/query_plan.rs"),
+        files("docs/a.md", "crates/okx-trading-engine/build.rs"),
         files("cloudflare/okx-mcp/src/mcp.ts", ".github/workflows/ci.yml"),
         [[{"filename": "docs/a.md", "status": "renamed", "previous_filename": "crates/okx-trading-engine/a.md"}]],
         [[{"filename": "docs/a.md", "status": "modified"}] * 2],
@@ -257,6 +446,11 @@ def _self_test() -> None:
     assert all(classify(pages) == "full" for pages in unsafe)
     for wanted, selection in (
         ("research", files("crates/okx-research-service/Cargo.toml", "Cargo.lock")),
+        ("research", files("crates/okx-research-domain/Cargo.toml", "Cargo.lock")),
+        ("research", files("crates/okx-research-protocol/Cargo.toml", "Cargo.lock")),
+        ("research", files("crates/okx-research-protocol/src/analytics.rs")),
+        ("research", files("crates/okx-research-domain/src/numeric.rs")),
+        ("research", files("crates/okx-research-domain/src/numeric.rs", "crates/okx-research-service/src/analytics/market.rs")),
         ("research", files("crates/okx-analysis/Cargo.toml", "Cargo.lock")),
         ("research", files("crates/okx-strategy-core/Cargo.toml", "crates/okx-research/src/lib.rs")),
         ("host-controller", files("crates/okx-host-controller/Cargo.toml", "Cargo.lock")),
@@ -286,6 +480,8 @@ def main() -> int:
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--dependency-candidate", action="store_true")
     output.add_argument("--edge-changed", action="store_true")
+    output.add_argument("--github-plan", action="store_true")
+    parser.add_argument("--allow-dependency-candidate", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         _self_test()
@@ -293,8 +489,15 @@ def main() -> int:
     try:
         pages = json.load(sys.stdin)
     except (ValueError, UnicodeError):
-        return 1
-    if args.edge_changed:
+        if not args.github_plan:
+            return 1
+        pages = None
+    if args.github_plan:
+        plan = github_plan(pages, allow_dependency_candidate=args.allow_dependency_candidate)
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output_file:
+            for name, value in plan.items():
+                print(f"{name}={value}", file=output_file)
+    elif args.edge_changed:
         print("true" if edge_changed(pages) else "false")
     else:
         print(dependency_candidate(pages) if args.dependency_candidate else classify(pages))

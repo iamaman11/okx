@@ -1,6 +1,6 @@
 //! Durable, authenticated research result cursors. All state lives in Jobs SQLite.
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use okx_ipc_contracts::analytics::ResearchResultView;
+use okx_research_protocol::analytics::ResearchResultView;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

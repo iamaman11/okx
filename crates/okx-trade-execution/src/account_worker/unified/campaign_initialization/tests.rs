@@ -103,11 +103,18 @@ async fn close(root: PathBuf, owner: UnifiedFinanceHandle) {
     let mut stopped = owner.termination_signal();
     drop(owner);
     if !*stopped.borrow() {
-        tokio::time::timeout(Duration::from_secs(2), stopped.changed())
+        // Windows CI can briefly delay the SQL writer's final lease release
+        // when unrelated Native witnesses are running in parallel. This is
+        // test teardown only: financial command deadlines above stay at 2s.
+        tokio::time::timeout(Duration::from_secs(5), stopped.changed())
             .await
-            .unwrap()
-            .unwrap();
+            .expect("native SQL writer did not release its lease after owner drop")
+            .expect("native SQL writer termination channel closed unexpectedly");
     }
+    assert!(
+        *stopped.borrow(),
+        "native SQL writer did not signal termination"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -223,7 +230,7 @@ async fn risk_book_contract_native_campaign_policy_two_accounts_replay_and_no_op
 
 async fn assert_execution_blocked(owner: &UnifiedFinanceHandle, p: &NativeCampaignPolicy) {
     use crate::account_worker::unified::UnifiedFinanceWrite;
-    use okx_domain_core::risk::model::{PostCausalProof, RiskProposal};
+    use crate::risk::model::{PostCausalProof, RiskProposal};
     let census = crate::risk::VerifiedCensus {
         complete: true,
         generation: 1,

@@ -1,4 +1,4 @@
-pub use okx_domain_core::observation_model::{BookLevel, OrderBookSnapshot, OrderBookStatus};
+pub use okx_engine_domain::observation_model::{BookLevel, OrderBookSnapshot, OrderBookStatus};
 
 use std::{collections::BTreeMap, str::FromStr};
 

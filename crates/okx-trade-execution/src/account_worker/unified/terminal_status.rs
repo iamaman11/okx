@@ -110,7 +110,7 @@ impl UnifiedFinanceHandle {
             let campaign=AccountStore::account_policy_sql(&tx,Some((&installation,&account)))?.campaign_id;
             let observed=crate::risk::read_unified_campaign_reservation(&tx,&installation,&campaign,&reservation,&plan)
                 .map_err(StoreError::Invalid)?.ok_or(StoreError::Invalid("TERMINAL_RELEASE_ACK_MISSING"))?;
-            if observed.state!=okx_domain_core::risk::model::RiskEntryState::Released {return Err(StoreError::Invalid("TERMINAL_RELEASE_ACK_MISSING"));}
+            if observed.state!=crate::risk::model::RiskEntryState::Released {return Err(StoreError::Invalid("TERMINAL_RELEASE_ACK_MISSING"));}
             let late=AccountStore::entry_late_pending_sql(&tx,Some((&installation,&account)),&intent)?;
             if late {return Err(StoreError::Invalid("LATE_ENTRY_SETTLEMENT_PENDING"));}
             let accepted:bool=tx.query_row(

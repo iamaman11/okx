@@ -1,8 +1,6 @@
 use clap::{Parser, Subcommand};
 use okx_api::{OkxEnvironment, OkxPublicClient, OkxRestClient, RateBudget, Region};
-use okx_ipc_contracts::{
-    DirectRuntimeProfile, MailboxEnvelope, account_catalog_proto, accounts::Environment,
-};
+use okx_ipc_contracts::{MailboxEnvelope, account_catalog_proto, accounts::Environment};
 use okx_market_runtime::PublicWsCoordinator;
 use okx_trading_engine::{
     AgentError, AgentResult,
@@ -18,7 +16,6 @@ use okx_trading_engine::{
     market_bootstrap::MarketBootstrapper,
     okx_credentials::load_native_account_credentials,
     query::DispatchContext,
-    research_client::ResearchClient,
     runtime::{EngineContext, run_engine},
 };
 use std::{
@@ -51,6 +48,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Report the installed Engine runtime ownership contract.
+    RuntimeContract,
     InitKey,
     Identity,
     SetGithubToken,
@@ -234,6 +233,13 @@ async fn inspect_venue(root: &Path, account: &str) -> AgentResult<serde_json::Va
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    if matches!(cli.command, Command::RuntimeContract) {
+        println!(
+            r#"{{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false}}"#
+        );
+        return Ok(());
+    }
     if let Some(tree) = option_env!("OKX_BUILD_SOURCE_TREE") {
         okx_trading_engine::accounts::set_build_release(tree)?;
     }
@@ -244,7 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .try_init()
         .map_err(|_| std::io::Error::other("TRACING_SUBSCRIBER_INIT_FAILED"))?;
-    run(Cli::parse()).await?;
+    run(cli).await?;
     Ok(())
 }
 async fn run(cli: Cli) -> AgentResult<()> {
@@ -390,11 +396,8 @@ async fn run(cli: Cli) -> AgentResult<()> {
             );
         }
         command => {
-            // Authenticate the existing host identity before source, network, or worker startup.
+            // Authenticate the existing host identity before source or network startup.
             let private_key = Zeroizing::new(load_native_private_key(&config.key_id)?);
-            use sha2::{Digest, Sha256};
-            let public_key = okx_ipc_contracts::crypto::public_key_from_private(*private_key);
-            let scope = format!("{:x}", Sha256::digest(public_key));
             // Existing installation only: startup never creates financial storage.
             std::fs::create_dir_all(&config.root)?;
             let _engine_lease = OpenOptions::new()
@@ -418,20 +421,8 @@ async fn run(cli: Cli) -> AgentResult<()> {
             let (public, public_ws) =
                 PublicWsCoordinator::new_uninitialized(env, budget, public_client.clone());
             let market = MarketBootstrapper::new(public_client);
-            let research = ResearchClient::installed(
-                config.root.clone(),
-                config.root.join("analytics"),
-                okx_ipc_contracts::research_ipc::ResearchScope::new(scope.clone())
-                    .map_err(|reason| AgentError::ResearchSessionTask(reason.into()))?,
-                market.clone(),
-            );
-            let finance = selection.finish(public_ws.clone(), market.clone()).await;
-            let dispatch = DispatchContext {
-                finance,
-                research,
-                public_ws,
-                market,
-            };
+            let finance = selection.finish(public_ws, market).await;
+            let dispatch = DispatchContext { finance };
             match command {
                 Command::Once { input: path } => {
                     let mut data = match path {
@@ -458,7 +449,6 @@ async fn run(cli: Cli) -> AgentResult<()> {
                         public_task.abort();
                         let _ = public_task.await;
                     }
-                    dispatch.research.shutdown().await;
                     dispatch.finance.shutdown().await;
                     println!("{}", serde_json::to_string(&result?)?);
                 }
@@ -478,8 +468,6 @@ async fn run(cli: Cli) -> AgentResult<()> {
                                 url,
                                 cloudflare_runtime_id,
                                 load_native_cloudflare_token()?,
-                                DirectRuntimeProfile::Engine,
-                                scope.clone(),
                             )
                         })
                         .transpose()?;
@@ -550,8 +538,6 @@ mod native_finance_startup_tests {
         }
     }
 
-    // Financial unavailability no longer aborts the research host. The public
-    // dispatch contract separately proves research availability and exact denial.
     async fn select_cli(cli: Cli) -> okx_trading_engine::finance_startup::FinanceSelection {
         let stopped = cli.stopped_finance_campaign.is_some();
         okx_trading_engine::finance_startup::select(

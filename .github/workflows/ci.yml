@@ -28,55 +28,10 @@ permissions:
   actions: read
 
 jobs:
-  research_package_proof:
-    # Supplementary Draft proof for #537 T10. Does not compile or deploy an
-    # Engine/Worker and never substitutes for mandatory Ready Native CI.
-    name: research-package-proof
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'research-composition-evidence')
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-      - name: Reject mixed-origin substitution and unsupported names
-        run: node scripts/test-compose-verified-research-v2.cjs
-      - name: Compose two accepted GitHub artifacts for installed CONTROL
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $dist = Join-Path $env:RUNNER_TEMP 'okx-research-composition-v2'
-          $proof = Join-Path $env:RUNNER_TEMP 'research-composition-proof.json'
-          & ./scripts/prepare-research-release.ps1 `
-            -AcceptedCompositionSpec 'docs/acceptance/537/t10-composition-spec.json' `
-            -Dist $dist -ProofFile $proof
-          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_COMPOSITION_FAILED' }
-          $result = Get-Content -LiteralPath $proof -Raw | ConvertFrom-Json
-          if ($result.control_candidate_rules -cne 'PASS_OFFLINE_NOT_ACTIVATED' -or
-              $result.candidate_head -cne '${{ github.event.pull_request.head.sha }}' -or
-              $result.candidate_tree -cne (git rev-parse 'HEAD^{tree}').Trim()) {
-            throw 'CANDIDATE_PROOF_NOT_EXACT_TREE'
-          }
-      - name: Retain exact v2 candidate for later Ready/promotion review
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/okx-research-composition-v2
-          if-no-files-found: error
-          compression-level: 1
-          retention-days: 14
-      - name: Retain composition identities and negative-test proof
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: research-composition-proof-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/research-composition-proof.json
-          if-no-files-found: error
-          retention-days: 14
-
   dependency-audit:
     name: dependency-audit
     needs: component_impact
-    if: needs.component_impact.outputs.component_scope != '' && !contains(fromJSON('["docs","cloudflare"]'), needs.component_impact.outputs.component_scope)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft != true) && needs.component_impact.outputs.component_scope != '' && !contains(fromJSON('["docs","cloudflare"]'), needs.component_impact.outputs.component_scope)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,17 +111,16 @@ jobs:
       component_scope: ${{ steps.proven_scope.outputs.scope }}
       research_only: ${{ steps.classify.outputs.research_only }}
       edge_required: ${{ steps.classify.outputs.edge_required }}
+      draft_checks: ${{ steps.file_scope.outputs.draft_checks }}
+      draft_mcp: ${{ steps.file_scope.outputs.draft_mcp }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Reject unsafe component classifications
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
         run: python3 -B scripts/check_ci_native_scope.py --self-test
       - name: Classify complete changed-file impact
         id: file_scope
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -176,11 +130,14 @@ jobs:
           CHECKED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          scope=full
-          candidate=none
-          edge=false
+          files="$RUNNER_TEMP/ci-files.json"
+          comparison=unavailable
+          plan_args=()
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base="$PR_BASE"
+            if [[ "${{ github.event.pull_request.draft }}" != "true" ]]; then
+              plan_args+=(--allow-dependency-candidate)
+            fi
           elif [[ "$FORCED_PUSH" != true ]]; then
             base="$BEFORE_SHA"
           else
@@ -197,21 +154,17 @@ jobs:
                  and (.commits | length) == .total_commits and .commits[-1].sha == $head
                  and (.files | type == "array" and length > 0 and length < 300)
                ' "$RUNNER_TEMP/ci-compare.json" >/dev/null; then
-            jq -c '[.files]' "$RUNNER_TEMP/ci-compare.json" > "$RUNNER_TEMP/ci-files.json"
-            scope="$(python3 -B scripts/check_ci_native_scope.py < "$RUNNER_TEMP/ci-files.json")"
-            edge="$(python3 -B scripts/check_ci_native_scope.py --edge-changed < "$RUNNER_TEMP/ci-files.json")"
-            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-              candidate="$(python3 -B scripts/check_ci_native_scope.py --dependency-candidate < "$RUNNER_TEMP/ci-files.json")"
-            fi
+            jq -c '.files as $paths | [range(0; ($paths | length); 100) as $start |
+              $paths[$start:$start + 100]]' "$RUNNER_TEMP/ci-compare.json" > "$files"
+            comparison=complete
+          else
+            printf 'null\n' > "$files"
           fi
-          case "$scope" in docs|cloudflare|research|research-host|host-controller|host-launcher|full) ;; *) exit 1;; esac
-          case "$candidate" in none|research|host-controller|host-launcher) ;; *) exit 1;; esac
-          echo "scope=$scope" >> "$GITHUB_OUTPUT"
-          echo "manifest_candidate=$candidate" >> "$GITHUB_OUTPUT"
-          echo "edge_changed=$edge" >> "$GITHUB_OUTPUT"
-          echo "FILE_SCOPE=$scope; MANIFEST_CANDIDATE=$candidate"
-      # Only a narrow manifest+optional lock candidate incurs an extra Cargo
-      # resolver check. Every other Ready PR keeps its existing fast selector.
+          echo "comparison=$comparison" >> "$GITHUB_OUTPUT"
+          python3 -B scripts/check_ci_native_scope.py --github-plan "${plan_args[@]}" < "$files"
+      # Only manifest changes and formerly shared Research protocol/domain
+      # sources incur the Windows resolver proof. Their Engine dev-only legacy
+      # consumers must keep the full matrix until those edges are removed.
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'
         with:
@@ -265,7 +218,6 @@ jobs:
           fi
       - name: Select only proven component scope
         id: proven_scope
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
         shell: bash
         run: |
           set -euo pipefail
@@ -274,7 +226,7 @@ jobs:
             test "$scope" = full
             scope='${{ steps.cargo_closure.outputs.scope }}'
           fi
-          case "$scope" in docs|cloudflare|research|research-host|host-controller|host-launcher|full) ;; *) exit 1;; esac
+          case "$scope" in docs|cloudflare|engine|research|research-host|host-controller|host-launcher|full) ;; *) exit 1;; esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "COMPONENT_SCOPE=$scope"
       - name: Decide whether compilation is required
@@ -290,14 +242,14 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.draft }}" == "true" ]]; then
             echo "build_required=false" >> "$GITHUB_OUTPUT"
             echo "native_required=false" >> "$GITHUB_OUTPUT"
-            echo "reason=draft PR; defer release build until ready" >> "$GITHUB_OUTPUT"
+            echo "reason=draft PR; run owner feedback and defer acceptance and release" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           scope="${{ steps.proven_scope.outputs.scope }}"
           case "$scope" in
             docs) edge_required=false ;;
-            research-host|host-controller|host-launcher) edge_required="${{ steps.file_scope.outputs.edge_changed }}" ;;
+            engine|research-host|host-controller|host-launcher) edge_required="${{ steps.file_scope.outputs.edge_changed }}" ;;
             *) edge_required=true ;;
           esac
           echo "edge_required=$edge_required" >> "$GITHUB_OUTPUT"
@@ -326,7 +278,7 @@ jobs:
             if [[ -n "$head_sha" ]]; then
               candidates="$(gh api --paginate --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
                 -f head_sha="$head_sha" -f event=pull_request -f status=completed -f per_page=100 \
-                --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .conclusion == "success") | [.id, .run_attempt] | @tsv')"
+                --jq '.workflow_runs[] | select((.path | test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")) and .conclusion == "success" and .run_attempt == 1) | [.id, .run_attempt] | @tsv')"
               while read -r run attempt; do
                 [[ -n "$run" ]] || continue
                 jobs="$(gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/actions/runs/$run/attempts/$attempt/jobs?per_page=100")"
@@ -349,11 +301,16 @@ jobs:
 
           echo "build_required=true" >> "$GITHUB_OUTPUT"
           case "$scope" in
+            engine)
+              echo "native_required=true" >> "$GITHUB_OUTPUT"
+              echo "native_proof=ENGINE_OWNER_ONLY" >> "$GITHUB_OUTPUT"
+              echo "reason=Engine/Execution source; all financial witnesses required, only Engine executable needs fresh build" >> "$GITHUB_OUTPUT"
+              ;;
             research)
               echo "research_only=true" >> "$GITHUB_OUTPUT"
               echo "native_required=false" >> "$GITHUB_OUTPUT"
               echo "native_proof=RESEARCH_OWNER_ONLY" >> "$GITHUB_OUTPUT"
-              echo "reason=Research owner; release job must verify the accepted Native base" >> "$GITHUB_OUTPUT"
+              echo "reason=Research owner; build and verify standalone Research artifact without Engine bytes" >> "$GITHUB_OUTPUT"
               ;;
             research-host)
               echo "native_required=false" >> "$GITHUB_OUTPUT"
@@ -374,53 +331,70 @@ jobs:
 
       - name: Classification
         run: |
-          echo "BUILD_REQUIRED=${{ steps.classify.outputs.build_required }}"
-          echo "REASON=${{ steps.classify.outputs.reason }}"
+          {
+            echo '### CI plan'
+            echo 'Immutable comparison: ${{ steps.file_scope.outputs.comparison }}'
+            echo 'Changed-file list accepted: ${{ steps.file_scope.outputs.diff_verified }}'
+            echo 'Component scope: ${{ steps.proven_scope.outputs.scope }}'
+            echo 'Cargo closure candidate: ${{ steps.file_scope.outputs.manifest_candidate }}'
+            echo 'Reason: ${{ steps.classify.outputs.reason }}'
+            echo 'Draft checks: ${{ steps.file_scope.outputs.draft_checks }}'
+            echo 'Mandatory checks enabled: ${{ steps.classify.outputs.build_required }}'
+            echo 'Trading Engine acceptance: ${{ steps.classify.outputs.native_required }}'
+            echo 'Cloudflare contracts: ${{ steps.classify.outputs.edge_required }}'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   draft-component-tests:
     name: draft-component-tests
+    needs: component_impact
     if: github.event_name == 'pull_request' && github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      DRAFT_CHECKS: ${{ needs.component_impact.outputs.draft_checks }}
       CARGO_PROFILE_TEST_DEBUG: 0
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
           persist-credentials: false
-      - name: Select checks from the complete PR diff
-        id: scope
+      - name: Verify CI routing contracts
         run: |
-          python3 -B scripts/check_ci_native_scope.py --self-test
+          if [[ -z "$DRAFT_CHECKS" && '${{ needs.component_impact.outputs.component_scope }}' != docs ]]; then
+            echo 'Draft check list is missing for a code change'
+            exit 1
+          fi
           python3 -B scripts/test_check_p0.py
           node scripts/test-ci-main-routing.cjs
           node scripts/test-ci-component-impact.cjs
-          python3 scripts/check_p0.py --base "$BASE_SHA" --plan
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
-        if: steps.scope.outputs.code == 'true'
+        if: env.DRAFT_CHECKS != ''
         with:
           toolchain: 1.100.0
           components: rustfmt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: needs.component_impact.outputs.draft_mcp == 'true'
+        with:
+          node-version-file: cloudflare/okx-mcp/.node-version
+          cache: npm
+          cache-dependency-path: cloudflare/okx-mcp/package-lock.json
       - name: Verify Rust formatting before compilation
-        if: steps.scope.outputs.code == 'true'
+        if: env.DRAFT_CHECKS != ''
         run: cargo fmt --all -- --check
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-        if: steps.scope.outputs.code == 'true'
+        if: env.DRAFT_CHECKS != ''
         id: cache
         with:
           shared-key: draft-component-tests
           cache-workspace-crates: true
       - name: Run selected owner and consumer checks
-        if: steps.scope.outputs.code == 'true'
+        if: env.DRAFT_CHECKS != ''
         env:
           CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
           echo "Cargo cache exact hit: $CACHE_HIT" >> "$GITHUB_STEP_SUMMARY"
-          python3 scripts/check_p0.py --base "$BASE_SHA"
+          python3 -B scripts/check_p0.py --checks "$DRAFT_CHECKS"
 
   architecture_contracts:
     name: architecture-contracts
@@ -440,6 +414,7 @@ jobs:
           python3 -B scripts/check_ci_native_scope.py --self-test
           node scripts/test-research-release-scope.cjs
           node scripts/test-compose-verified-research-v2.cjs
+          node scripts/test-research-component-artifact.cjs
 
       - name: Parse permanent Native-base release verifier
         shell: pwsh
@@ -521,6 +496,12 @@ jobs:
           cargo test --locked -p okx-research-service --test ipc_process -- --nocapture | tee "$RUNNER_TEMP/research-worker-ipc.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-worker-ipc.log"
           cargo test --locked -p okx-research-service --doc
+          # Keep the standalone Research process tests on the production
+          # singleton above. Engine's legacy T06–T10 child fixtures require a
+          # separate, opt-in debug worker, never a shipping binary.
+          cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
+          cp target/debug/okx-research-service target/debug/okx-research-service-test-isolated
+          export OKX_RESEARCH_SERVICE_TEST_EXE="$PWD/target/debug/okx-research-service-test-isolated"
           cargo test --locked -p okx-trading-engine --lib research_dispatch_tests:: -- --test-threads 2 | tee "$RUNNER_TEMP/research-dispatch.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-dispatch.log"
 
@@ -569,6 +550,10 @@ jobs:
 
       - name: Typecheck
         run: npm run check
+      - name: Enforce public Engine and MCP product contract for Edge-only changes
+        # architecture-contracts is intentionally skipped on an Edge-only
+        # scope. Its public tool/risk/schema guard must not be skipped too.
+        run: python3 ../../scripts/check_product_contract.py
       - name: Accept authenticated RuntimeSession transport without financial authority
         run: node scripts/test-native-finance-retirement-do.mjs
 
@@ -604,7 +589,11 @@ jobs:
           if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" || "${{ needs.component_impact.outputs.component_scope }}" == "research-host" ]]; then
             test "${{ needs.rust_tests_linux.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "success"
-            echo "LINUX_FINANCE_REUSED_BASE=${{ needs.research_service_tests_windows.outputs.base_head }}"
+            if [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
+              echo "LINUX_RESEARCH_COMPONENT_SHA=${{ needs.research_service_tests_windows.outputs.research_component_sha256 }}"
+            else
+              echo "LINUX_ENGINE_CLOSURE_REUSED_BASE=${{ needs.research_service_tests_windows.outputs.mixed_base_head }}"
+            fi
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "host-controller" || "${{ needs.component_impact.outputs.component_scope }}" == "host-launcher" ]]; then
             test "${{ needs.rust_tests_linux.result }}" = "skipped"
             test "${{ needs.component_impact.outputs.native_proof }}" = "HOST_WINDOWS_OWNER_AND_CONSUMER"
@@ -659,8 +648,30 @@ jobs:
         run: |
           cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp -- --test-threads 2
+          $testLog = Join-Path $env:RUNNER_TEMP 'host-native-owner-tests.log'
+          cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp -- --test-threads 2 2>&1 |
+            Tee-Object -FilePath $testLog
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A generic 'cargo test passed' must not silently omit the new
+          # separate Research process owner contract (e.g. via cfg drift).
+          $output = Get-Content -LiteralPath $testLog -Raw
+          foreach ($witness in @(
+            'one_process_job_can_be_terminated_without_touching_the_other',
+            'nested_job_assignment_waits_for_parent_ready_receipt',
+            'research_control_root_is_independent_and_start_requires_verified_installation',
+            'corrupted_and_hash_mismatched_research_image_never_launch',
+            'research_state_is_strict_and_independent_of_engine_state',
+            'control_reconciles_research_when_engine_image_is_incompatible',
+            'independent_engine_runtime_receipt_is_strict',
+            'typed_research_rollback_requires_two_distinct_exact_hashes',
+            'standalone_research_lifecycle_requires_exact_image_and_process_generation',
+            'standalone_research_status_is_typed_and_does_not_claim_edge_online',
+            'research_token_provision_command_has_no_bearer_fields',
+            'control_bridge_denies_research_mutations_before_network'
+          )) {
+            $pattern = 'test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok'
+            if ($output -notmatch $pattern) { throw "HOST_RESEARCH_OWNER_WITNESS_NOT_RUN_$witness" }
+          }
       - name: Build both Windows host executables without Engine
         shell: pwsh
         run: |
@@ -741,6 +752,18 @@ jobs:
         run: |
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Previous Research catalog through MCP with Engine absent
+        if: needs.component_impact.outputs.edge_required == 'true'
+        shell: pwsh
+        run: |
+          $output = & cargo test --locked -p okx-research-service --lib edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 1 passed; 0 failed;') {
+            throw 'STANDALONE_RESEARCH_MCP_WITNESS_NOT_RUN'
+          }
 
       # The JavaScript Native/Worker finance scenario driver is retired with
       # its separate financial owner. Its driver-only PID/cleanup tests do not
@@ -840,8 +863,12 @@ jobs:
       - name: Build research worker for isolated process contracts
         shell: pwsh
         run: |
-          cargo build --locked -p okx-research-service --bin okx-research-service
+          # The process-level production singleton remains strict. Legacy
+          # Engine child tests get an opt-in debug binary with per-root mutex
+          # namespace injected by the #[cfg(test)] ResearchClient only.
+          cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'target/debug/okx-research-service.exe' -Destination 'target/debug/okx-research-service-test-isolated.exe'
 
       - name: Isolated Native pending-fill crash recovery
         shell: pwsh
@@ -867,7 +894,7 @@ jobs:
         id: engine-autonomy
         shell: pwsh
         run: |
-          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
           $output = & cargo test --locked -p okx-trading-engine --lib accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect -- --exact --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\b-process-tree.log" | Out-Host
@@ -900,7 +927,7 @@ jobs:
         env:
           OKX_CONTROL_AGENT_INCAR: ctl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         run: |
-          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
           $output = & cargo test --locked -p okx-trading-engine --lib accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research -- --exact --nocapture --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\mcp-native-load.log" | Out-Host
@@ -976,8 +1003,9 @@ jobs:
         if: matrix.suite == 'engine'
         shell: pwsh
         run: |
-          cargo build --locked -p okx-research-service --bin okx-research-service
+          cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'target/debug/okx-research-service.exe' -Destination 'target/debug/okx-research-service-test-isolated.exe'
 
       - name: Remaining native regression tests for this suite
         if: matrix.suite == 'engine' || matrix.suite == 'host' || matrix.suite == 'execution'
@@ -987,10 +1015,10 @@ jobs:
         run: |
           $packages = switch ($env:NATIVE_REGRESSION_SUITE) {
             'engine' {
-              $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+              $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
               'okx-trading-engine'
             }
-            'host' { 'okx-host-controller'; 'okx-host-launcher' }
+            'host' { 'okx-host-controller'; 'okx-host-launcher'; 'okx-host-protocol'; 'okx-bridge-mcp' }
             'execution' { 'okx-trade-execution' }
             default { throw 'UNKNOWN_NATIVE_REGRESSION_SUITE' }
           }
@@ -1003,6 +1031,7 @@ jobs:
           $manifestJson = & node scripts/ci-finance-witness-manifest.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $covered = @(($manifestJson | ConvertFrom-Json).witnesses)
+          $ownerTestLines = [System.Collections.Generic.List[string]]::new()
           foreach ($package in $packages) {
             $testArgs = @('--skip','research_dispatch_tests::','--skip','accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect','--skip','accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research','--skip','trade_service::protection_cleanup::protection_cleanup_direct_tests::','--test-threads','2')
             # OS-kill is checked exclusively in the finance/isolated job.
@@ -1027,6 +1056,9 @@ jobs:
               if ($line -cmatch '^test ([A-Za-z0-9_:]+) \.\.\. FAILED$') {
                 $failedTests.Add($Matches[1])
               }
+              if ($env:NATIVE_REGRESSION_SUITE -eq 'host' -and $line -cmatch '^test [A-Za-z0-9_:]+ \.\.\. ok$') {
+                $ownerTestLines.Add($line)
+              }
             }
             $exitCode = $LASTEXITCODE
             if ($exitCode -ne 0) {
@@ -1037,6 +1069,29 @@ jobs:
                 Write-Host "::error title=Windows regression in ${package}::$testName"
               }
               exit $exitCode
+            }
+          }
+          if ($env:NATIVE_REGRESSION_SUITE -eq 'host') {
+            # Full-scope PRs skip the dedicated Host owner job, but must still
+            # execute the Windows-only Research child/Job tests and typed wire.
+            $passed = $ownerTestLines -join "`n"
+            foreach ($witness in @(
+              'one_process_job_can_be_terminated_without_touching_the_other',
+              'nested_job_assignment_waits_for_parent_ready_receipt',
+              'research_control_root_is_independent_and_start_requires_verified_installation',
+              'corrupted_and_hash_mismatched_research_image_never_launch',
+              'research_state_is_strict_and_independent_of_engine_state',
+              'control_reconciles_research_when_engine_image_is_incompatible',
+              'independent_engine_runtime_receipt_is_strict',
+              'typed_research_rollback_requires_two_distinct_exact_hashes',
+              'standalone_research_lifecycle_requires_exact_image_and_process_generation',
+              'standalone_research_status_is_typed_and_does_not_claim_edge_online',
+              'research_token_provision_command_has_no_bearer_fields',
+              'control_bridge_denies_research_mutations_before_network'
+            )) {
+              if ($passed -notmatch ('test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok')) {
+                throw "FULL_HOST_RESEARCH_WITNESS_NOT_RUN_$witness"
+              }
             }
           }
 
@@ -1079,8 +1134,22 @@ jobs:
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_ANALYTICS_TESTS_MISSING' }
-          $output = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture 2>&1
+          $workerTests = $output -join "`n"
+          if ($workerTests -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_ANALYTICS_TESTS_MISSING' }
+          foreach ($witness in @(
+            'research_token_validation_is_bounded_and_ascii_only',
+            'research_native_target_is_distinct_from_engine',
+            'mock_store_never_exposes_research_bearer_to_engine_target',
+            'research_starts_only_after_finite_supervisor_job_receipt',
+            'installed_research_bearer_is_pinned_to_control_edge_origin'
+          )) {
+            if ($workerTests -notmatch ('test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok')) {
+              throw "WINDOWS_RESEARCH_SECRET_OWNER_WITNESS_NOT_RUN_$witness"
+            }
+          }
+          # Each IPC case starts real Windows child processes and nested Jobs.
+          # Serialize cases; their own 10s Hello/command deadlines stay intact.
+          $output = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
@@ -1090,7 +1159,7 @@ jobs:
         if: matrix.suite == 'engine'
         shell: pwsh
         run: |
-          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
           $output = & cargo test --locked -p okx-trading-engine --lib research_dispatch_tests:: -- --test-threads 2 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host
@@ -1126,15 +1195,25 @@ jobs:
     name: research-service-tests-windows
     needs: component_impact
     # A successful, identical PR tree is already accepted; main must reuse it.
-    if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')
+    # Only an accepted PR run may mint component bytes. An unreviewed main
+    # fallback must stay red; it cannot manufacture a substitute origin.
+    if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')
     runs-on: windows-latest
     outputs:
-      base_head: ${{ steps.package.outputs.base_head }}
+      research_component_sha256: ${{ steps.package.outputs.research_component_sha256 }}
       mixed_base_head: ${{ steps.mixed_evidence.outputs.base_head }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Require exact immutable PR HEAD for standalone Research
+        shell: pwsh
+        run: |
+          $expected = '${{ github.event.pull_request.head.sha }}'
+          if ($expected -cnotmatch '^[0-9a-f]{40}$' -or
+              (git rev-parse HEAD).Trim() -cne $expected) {
+            throw 'RESEARCH_COMPONENT_NOT_EXACT_PR_HEAD'
+          }
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         with:
           toolchain: 1.100.0
@@ -1158,63 +1237,114 @@ jobs:
           # A failing primitive unit test must fail this job before packaging.
           cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis
+          $ownerLog = Join-Path $env:RUNNER_TEMP 'research-native-owner-tests.log'
+          cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis 2>&1 |
+            Tee-Object -FilePath $ownerLog
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The Worker has real IPC child-process tests; never let Cargo's
+          # unbounded default test parallelism launch all Windows Workers at
+          # once. Keep the original 10s Hello/command budgets unchanged.
+          cargo test --locked -p okx-research-service --lib --bins -- --test-threads 2 2>&1 |
+            Tee-Object -FilePath $ownerLog -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p okx-research-service --test causal_release_smoke 2>&1 |
+            Tee-Object -FilePath $ownerLog -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ipcOutput = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $ipcOutput | Tee-Object -FilePath $ownerLog -Append
+          if ($code -ne 0) { exit $code }
+          if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 9 passed; 0 failed;') {
+            throw 'RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED'
+          }
+          cargo test --locked -p okx-research-service --doc 2>&1 |
+            Tee-Object -FilePath $ownerLog -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $passed = Get-Content -LiteralPath $ownerLog -Raw
+          foreach ($witness in @(
+            'research_token_validation_is_bounded_and_ascii_only',
+            'research_native_target_is_distinct_from_engine',
+            'mock_store_never_exposes_research_bearer_to_engine_target',
+            'research_starts_only_after_finite_supervisor_job_receipt',
+            'installed_research_bearer_is_pinned_to_control_edge_origin'
+          )) {
+            if ($passed -notmatch ('test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok')) {
+              throw "RESEARCH_SECRET_OWNER_WITNESS_NOT_RUN_$witness"
+            }
+          }
 
-      - name: Build deployable Windows binaries
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: needs.component_impact.outputs.research_only == 'true'
+        with:
+          node-version-file: cloudflare/okx-mcp/.node-version
+          cache: npm
+          cache-dependency-path: cloudflare/okx-mcp/package-lock.json
+      - name: Install isolated Research MCP/DO/WSS fixture dependencies
+        if: needs.component_impact.outputs.research_only == 'true'
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Research-only live loopback MCP DO WSS without Engine
+        if: needs.component_impact.outputs.research_only == 'true'
+        shell: pwsh
+        run: |
+          # This witness is #[ignore] by default. Explicitly count one actual
+          # loopback Miniflare DO/WebSocket test; a skipped result is never OK.
+          $output = & cargo test --locked -p okx-research-service --lib edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 1 passed; 0 failed;') {
+            throw 'RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED'
+          }
+
+      - name: Build self-contained Research-only Windows component
         id: package
         if: needs.component_impact.outputs.research_only == 'true'
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
+          $ErrorActionPreference = 'Stop'
           $env:OKX_BUILD_SOURCE_TREE = (git rev-parse "HEAD^{tree}").Trim()
           $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
-          $dist = Join-Path $env:RUNNER_TEMP "okx-windows-bundle"
+          $dist = Join-Path $env:RUNNER_TEMP 'okx-research-component'
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
-          $names = @('okx-agent.exe', 'okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe')
           $sourceHead = (git rev-parse HEAD).Trim()
           $sourceTree = (git rev-parse "HEAD^{tree}").Trim()
-          $components = [ordered]@{}
-          & node scripts/test-research-release-scope.cjs
+          if ($sourceHead -cne '${{ github.event.pull_request.head.sha }}') {
+            throw 'RESEARCH_COMPONENT_PR_HEAD_CHANGED_BEFORE_BUILD'
+          }
+          & node scripts/test-research-component-artifact.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & ./scripts/prepare-research-release.ps1 -Dist $dist
+          # This path never looks up an accepted Native base, copies financial
+          # Engine bytes or compiles Agent/CONTROL/Launcher. GitHub provenance
+          # and exact main-tree promotion are independently verified by CONTROL.
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
           cargo build --locked --release -p okx-research-service --bin okx-research-service 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'research-only-build.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $proof = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
-          if ($proof.current_head_sha -cne $sourceHead -or $proof.base_head_sha -cnotmatch '^[0-9a-f]{40}$') {
-            throw 'RESEARCH_BASE_PROOF_REQUIRED'
-          }
-          "base_head=$($proof.base_head_sha)" >> $env:GITHUB_OUTPUT
-          foreach ($name in $names[0..2]) { $components[$name] = $proof.components.PSObject.Properties[$name].Value }
           Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'release\okx-research-service.exe') (Join-Path $dist 'okx-research-service.exe')
-          $freshNames = @('okx-research-service.exe')
-          foreach ($name in $freshNames) {
-            $path = Join-Path $dist $name
-            $components[$name] = [ordered]@{
-              sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
-              size = (Get-Item -LiteralPath $path).Length
-              source_head_sha = $sourceHead
-              source_tree = $sourceTree
-              run_id = 0
-              artifact_id = 0
-              protocol_version = 1
-              storage_version = 1
-            }
-          }
           Copy-Item 'Cargo.lock' (Join-Path $dist 'Cargo.lock')
-          $manifest = [ordered]@{
-            schema = 'okx.windows.bundle/v2'
+          [ordered]@{
+            schema = 'okx.windows.research-component/v1'
             repository_id = 1388071566
             source_head_sha = $sourceHead
             source_tree = $sourceTree
             rust_version = (rustc --version).Trim()
-            components = $components
-          }
-          $manifest | ConvertTo-Json -Depth 8 |
-            Set-Content -LiteralPath (Join-Path $dist 'manifest.json') -Encoding utf8NoBOM
+            cargo_lock_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dist 'Cargo.lock')).Hash.ToLowerInvariant()
+            worker = [ordered]@{
+              sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dist 'okx-research-service.exe')).Hash.ToLowerInvariant()
+              size = (Get-Item -LiteralPath (Join-Path $dist 'okx-research-service.exe')).Length
+              protocol_version = 1
+              storage_version = 1
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $dist 'manifest.json') -Encoding utf8NoBOM
+          $proof = & node scripts/research-component-artifact.cjs $dist $sourceHead $sourceTree
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_COMPONENT_EXACT_THREE_FILE_PROOF_FAILED' }
+          $proof | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-component-proof.json') -Encoding utf8NoBOM
+          $component = $proof | ConvertFrom-Json
+          if ($component.research_component_sha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'RESEARCH_COMPONENT_SHA_UNVERIFIED' }
+          "research_component_sha256=$($component.research_component_sha256)" >> $env:GITHUB_OUTPUT
 
       - name: Upload isolated Research release evidence
         if: github.event_name == 'pull_request' && needs.component_impact.outputs.research_only == 'true'
@@ -1222,17 +1352,17 @@ jobs:
         with:
           name: research-only-release-evidence-${{ github.event.pull_request.head.sha }}
           path: |
-            ${{ runner.temp }}\research-release-proof.json
+            ${{ runner.temp }}\research-component-proof.json
             ${{ runner.temp }}\research-only-build.log
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload deployable Windows bundle
+      - name: Upload exact standalone Research component ZIP
         if: github.event_name == 'pull_request' && needs.component_impact.outputs.research_only == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}\okx-windows-bundle
+          name: okx-research-component-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\okx-research-component
           if-no-files-found: error
           compression-level: 1
           retention-days: 14
@@ -1306,16 +1436,16 @@ jobs:
             test "${{ needs.component_impact.outputs.reason }}" = "merged tree exactly matches successful PR head tree"
             echo "WINDOWS_NATIVE_PROOF=EXACT_SUCCESSFUL_MERGED_TREE"
           elif [[ "${{ needs.component_impact.outputs.research_only }}" == "true" ]]; then
-            # Isolated compilation is always allowed. Ready acceptance is NOT:
-            # without an independently verified prior Native base there is no
-            # safe composite release and the protected check must stay red.
+            # Research is a separately releasable component. The accepted
+            # archive contains only its own EXE, manifest and Cargo.lock;
+            # Engine/CONTROL/Launcher bytes and finance jobs are untouched.
             test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_OWNER_ONLY"
-            [[ "${{ needs.research_service_tests_windows.outputs.base_head }}" =~ ^[0-9a-f]{40}$ ]]
+            [[ "${{ needs.research_service_tests_windows.outputs.research_component_sha256 }}" =~ ^[0-9a-f]{64}$ ]]
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "skipped"
             test "${{ needs.trading_engine_build_windows.result }}" = "skipped"
             test "${{ needs.research_service_tests_windows.result }}" = "success"
-            echo "WINDOWS_NATIVE_PROOF=REUSED_ACCEPTED_BASE_${{ needs.research_service_tests_windows.outputs.base_head }}"
+            echo "WINDOWS_NATIVE_PROOF=RESEARCH_COMPONENT_VERIFIED_${{ needs.research_service_tests_windows.outputs.research_component_sha256 }}"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
           elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "research-host" ]]; then
             test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_HOST_OWNER_CHECKS"
@@ -1346,6 +1476,13 @@ jobs:
             test "${{ needs.research_service_tests_windows.result }}" = "skipped"
             echo "WINDOWS_NATIVE_PROOF=COMPONENT_${scope}_NO_NATIVE_SOURCE_CHANGED"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=false"
+          elif [[ "${{ needs.component_impact.outputs.component_scope }}" == "engine" ]]; then
+            test "${{ needs.component_impact.outputs.native_proof }}" = "ENGINE_OWNER_ONLY"
+            test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
+            test "${{ needs.trading_engine_regressions_windows.result }}" = "success"
+            test "${{ needs.trading_engine_build_windows.result }}" = "success"
+            echo "WINDOWS_NATIVE_PROOF=FRESH_ENGINE_AND_FULL_FINANCIAL_SUCCESS"
+            echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
           else
             test "${{ needs.trading_engine_acceptance_windows.result }}" = "success"
             test "${{ needs.trading_engine_regressions_windows.result }}" = "success"
@@ -1360,6 +1497,12 @@ jobs:
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.native_required != 'false' && needs.component_impact.outputs.research_only != 'true'
     runs-on: windows-latest
+    env:
+      # Match the trusted-main release cache prime's full Cargo environment
+      # fingerprint. Without these, PR releases miss its accepted compiler
+      # cache and compile the same immutable Engine again for 8+ minutes.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     permissions:
       contents: read
     timeout-minutes: 30
@@ -1379,8 +1522,73 @@ jobs:
           cache-workspace-crates: true
           save-if: false
           cache-on-failure: false
+      - name: Reject an unreviewed main build without an accepted PR artifact
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: throw 'MAIN_NATIVE_REQUIRES_EXACT_ACCEPTED_READY_ARTIFACT'
+      - name: Build only Engine against verified unchanged Windows owners
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope == 'engine'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Verify all actual installed-base bytes, not a path-only estimate.
+          # The exact changed-source set since that accepted base must be
+          # Engine-owned. Otherwise fail closed and require the full bundle.
+          & ./scripts/prepare-research-release.ps1 -VerifyOnly -EngineOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $base = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') -Raw | ConvertFrom-Json
+          if ($base.scope.scope -cne 'engine' -or $base.scope.other_windows_cargo_closures_identical -ne $true -or
+              $base.current_head_sha -cne (git rev-parse HEAD).Trim()) { throw 'ENGINE_ONLY_BASE_NOT_PROVEN' }
+          $log = Join-Path $env:RUNNER_TEMP 'engine-only-build.log'
+          cargo build --locked --release -p okx-trading-engine 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dist = Join-Path $env:RUNNER_TEMP 'okx-engine-component'
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+          $binary = Join-Path $dist 'okx-agent.exe'
+          Copy-Item -LiteralPath 'target/release/okx-agent.exe' -Destination $binary
+          $contract = & $binary runtime-contract
+          if ($LASTEXITCODE -ne 0 -or ($contract -join "`n") -cne '{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false}') {
+            throw 'ENGINE_COMPONENT_RUNTIME_CONTRACT_INVALID'
+          }
+          $reused = [ordered]@{}
+          foreach ($name in @('okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe')) {
+            $item = $base.components.PSObject.Properties[$name].Value
+            if ($null -eq $item -or $item.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $item.source_head_sha -cnotmatch '^[0-9a-f]{40}$') { throw "UNVERIFIED_REUSED_COMPONENT_$name" }
+            $reused[$name] = $item
+          }
+          [ordered]@{
+            schema = 'okx.windows.engine-component/v1'
+            repository_id = 1388071566
+            source_head_sha = (git rev-parse HEAD).Trim()
+            source_tree = (git rev-parse 'HEAD^{tree}').Trim()
+            release_is_complete = $false
+            installed_state_unchanged = $true
+            fresh_component = [ordered]@{
+              name = 'okx-agent.exe'
+              sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
+              size = (Get-Item -LiteralPath $binary).Length
+            }
+            reused_accepted_native_base_sha = $base.base_merge_sha
+            reused_verified_components = $reused
+          } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $dist 'engine-component-proof.json') -Encoding utf8NoBOM
+
+      - name: Retain tested Engine-only bytes and exact unchanged component origins
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope == 'engine'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: okx-engine-component-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/okx-engine-component/okx-agent.exe
+            ${{ runner.temp }}/okx-engine-component/engine-component-proof.json
+            ${{ runner.temp }}/engine-only-build.log
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
       - name: Build deployable Windows binaries
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope != 'engine'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1400,6 +1608,10 @@ jobs:
           cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($name in $names) { Copy-Item (Join-Path 'target\release' $name) (Join-Path $dist $name) }
+          $engineContract = & (Join-Path $dist 'okx-agent.exe') runtime-contract
+          if ($LASTEXITCODE -ne 0 -or ($engineContract -join "`n") -cne '{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false}') {
+            throw 'PACKAGED_ENGINE_RUNTIME_CONTRACT_INVALID'
+          }
           $freshNames = $names
           foreach ($name in $freshNames) {
             $path = Join-Path $dist $name
@@ -1454,7 +1666,7 @@ jobs:
             Set-Content -LiteralPath (Join-Path $dist 'manifest.json') -Encoding utf8NoBOM
 
       - name: Upload deployable Windows bundle
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope != 'engine'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}
@@ -1463,15 +1675,16 @@ jobs:
           compression-level: 1
           retention-days: 14
 
-  # Prime immutable compiler caches only after exact accepted main evidence.
+  # Optional manual cache seed only. An accepted PR merge on main reuses its
+  # Ready evidence and must not compile/link Engine again merely to warm cache.
   trusted_main_cache_prime:
     name: trusted-main-windows-cache-prime (${{ matrix.profile }})
     needs: component_impact
     if: >-
       ${{
         github.ref == 'refs/heads/main' &&
-        ((github.event_name == 'push' && needs.component_impact.outputs.component_scope == 'full') ||
-         (github.event_name == 'workflow_dispatch' && inputs.prime_windows_cargo_cache == true)) &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.prime_windows_cargo_cache == true &&
         needs.component_impact.outputs.build_required == 'false' &&
         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree'
       }}
@@ -1521,7 +1734,7 @@ jobs:
           cargo test --locked --no-run --all-targets -p okx-trading-engine -p okx-trade-execution -p okx-host-controller -p okx-host-launcher -p okx-strategy-core -p okx-research -p okx-research-service
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_TEST_BUILD_FAILED' }
           # Match the single Cargo selection in the financial collector.
-          cargo test --locked --no-run --lib -p okx-domain-core -p okx-trade-execution -p okx-trading-engine -p okx-ipc-contracts -p okx-market-runtime
+          cargo test --locked --no-run --lib -p okx-engine-domain -p okx-trade-execution -p okx-trading-engine -p okx-ipc-contracts -p okx-market-runtime
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_FINANCIAL_LIBTEST_BUILD_FAILED' }
           cargo build --locked -p okx-native-finance-check
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_COLLECTOR_BUILD_FAILED' }
@@ -1561,6 +1774,8 @@ jobs:
         github.event_name == 'push' &&
         github.ref == 'refs/heads/main' &&
         needs.component_impact.outputs.component_scope == 'full' &&
+        needs.component_impact.outputs.build_required == 'false' &&
+        needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree' &&
         needs['dependency-audit'].result == 'success' &&
         needs.component_impact.result == 'success' &&
         needs.required_linux.result == 'success' &&
@@ -1592,41 +1807,67 @@ jobs:
             exit 0
           fi
           prs="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$ACCEPTED_MAIN/pulls")"
-          head="$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | first | .head.sha // empty' <<<"$prs")"
+          test "$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | length' <<<"$prs")" = 1
+          head="$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | .[0].head.sha' <<<"$prs")"
           [[ "$head" =~ ^[0-9a-f]{40}$ ]] || exit 0
           main_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$ACCEPTED_MAIN" --jq .tree.sha)"
           head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head" --jq .tree.sha)"
           test "$main_tree" = "$head_tree"
           runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" -f head_sha="$head" -f event=pull_request -f status=completed -f per_page=100)"
-          run_id=""
-          artifact_id=""
-          artifact_digest=""
-          while read -r candidate; do
-            [[ -n "$candidate" ]] || continue
-            jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/jobs?per_page=100")"
+          run_id=''; run_attempt=''; artifact_id=''; artifact_digest=''
+          while IFS=$'\t' read -r candidate attempt; do
+            [[ "$candidate" =~ ^[1-9][0-9]*$ && "$attempt" == 1 ]] || continue
+            jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/attempts/$attempt/jobs?per_page=100")"
             # Require the *fresh* 4-EXE financial gate, never an aggregate
             # that reused older proof or the isolated Research-only worker.
-            if ! jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $ok | all(["trading-engine-acceptance-windows","trading-engine-regressions-windows (engine)","trading-engine-regressions-windows (host)","trading-engine-regressions-windows (execution)","trading-engine-regressions-windows (research)","trading-engine-regressions-windows (clippy)","trading-engine-build-windows","linux-core","windows-native"][]; . as $name | $ok | index($name) != null)' <<<"$jobs" >/dev/null; then
+            if ! jq -e --arg head "$head" --argjson run "$candidate" '
+              .total_count == (.jobs | length) and .total_count < 100 and
+              ([.jobs[].name] | unique | length) == .total_count and
+              all(.jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1) and
+              ([.jobs[] | select(.conclusion == "success") | .name] as $ok |
+                all(["classify", "dependency-audit", "architecture-contracts",
+                     "cloudflare-mcp-contracts", "rust-tests-linux",
+                     "trading-engine-acceptance-windows", "trading-engine-regressions-windows (engine)",
+                     "trading-engine-regressions-windows (host)", "trading-engine-regressions-windows (execution)",
+                     "trading-engine-regressions-windows (research)", "trading-engine-regressions-windows (clippy)",
+                     "trading-engine-build-windows", "linux-core", "windows-native"][];
+                    . as $name | $ok | index($name) != null))
+            ' <<<"$jobs" >/dev/null; then
               continue
             fi
             artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"
-            candidate_artifact="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].id else empty end' <<<"$artifacts")"
-            candidate_digest="$(jq -r --arg name "okx-windows-bundle-$head" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].digest else empty end' <<<"$artifacts")"
+            exact="$(jq -c --arg name "okx-windows-bundle-$head" --arg head "$head" --argjson run "$candidate" '
+              [.artifacts[] | select(.name == $name and .expired == false and
+                .workflow_run.id == $run and .workflow_run.repository_id == 1388071566 and
+                .workflow_run.head_repository_id == 1388071566 and
+                .workflow_run.head_sha == $head)] |
+              if length == 1 then .[0] else empty end' <<<"$artifacts")"
+            [[ -n "$exact" ]] || continue
+            candidate_artifact="$(jq -r .id <<<"$exact")"
+            candidate_digest="$(jq -r .digest <<<"$exact")"
             if [[ "$candidate_artifact" =~ ^[1-9][0-9]*$ && "$candidate_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               run_id="$candidate"
+              run_attempt="$attempt"
               artifact_id="$candidate_artifact"
               artifact_digest="$candidate_digest"
               break
             fi
-          done < <(jq -r '[.workflow_runs[] | select(.name == "CI" and .conclusion == "success" and .event == "pull_request")] | .[].id' <<<"$runs")
+          done < <(jq -r --arg head "$head" '
+            .workflow_runs[] | select(.name == "CI" and
+              (.path | test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")) and
+              .event == "pull_request" and .conclusion == "success" and .status == "completed" and
+              .head_sha == $head and .run_attempt == 1 and
+              .repository.id == 1388071566 and .head_repository.id == 1388071566) |
+            [.id, .run_attempt] | @tsv' <<<"$runs")
           if [[ -z "$run_id" ]]; then
-            echo "No fresh accepted full Windows bundle: non-Native merge, no new release."
-            exit 0
+            echo 'NO_EXACT_FIRST_ATTEMPT_FULL_NATIVE_READY_PR_ARTIFACT' >&2
+            exit 1
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
           echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "tree=$head_tree" >> "$GITHUB_OUTPUT"
           echo "run=$run_id" >> "$GITHUB_OUTPUT"
+          echo "attempt=$run_attempt" >> "$GITHUB_OUTPUT"
           echo "artifact=$artifact_id" >> "$GITHUB_OUTPUT"
           echo "digest=$artifact_digest" >> "$GITHUB_OUTPUT"
 
@@ -1670,13 +1911,14 @@ jobs:
           } > "$RUNNER_TEMP/SHA256SUMS.txt"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
 
-      - name: Publish current base and prune only superseded Native bases
+      - name: Publish current base and preserve verified rollback releases
         if: steps.select.outputs.publish == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          # Each tag has immutable commit identity; only one *native-base-*
-          # release remains after a new complete release was verified.
+          # Every accepted tag retains its exact immutable commit identity.
+          # Prior accepted native-base releases are intentionally retained;
+          # installed and rollback SHA provenance is not known to this job.
           tag="native-base-$ACCEPTED_MAIN"
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" \
@@ -1698,10 +1940,173 @@ jobs:
           done
           current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
           test "$current" = "$ACCEPTED_MAIN"
-          gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | [.tag_name,.immutable] | @tsv' |
-          while IFS=$'\t' read -r old immutable; do
-            if [[ "$old" =~ ^native-base-[0-9a-f]{40}$ && "$old" != "$tag" ]]; then
-              test "$immutable" = "false"
-              gh release delete "$old" --cleanup-tag --yes
+          # Installed/rollback provenance is not available to CI. Retain
+          # accepted Native bases until CONTROL proves which previous images
+          # are no longer installed or eligible for recovery (S3 acceptance).
+          echo "NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS" >> "$GITHUB_STEP_SUMMARY"
+
+  # Preserve the exact PR-tested Research-only bytes beyond Actions retention.
+  # This is publication, not an installation or Engine release. No recompile,
+  # native-base lookup, or ZIP repack is permitted on main.
+  publish_accepted_research_component:
+    name: publish-accepted-research-component
+    needs: [dependency-audit, component_impact, required_linux, required_windows]
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    concurrency:
+      group: research-component-publication
+      cancel-in-progress: false
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        needs.component_impact.outputs.component_scope == 'research' &&
+        needs.component_impact.outputs.build_required == 'false' &&
+        needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree' &&
+        needs['dependency-audit'].result == 'success' &&
+        needs.component_impact.result == 'success' &&
+        needs.required_linux.result == 'success' &&
+        needs.required_windows.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ACCEPTED_MAIN: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select exact merged Research Ready PR and artifact
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACCEPTED_MAIN" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$ACCEPTED_MAIN"
+          current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
+          if [[ "$current" != "$ACCEPTED_MAIN" ]]; then
+            echo 'Main advanced; the newer accepted run owns publication.'
+            exit 0
+          fi
+          prs="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$ACCEPTED_MAIN/pulls")"
+          test "$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | length' <<<"$prs")" = 1
+          head="$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | .[0].head.sha' <<<"$prs")"
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]]
+          main_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$ACCEPTED_MAIN" --jq .tree.sha)"
+          head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head" --jq .tree.sha)"
+          [[ "$main_tree" =~ ^[0-9a-f]{40}$ ]]
+          test "$main_tree" = "$head_tree"
+          runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
+            -f head_sha="$head" -f event=pull_request -f status=completed -f per_page=100)"
+          run_id=''; run_attempt=''; artifact_id=''; artifact_digest=''
+          while IFS=$'\t' read -r candidate attempt; do
+            [[ "$candidate" =~ ^[1-9][0-9]*$ && "$attempt" == 1 ]] || continue
+            jobs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/attempts/$attempt/jobs?per_page=100")"
+            # The same Ready attempt must contain every authentic required
+            # owner/gate success. Draft composition cannot satisfy this.
+            if ! jq -e --arg head "$head" --argjson run "$candidate" '
+              .total_count == (.jobs | length) and .total_count < 100 and
+              ([.jobs[].name] | unique | length) == .total_count and
+              all(.jobs[]; .run_id == $run and .head_sha == $head) and
+              ([.jobs[] | select(.conclusion == "success") | .name] as $ok |
+                all(["classify", "dependency-audit", "architecture-contracts",
+                     "research-service-tests-windows", "cloudflare-mcp-contracts",
+                     "linux-core", "windows-native"][]; . as $needed | $ok | index($needed) != null))
+            ' <<<"$jobs" >/dev/null; then
+              continue
             fi
+            artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate/artifacts?per_page=100")"
+            exact="$(jq -c --arg name "okx-research-component-$head" --arg head "$head" --argjson run "$candidate" '
+              [.artifacts[] | select(.name == $name and .expired == false and
+                .workflow_run.id == $run and .workflow_run.repository_id == 1388071566 and
+                .workflow_run.head_repository_id == 1388071566 and
+                .workflow_run.head_sha == $head)] |
+              if length == 1 then .[0] else empty end' <<<"$artifacts")"
+            [[ -n "$exact" ]] || continue
+            id="$(jq -r .id <<<"$exact")"
+            digest="$(jq -r .digest <<<"$exact")"
+            if [[ "$id" =~ ^[1-9][0-9]*$ && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              run_id="$candidate"; run_attempt="$attempt"; artifact_id="$id"; artifact_digest="$digest"
+              break
+            fi
+          done < <(jq -r --arg head "$head" '
+            .workflow_runs[] | select(.name == "CI" and
+              (.path | test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")) and
+              .event == "pull_request" and .conclusion == "success" and .status == "completed" and
+              .head_sha == $head and .run_attempt == 1 and
+              .repository.id == 1388071566 and
+              .head_repository.id == 1388071566) |
+            [.id, .run_attempt] | @tsv' <<<"$runs")
+          [[ "$run_id" =~ ^[1-9][0-9]*$ && "$artifact_id" =~ ^[1-9][0-9]*$ ]] || {
+            echo 'NO_EXACT_SUCCESSFUL_RESEARCH_READY_PR_ARTIFACT' >&2; exit 1;
+          }
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "tree=$head_tree" >> "$GITHUB_OUTPUT"
+          echo "run=$run_id" >> "$GITHUB_OUTPUT"
+          echo "attempt=$run_attempt" >> "$GITHUB_OUTPUT"
+          echo "artifact=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "digest=$artifact_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify immutable Research ZIP bytes and origin
+        id: verify
+        if: steps.select.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip="$RUNNER_TEMP/okx-research-component.zip"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.select.outputs.artifact }}/zip" > "$zip"
+          digest="$(sha256sum "$zip" | cut -d' ' -f1)"
+          test "sha256:$digest" = '${{ steps.select.outputs.digest }}'
+          python3 -B scripts/test_verify_research_component_release.py
+          python3 -B scripts/verify_research_component_release.py "$zip" "$digest" \
+            '${{ steps.select.outputs.head }}' '${{ steps.select.outputs.tree }}' \
+            > "$RUNNER_TEMP/research-component-validation.json"
+          jq -n --slurpfile verified "$RUNNER_TEMP/research-component-validation.json" \
+            --arg merge "$ACCEPTED_MAIN" --argjson run '${{ steps.select.outputs.run }}' \
+            --argjson attempt '${{ steps.select.outputs.attempt }}' \
+            --argjson artifact '${{ steps.select.outputs.artifact }}' '
+            $verified[0] | {
+              schema: "okx.published-research-origin/v1", repository_id,
+              source_head_sha, source_tree, merged_main_sha: $merge,
+              run_id: $run, run_attempt: $attempt, artifact_id: $artifact,
+              archive_sha256, worker_sha256, worker_size, cargo_lock_sha256
+            }' > "$RUNNER_TEMP/published-research-origin.json"
+          (cd "$RUNNER_TEMP" && sha256sum okx-research-component.zip published-research-origin.json) \
+            > "$RUNNER_TEMP/SHA256SUMS.txt"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
+      - name: Publish exact Research component and retain rollback origins
+        if: steps.select.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
+          tag="research-component-$ACCEPTED_MAIN"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              '${{ steps.verify.outputs.zip }}' \
+              "$RUNNER_TEMP/published-research-origin.json" \
+              "$RUNNER_TEMP/SHA256SUMS.txt" \
+              --target "$ACCEPTED_MAIN" --title "OKX accepted standalone Research $ACCEPTED_MAIN" \
+              --notes 'Exact Research-only PR CI bytes and provenance. No Engine/CONTROL binaries; no automatic Windows installation or financial actions.'
+          fi
+          release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+          jq -e --arg tag "$tag" --arg main "$ACCEPTED_MAIN" '
+            .tag_name == $tag and .target_commitish == $main and
+            .draft == false and .prerelease == false and
+            ([.assets[].name] | sort) ==
+            ["SHA256SUMS.txt", "okx-research-component.zip", "published-research-origin.json"]
+          ' <<<"$release" >/dev/null
+          for name in okx-research-component.zip published-research-origin.json SHA256SUMS.txt; do
+            expected="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")"
+            actual="$(sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)"
+            test "$expected" = "sha256:$actual"
           done
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
+          echo 'RESEARCH_COMPONENT_RELEASE=VERIFIED_APPEND_ONLY' >> "$GITHUB_STEP_SUMMARY"
+          echo 'RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED' >> "$GITHUB_STEP_SUMMARY"

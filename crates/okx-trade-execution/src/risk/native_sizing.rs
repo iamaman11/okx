@@ -2,8 +2,8 @@
 #[cfg(test)]
 #[path = "native_sizing_property_tests.rs"]
 mod native_sizing_property_tests;
+use crate::risk::money::RiskAmount;
 use crate::{StoreError, StoreResult};
-use okx_domain_core::risk::money::RiskAmount;
 use rust_decimal::{Decimal, RoundingStrategy};
 
 /// Exact reserved losses retain their units until the wire boundary.

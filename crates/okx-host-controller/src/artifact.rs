@@ -16,11 +16,12 @@ use crate::{
     HostControlError, HostControlResult,
     controller_update::{self, ControllerUpdateCandidate},
     lifecycle_executor::HostExecutor,
-    provenance::{InstalledAgentProvenance, InstalledAgentProvenanceStore},
+    provenance::InstalledAgentProvenance,
     root_migration,
 };
 
 mod research_component;
+pub(crate) use research_component::resolve_verified_installed_research;
 pub use research_component::{deploy_research, rollback_research};
 use research_component::{parse_bundle_compatible, parse_persisted_manifest};
 
@@ -78,8 +79,7 @@ pub async fn deploy_agent(
         actual_agent_hash.clone(),
     );
 
-    executor.install_verified_agent(&bundle.agent_bytes)?;
-    InstalledAgentProvenanceStore::canonical().save(&provenance)?;
+    executor.install_verified_agent(&bundle.agent_bytes, &provenance)?;
 
     Ok(json!({
         "run_id": provenance.run_id,

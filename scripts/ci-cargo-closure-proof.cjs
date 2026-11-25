@@ -14,6 +14,8 @@ const RESEARCH = new Set([
   'crates/okx-analysis/Cargo.toml',
   'crates/okx-research-service/Cargo.toml',
   'crates/okx-strategy-core/Cargo.toml',
+  'crates/okx-research-protocol/Cargo.toml',
+  'crates/okx-research-domain/Cargo.toml',
 ]);
 const HOST = new Set([
   'crates/okx-host-controller/Cargo.toml',
@@ -29,9 +31,14 @@ const safePath = p => typeof p === 'string' && p.length > 0 && p.length <= 512 &
   !p.includes('\\') && p.split('/').every(part => /^[A-Za-z0-9_.-]+$/.test(part) && part !== '.' && part !== '..');
 const docs = p => p === 'README.md' || (p.startsWith('docs/') && p.endsWith('.md'));
 const research = p => RESEARCH.has(p) || ['crates/okx-research/', 'crates/okx-analysis/',
-  'crates/okx-research-service/', 'crates/okx-strategy-core/'].some(prefix =>
+  'crates/okx-research-service/', 'crates/okx-strategy-core/',
+  'crates/okx-research-protocol/', 'crates/okx-research-domain/'].some(prefix =>
   (p.startsWith(prefix + 'src/') || p.startsWith(prefix + 'tests/')) && p.endsWith('.rs'));
-const host = p => ['crates/okx-host-controller/src/', 'crates/okx-host-launcher/src/']
+const protectedResearchSource = p => ['crates/okx-research-protocol/', 'crates/okx-research-domain/']
+  .some(prefix => (p.startsWith(prefix + 'src/') || p.startsWith(prefix + 'tests/')) && p.endsWith('.rs'));
+const host = p => ['crates/okx-host-controller/src/', 'crates/okx-host-launcher/src/',
+  'crates/okx-host-protocol/src/', 'crates/okx-host-controller/tests/',
+  'crates/okx-host-launcher/tests/', 'crates/okx-host-protocol/tests/']
   .some(prefix => p.startsWith(prefix)) && p.endsWith('.rs');
 
 function candidateFiles(input, scope) {
@@ -41,7 +48,12 @@ function candidateFiles(input, scope) {
   if (!files || !files.length || files.length > 500 || new Set(files).size !== files.length ||
       !files.every(safePath)) throw Error('CARGO_DIFF_NOT_VERIFIED');
   const manifests = scope === 'research' ? RESEARCH : HOST;
-  if (!files.some(file => manifests.has(file))) throw Error('CARGO_MANIFEST_OWNER_MISSING');
+  // The two newly split Research crates can still be reachable from Engine
+  // through dev-only legacy fixtures. Their source changes need the same
+  // *resolved* protected-closure proof as a manifest change. Ordinary owner
+  // source files remain on the established architecture-guarded fast route.
+  if (!files.some(file => manifests.has(file) || (scope === 'research' && protectedResearchSource(file))))
+    throw Error('CARGO_PROOF_CANDIDATE_MISSING');
   if (!files.every(file => {
     if (file === 'Cargo.lock' || docs(file)) return true;
     if (scope === 'research') return research(file) || file.startsWith('cloudflare/okx-mcp/');
@@ -142,8 +154,11 @@ function normalizedCargo(metadata) {
 function verify(baseMetadata, headMetadata, changed, scope) {
   const files = candidateFiles(changed, scope);
   const protectedPaths = compareProtected(baseMetadata, headMetadata, PROTECTED[scope]);
-  if (files.some(file => protectedPaths.some(dir => file === dir + 'Cargo.toml')))
-    throw Error('EDITED_MANIFEST_IN_PROTECTED_CARGO_CLOSURE');
+  // Equal package graphs are insufficient for a source-only change: editing
+  // code inside a protected dev/build/normal closure still recompiles and can
+  // change its test semantics. Reject *every* such source path, not only tomls.
+  if (files.some(file => protectedPaths.some(dir => file.startsWith(dir))))
+    throw Error('EDITED_SOURCE_IN_PROTECTED_CARGO_CLOSURE');
   return {
     schema: 'okx.560.windows-cargo-closure-proof/v1',
     scope, target: TARGET,
@@ -174,6 +189,13 @@ function verifyEngineInputs(baseMetadata, headMetadata, files) {
   return protectedPaths;
 }
 
+function verifyUnchangedOwnerInputs(baseMetadata, headMetadata, files, roots) {
+  const protectedPaths = compareProtected(baseMetadata, headMetadata, roots);
+  if (files.some(file => protectedPaths.some(dir => file.startsWith(dir))))
+    throw Error('EDITED_SOURCE_IN_PROTECTED_WINDOWS_CARGO_CLOSURE');
+  return protectedPaths;
+}
+
 if (require.main === module) {
   try {
     if (process.argv.length !== 6) throw Error('USAGE: ci-cargo-closure-proof <base-meta> <head-meta> <diff-json> <research|host-controller|host-launcher>');
@@ -185,4 +207,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = {verify, candidateFiles, normalizedCargo, verifyEngineInputs};
+module.exports = {verify, candidateFiles, normalizedCargo, verifyEngineInputs, verifyUnchangedOwnerInputs};

@@ -1,6 +1,7 @@
-param([string]$Dist, [switch]$VerifyOnly, [string]$AcceptedCompositionSpec, [string]$ProofFile, [switch]$MixedHost)
+param([string]$Dist, [switch]$VerifyOnly, [string]$AcceptedCompositionSpec, [string]$ProofFile, [switch]$MixedHost, [switch]$EngineOnly)
 if (-not $VerifyOnly -and [string]::IsNullOrWhiteSpace($Dist)) { throw "DIST_REQUIRED" }
 if ($MixedHost -and -not $VerifyOnly) { throw 'MIXED_HOST_PROOF_REQUIRES_VERIFY_ONLY' }
+if ($EngineOnly -and ($MixedHost -or -not [string]::IsNullOrWhiteSpace($AcceptedCompositionSpec))) { throw 'ENGINE_SCOPE_CANNOT_USE_RESEARCH_COMPOSITION' }
 $ErrorActionPreference = 'Stop'
 if (-not [string]::IsNullOrWhiteSpace($AcceptedCompositionSpec)) {
     if ($VerifyOnly) { throw 'COMPOSITION_CANNOT_BYPASS_RELEASE_SCOPE_CHECK' }
@@ -30,11 +31,31 @@ function Api([string]$endpoint) {
     if ($LASTEXITCODE -ne 0) { throw 'GITHUB_BASE_LOOKUP_FAILED' }
     return ($json | ConvertFrom-Json)
 }
+$event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+if ($env:GITHUB_EVENT_NAME -ceq 'pull_request') {
+    $baseSha = [string]$event.pull_request.base.sha
+} elseif ($env:GITHUB_EVENT_NAME -ceq 'push' -and $event.ref -ceq 'refs/heads/main' -and -not $event.forced) {
+    $baseSha = [string]$event.before
+} else { throw 'CURRENT_EVENT_UNSUPPORTED' }
+if ($baseSha -cnotmatch '^[0-9a-f]{40}$' -or $baseSha -ceq '0000000000000000000000000000000000000000') { throw 'CURRENT_BASE_MISSING' }
 $baseReleases = @(Api '/repos/iamaman11/okx/releases?per_page=100' | Where-Object {
     $_.tag_name -cmatch '^native-base-[0-9a-f]{40}$' -and -not $_.draft -and -not $_.prerelease
 })
-if ($baseReleases.Count -ne 1) { throw 'NATIVE_BASE_RELEASE_NOT_UNIQUE_OR_UNAVAILABLE' }
-$baseRelease = $baseReleases[0]
+if ($baseReleases.Count -lt 1 -or $baseReleases.Count -ge 100) { throw 'NATIVE_BASE_RELEASE_COUNT_UNVERIFIED' }
+$ancestorReleases = @(
+    foreach ($candidate in $baseReleases) {
+        $candidateSha = $candidate.tag_name.Substring('native-base-'.Length)
+        if ($candidate.target_commitish -cne $candidateSha) { throw 'NATIVE_BASE_TARGET_INVALID' }
+        $relation = Api ("/repos/iamaman11/okx/compare/$candidateSha...$baseSha")
+        if ($relation.status -cin @('ahead', 'identical')) {
+            [pscustomobject]@{ release=$candidate; distance=[long]$relation.ahead_by }
+        }
+    }
+)
+if ($ancestorReleases.Count -eq 0) { throw 'ACCEPTED_NATIVE_BASE_NOT_ON_CURRENT_MAIN' }
+$nearest = @($ancestorReleases | Sort-Object distance)
+if ($nearest.Count -gt 1 -and $nearest[0].distance -eq $nearest[1].distance) { throw 'AMBIGUOUS_NEAREST_NATIVE_BASE' }
+$baseRelease = $nearest[0].release
 $releaseAsset = $null
 # Persistent accepted release: no dependence on Actions artifact expiry.
 $mergeSha = $baseRelease.tag_name.Substring('native-base-'.Length)
@@ -71,13 +92,6 @@ $mergeSha = $merged[0].merge_commit_sha
 $mergeTree = (Api ("/repos/iamaman11/okx/git/commits/" + $mergeSha)).tree.sha
 if ($baseTree -cnotmatch '^[0-9a-f]{40}$' -or $mergeTree -cne $baseTree) { throw 'BASE_MERGED_TREE_MISMATCH' }
 if ($origin.source_tree -cne $baseTree) { throw 'RELEASE_SOURCE_TREE_MISMATCH' }
-$event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
-if ($env:GITHUB_EVENT_NAME -ceq 'pull_request') {
-    $baseSha = [string]$event.pull_request.base.sha
-} elseif ($env:GITHUB_EVENT_NAME -ceq 'push' -and $event.ref -ceq 'refs/heads/main' -and -not $event.forced) {
-    $baseSha = [string]$event.before
-} else { throw 'CURRENT_EVENT_UNSUPPORTED' }
-if ($baseSha -cnotmatch '^[0-9a-f]{40}$' -or $baseSha -ceq '0000000000000000000000000000000000000000') { throw 'CURRENT_BASE_MISSING' }
 $comparison = Api ("/repos/iamaman11/okx/compare/$mergeSha...$baseSha")
 if ($comparison.status -cnotin @('ahead','identical')) { throw 'BASE_NOT_ON_MAIN_HISTORY' }
 & git fetch --no-tags origin $mergeSha
@@ -93,7 +107,10 @@ ConvertTo-Json -InputObject $changed -Compress | Set-Content -LiteralPath $chang
 & node scripts/test-research-release-scope.cjs
 if ($LASTEXITCODE -ne 0) { throw 'SCOPE_NEGATIVE_TESTS_FAILED' }
 $scopeArgs = @($metadataFile, $changedFile)
-if ($MixedHost -or @($changed | Where-Object { $_ -ceq 'Cargo.lock' -or $_ -cmatch '/Cargo\.toml$' }).Count -gt 0) {
+if ($MixedHost -or $EngineOnly -or @($changed | Where-Object {
+    $_ -ceq 'Cargo.lock' -or $_ -cmatch '/Cargo\.toml$' -or
+    $_ -cmatch '^crates/okx-research-(domain|protocol)/(src|tests)/.+\.rs$'
+}).Count -gt 0) {
     # Reprove against the actual published binary base, not merely the PR's
     # previous HEAD. A later dependency change cannot silently reuse Agent.
     $baselineDir = Join-Path $env:RUNNER_TEMP 'research-accepted-cargo-baseline'
@@ -114,6 +131,7 @@ if ($MixedHost -or @($changed | Where-Object { $_ -ceq 'Cargo.lock' -or $_ -cmat
     }
 }
 if ($MixedHost) { $scopeArgs += '--mixed-host' }
+if ($EngineOnly) { $scopeArgs += '--engine-only' }
 $scope = & node scripts/research-release-scope.cjs @scopeArgs
 if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_DIFF_NOT_ISOLATED' }
 $zip = Join-Path $env:RUNNER_TEMP 'research-release-base.zip'
@@ -142,7 +160,8 @@ foreach ($name in @('okx-agent.exe','okx-host-control.exe','okx-host-launcher.ex
         $published.source_head_sha -cne $run.head_sha -or $published.source_tree -cne $baseTree -or
         [long]$published.run_id -ne [long]$config.base_run_id -or [long]$published.artifact_id -ne [long]$config.base_artifact_id -or
         [int]$published.protocol_version -ne 1 -or [int]$published.storage_version -ne 1) { throw "RELEASE_COMPONENT_ORIGIN_MISMATCH: $name" }
-    if (-not $VerifyOnly -and $name -cne 'okx-research-service.exe') { Copy-Item -LiteralPath $file -Destination (Join-Path $Dist $name) }
+    $freshName = if ($EngineOnly) { 'okx-agent.exe' } else { 'okx-research-service.exe' }
+    if (-not $VerifyOnly -and $name -cne $freshName) { Copy-Item -LiteralPath $file -Destination (Join-Path $Dist $name) }
     $components[$name] = [ordered]@{ sha256=$component.sha256; size=[long]$component.size; source_head_sha=$run.head_sha; source_tree=$baseTree; run_id=[long]$config.base_run_id; artifact_id=[long]$config.base_artifact_id; protocol_version=1; storage_version=1 }
 }
 [ordered]@{ components=$components; base_run_id=$config.base_run_id; base_artifact_id=$config.base_artifact_id; base_head_sha=$run.head_sha; base_tree=$baseTree; base_archive_digest=$artifact.digest; base_merge_sha=$mergeSha; current_head_sha=(& git rev-parse HEAD).Trim(); scope=($scope | ConvertFrom-Json) } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') -Encoding utf8NoBOM

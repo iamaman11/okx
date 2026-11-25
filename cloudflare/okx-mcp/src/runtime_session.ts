@@ -35,16 +35,33 @@ function researchOnlyPermits(request: any): boolean {
     researchOwnedOperation(request);
 }
 
-type RuntimeOwner = "engine" | "research" | "legacy_research";
+function credentialFingerprint(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
+}
+
+type RuntimeOwner = "engine" | "research";
+type ReadWaiter = {
+  resolve: (admitted: boolean) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+class OwnerAdmission {
+  inflight = 0;
+  readonlyInflight = 0;
+  normalInflight = 0;
+  readonlyWaiters: ReadWaiter[] = [];
+  activeRequests = new Set<string>();
+}
+
+function pendingKey(generation: number, key: string): string {
+  return `${generation}:${key}`;
+}
 
 function socketOwner(attachment: SocketAttachment | null): RuntimeOwner | null {
   if (!attachment?.hello) return null;
   if (attachment.sessionMode === "research_only") {
     if (attachment.runtimeProfile === "research" && attachment.credentialOwner === "research")
       return "research";
-    if (attachment.runtimeProfile === "engine" &&
-        (attachment.credentialOwner === "engine" || attachment.credentialOwner === undefined))
-      return "legacy_research";
     return null;
   }
   if (attachment.runtimeProfile === "engine" &&
@@ -57,16 +74,7 @@ export class RuntimeSession {
   private state: any;
   private env: Env;
   private pending = new Map<string, Pending>();
-  private inflight = 0;
-  private readonlyInflight = 0;
-  // All ordinary work, including costly research mutations, shares seven slots.
-  private normalInflight = 0;
-  // Transient bounded queue, not durable financial/business storage.
-  private readonlyWaiters: Array<{
-    resolve: (admitted: boolean) => void;
-    timer: ReturnType<typeof setTimeout>;
-  }> = [];
-  private activeRequests=new Set<string>();
+  private admissions = { engine: new OwnerAdmission(), research: new OwnerAdmission() };
 
   constructor(state: any, env: Env) {
     this.state = state;
@@ -194,22 +202,20 @@ export class RuntimeSession {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return new Response("websocket required", { status: 426 });
     }
-    const configuredHash = this.env.RUNTIME_TOKEN_SHA256;
-    if (!/^[0-9a-f]{64}$/.test(configuredHash)) {
+    const engineHash = credentialFingerprint(this.env.RUNTIME_TOKEN_SHA256);
+    const researchHash = credentialFingerprint(this.env.RESEARCH_RUNTIME_TOKEN_SHA256);
+    // An absent or invalid credential for one application cannot take down
+    // the other. A duplicated fingerprint authorizes the Engine alone.
+    if (engineHash === null && researchHash === null) {
       return new Response("runtime credential fingerprint invalid", { status: 503 });
-    }
-    const researchHash = this.env.RESEARCH_RUNTIME_TOKEN_SHA256;
-    if (researchHash !== undefined && (!/^[0-9a-f]{64}$/.test(researchHash) ||
-        sameHex(researchHash, configuredHash))) {
-      return new Response("research credential fingerprint invalid", { status: 503 });
     }
     const authorization = request.headers.get("authorization") ?? "";
     if (!authorization.startsWith("Bearer ")) {
       return new Response("unauthorized", { status: 401 });
     }
     const presentedHash = await sha256Hex(authorization.slice("Bearer ".length));
-    const credentialOwner = sameHex(configuredHash, presentedHash) ? "engine" :
-      researchHash !== undefined && sameHex(researchHash, presentedHash) ? "research" : null;
+    const credentialOwner = engineHash !== null && sameHex(engineHash, presentedHash) ? "engine" :
+      researchHash !== null && sameHex(researchHash, presentedHash) ? "research" : null;
     if (!credentialOwner) {
       return new Response("unauthorized", { status: 401 });
     }
@@ -238,8 +244,15 @@ export class RuntimeSession {
   }
 
   async webSocketMessage(ws: any, message: string | ArrayBuffer): Promise<void> {
-    if (typeof message !== "string" || message.length > MAX_BODY_BYTES) {
+    if (typeof message !== "string") {
       ws.close(1003, "text frames only");
+      return;
+    }
+    // JavaScript string.length counts UTF-16 code units. Native WSS caps the
+    // serialized UTF-8 frame at 64 KiB, including multibyte JSON strings.
+    if (message.length > MAX_BODY_BYTES ||
+        new TextEncoder().encode(message).byteLength > MAX_BODY_BYTES) {
+      ws.close(1009, "frame too large");
       return;
     }
 
@@ -272,7 +285,7 @@ export class RuntimeSession {
       }
       if (frame.type === "hello_research") {
         const fields = ["agent_binary_sha256","agent_incarnation","agent_pid","connection_id","contract","host_scope","runtime_id","runtime_profile","schema","type"];
-        if (Object.keys(frame).sort().join(",") !== fields.sort().join(",") || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id) || typeof frame.host_scope !== "string" || !/^[0-9a-f]{64}$/.test(frame.host_scope) || frame.contract !== "okx.product/v1" || !["engine","research"].includes(runtimeProfile) || (attachment.credentialOwner??"engine") !== runtimeProfile) {
+        if (Object.keys(frame).sort().join(",") !== fields.sort().join(",") || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id) || typeof frame.host_scope !== "string" || !/^[0-9a-f]{64}$/.test(frame.host_scope) || frame.contract !== "okx.product/v1" || runtimeProfile !== "research" || attachment.credentialOwner !== "research") {
           ws.close(1008, "invalid research hello"); return;
         }
         attachment.sessionMode = "research_only";
@@ -298,7 +311,6 @@ export class RuntimeSession {
       // Exactly one live generation per owner, never a global socket owner.
       // Research reconnects must not interrupt financial protection, and
       // Engine reconnects must not invalidate Research's independent lane.
-      // An Engine-credential legacy Research socket is never the new Research owner.
       for (const existing of this.state.getWebSockets("runtime") as any[]) {
         if (existing === ws) continue;
         const prior = existing.deserializeAttachment() as SocketAttachment | null;
@@ -317,7 +329,7 @@ export class RuntimeSession {
     }
 
     if (
-      !attachment.hello ||
+      !socketOwner(attachment) ||
       frame.session_id !== attachment.sessionId ||
       frame.connection_generation !== attachment.generation
     ) {
@@ -417,33 +429,33 @@ export class RuntimeSession {
     return nonce;
   }
 
-  private grantWaitingReads():void {
+  private grantWaitingReads(admission: OwnerAdmission): void {
     // A reserved WSS slot is never consumed by ordinary read-only work.
-    while(this.readonlyWaiters.length && this.normalInflight<MAX_READ_INFLIGHT &&
-          this.inflight<MAX_INFLIGHT){
-      const next=this.readonlyWaiters.shift()!;
+    while(admission.readonlyWaiters.length && admission.normalInflight<MAX_READ_INFLIGHT &&
+          admission.inflight<MAX_INFLIGHT){
+      const next=admission.readonlyWaiters.shift()!;
       clearTimeout(next.timer);
-      this.readonlyInflight++;
-      this.normalInflight++;
-      this.inflight++;
+      admission.readonlyInflight++;
+      admission.normalInflight++;
+      admission.inflight++;
       next.resolve(true);
     }
   }
 
-  private admitReadOnly():Promise<boolean>{
-    if(this.readonlyWaiters.length===0 && this.normalInflight<MAX_READ_INFLIGHT &&
-       this.inflight<MAX_INFLIGHT){
-      this.readonlyInflight++;this.normalInflight++;this.inflight++;
+  private admitReadOnly(admission: OwnerAdmission): Promise<boolean> {
+    if(admission.readonlyWaiters.length===0 && admission.normalInflight<MAX_READ_INFLIGHT &&
+       admission.inflight<MAX_INFLIGHT){
+      admission.readonlyInflight++;admission.normalInflight++;admission.inflight++;
       return Promise.resolve(true);
     }
-    if(this.readonlyWaiters.length>=MAX_READ_WAITERS)return Promise.resolve(false);
+    if(admission.readonlyWaiters.length>=MAX_READ_WAITERS)return Promise.resolve(false);
     return new Promise<boolean>(resolve=>{
       const waiter={resolve,timer:null as unknown as ReturnType<typeof setTimeout>};
       waiter.timer=setTimeout(()=>{
-        const index=this.readonlyWaiters.indexOf(waiter);
-        if(index>=0){this.readonlyWaiters.splice(index,1);resolve(false);}
+        const index=admission.readonlyWaiters.indexOf(waiter);
+        if(index>=0){admission.readonlyWaiters.splice(index,1);resolve(false);}
       },READ_QUEUE_WAIT_MS);
-      this.readonlyWaiters.push(waiter);
+      admission.readonlyWaiters.push(waiter);
     });
   }
 
@@ -453,19 +465,11 @@ export class RuntimeSession {
     }
     if (request.target_owner !== undefined && request.target_owner !== "research" &&
         request.target_owner !== "engine") return transportFailure("INVALID_OWNER", false);
-    // Configuring a distinct Research bearer is the cutover boundary. From
-    // that point unmarked Research operations must never silently go to the
-    // financial Engine or an Engine-credential legacy research socket, even
-    // if the dedicated Research runtime is currently offline. Before the
-    // cutover, preserve installed unmarked Engine/legacy compatibility.
-    const researchConfigured = this.env.RESEARCH_RUNTIME_TOKEN_SHA256 !== undefined;
-    if (researchConfigured && request.target_owner === "engine" && researchOwnedOperation(request))
+    // Ownership follows the operation, independently of credential configuration.
+    if (request.target_owner === "engine" && researchOwnedOperation(request))
       return transportFailure("RESEARCH_OWNER_REQUIRED", false);
-    const owner: RuntimeOwner = request.target_owner === "research" ||
-      (request.target_owner === undefined && researchConfigured && researchOwnedOperation(request))
-      ? "research" :
-      request.target_owner === undefined && !researchConfigured && !this.activeSocket("engine") &&
-      researchOnlyPermits(request) && this.activeSocket("legacy_research") ? "legacy_research" : "engine";
+    const owner: RuntimeOwner = request.target_owner === "research" || researchOwnedOperation(request)
+      ? "research" : "engine";
     if (owner !== "engine" && !researchOnlyPermits(request))
       return transportFailure("RESEARCH_OPERATION_FORBIDDEN", false);
     const active = this.activeSocket(owner);
@@ -484,7 +488,8 @@ export class RuntimeSession {
       return transportFailure("RESEARCH_OPERATION_FORBIDDEN", false);
     }
 
-    if(this.activeRequests.has(request.request_id))
+    const admission = this.admissions[owner === "research" ? "research" : "engine"];
+    if(admission.activeRequests.has(request.request_id))
       return transportFailure("REQUEST_ALREADY_IN_FLIGHT",false);
     // Keep protective trading commands and exact-intent status above both
     // read-only traffic AND ordinary research/strategy/new-risk mutations.
@@ -493,21 +498,22 @@ export class RuntimeSession {
     const action=request.operation?.request?.action;
     const protective=(type==="trade" && (["status","cancel","close"].includes(String(action)) ||
       (action==="execute"&&["reduce","close"].includes(String(request.operation?.request?.operation))))) ||
-      (type==="strategies"&&action==="stop");
+      (type==="strategies"&&action==="stop") ||
+      (type==="research"&&action==="cancel");
     const queuedRead=!protective&&!isExecutionMutation(type,action);
-    this.activeRequests.add(request.request_id);
+    admission.activeRequests.add(request.request_id);
     let admitted=false;
     try {
       if(queuedRead){
-        admitted=await this.admitReadOnly();
+        admitted=await this.admitReadOnly(admission);
         if(!admitted)return transportFailure("TRANSPORT_BUSY");
       }else if(protective){
-        if(this.inflight>=MAX_INFLIGHT)return transportFailure("TRANSPORT_BUSY");
-        this.inflight++;admitted=true;
+        if(admission.inflight>=MAX_INFLIGHT)return transportFailure("TRANSPORT_BUSY");
+        admission.inflight++;admitted=true;
       }else{
-        if(this.normalInflight>=MAX_READ_INFLIGHT||this.inflight>=MAX_INFLIGHT)
+        if(admission.normalInflight>=MAX_READ_INFLIGHT||admission.inflight>=MAX_INFLIGHT)
           return transportFailure("TRANSPORT_BUSY");
-        this.normalInflight++;this.inflight++;admitted=true;
+        admission.normalInflight++;admission.inflight++;admitted=true;
       }
       // A waiting reader must never cross a native session generation.
       const current=this.activeSocket(owner);
@@ -580,18 +586,27 @@ export class RuntimeSession {
       // even when this HTTP/WS envelope loses ACK or response. Returning a
       // retryable failure would tempt blind duplicate sends. Require an exact
       // read-only intent/ledger reconciliation, never auto-retry the mutation.
+      if (request.operation?.type === "research" &&
+          isExecutionMutation("research", request.operation?.request?.action)) {
+        // Backtest/grid/benchmark create durable jobs; cancel/record_decision
+        // can also commit before the transport drops. Their recovery owner is
+        // the Research job/idempotency receipt, not a financial trade intent.
+        return { schema: "okx.direct-transport.result/v1", status: "UNKNOWN",
+          reason: "RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB", scope: "research",
+          retryable: false, next_action: "inspect_research_job_or_idempotency_receipt" };
+      }
       if (isExecutionMutation(request.operation?.type,request.operation?.request?.action)) {
         return transportFailure("MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT", false);
       }
       return transportFailure(error instanceof Error ? error.message : "TRANSPORT_FAILURE");
     } finally {
       if(admitted){
-        this.inflight--;
-        if(!protective)this.normalInflight--;
-        if(queuedRead)this.readonlyInflight--;
-        this.grantWaitingReads();
+        admission.inflight--;
+        if(!protective)admission.normalInflight--;
+        if(queuedRead)admission.readonlyInflight--;
+        this.grantWaitingReads(admission);
       }
-      this.activeRequests.delete(request.request_id);
+      admission.activeRequests.delete(request.request_id);
       this.clearPending(`ack:${request.request_id}`,active.attachment.generation);
       this.clearPending(`response:${request.request_id}`,active.attachment.generation);
     }
@@ -599,6 +614,7 @@ export class RuntimeSession {
 
   private async status(probe: boolean, owner: "engine" | "research" = "engine"): Promise<Record<string,Json>> {
     const active = this.activeSocket(owner);
+    const admission = this.admissions[owner];
     if (!active) {
       return {
         schema: "okx.direct-transport.status/v1",
@@ -607,10 +623,10 @@ export class RuntimeSession {
         owner,
         connected: false,
         session_fresh: false,
-        inflight: this.inflight,
-        readonly_inflight: this.readonlyInflight,
-        normal_inflight: this.normalInflight,
-        readonly_queue_depth: this.readonlyWaiters.length,
+        inflight: admission.inflight,
+        readonly_inflight: admission.readonlyInflight,
+        normal_inflight: admission.normalInflight,
+        readonly_queue_depth: admission.readonlyWaiters.length,
         readonly_queue_capacity: MAX_READ_WAITERS,
       };
     }
@@ -637,10 +653,10 @@ export class RuntimeSession {
       connected: true,
       session_fresh: fresh,
       connection_generation: active.attachment.generation,
-      inflight: this.inflight,
-      readonly_inflight: this.readonlyInflight,
-      normal_inflight: this.normalInflight,
-      readonly_queue_depth: this.readonlyWaiters.length,
+      inflight: admission.inflight,
+      readonly_inflight: admission.readonlyInflight,
+      normal_inflight: admission.normalInflight,
+      readonly_queue_depth: admission.readonlyWaiters.length,
       readonly_queue_capacity: MAX_READ_WAITERS,
       connected_at_ms: active.attachment.connectedAtMs,
       installation_id: active.attachment.installationId ?? null,
@@ -651,32 +667,35 @@ export class RuntimeSession {
   }
 
   private waitFor(key: string, generation: number, timeoutMs: number): Promise<any> {
-    if(this.pending.has(key))return Promise.reject(new Error("REQUEST_ALREADY_IN_FLIGHT"));
+    const handle = pendingKey(generation, key);
+    if(this.pending.has(handle))return Promise.reject(new Error("REQUEST_ALREADY_IN_FLIGHT"));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        const current = this.pending.get(key);
+        const current = this.pending.get(handle);
         if (current?.generation === generation) {
-          this.pending.delete(key);
+          this.pending.delete(handle);
         }
         reject(new Error(key.startsWith("pong:") ? "SESSION_STALE" : key.startsWith("ack:") ? "DELIVERY_FAILED" : "RESPONSE_TIMEOUT"));
       }, timeoutMs);
-      this.pending.set(key, { generation, resolve, reject, timer });
+      this.pending.set(handle, { generation, resolve, reject, timer });
     });
   }
 
   private resolvePending(key: string, generation: number, value: any): void {
-    const pending = this.pending.get(key);
-    if (!pending || pending.generation !== generation) return;
+    const handle = pendingKey(generation, key);
+    const pending = this.pending.get(handle);
+    if (!pending) return;
     clearTimeout(pending.timer);
-    this.pending.delete(key);
+    this.pending.delete(handle);
     pending.resolve(value);
   }
 
   private clearPending(key: string,generation:number): void {
-    const pending = this.pending.get(key);
-    if (!pending||pending.generation!==generation) return;
+    const handle = pendingKey(generation, key);
+    const pending = this.pending.get(handle);
+    if (!pending) return;
     clearTimeout(pending.timer);
-    this.pending.delete(key);
+    this.pending.delete(handle);
     pending.reject(new Error("REQUEST_FINISHED"));
   }
 

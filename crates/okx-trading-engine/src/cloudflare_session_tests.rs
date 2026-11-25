@@ -1,6 +1,6 @@
 //! Production Rust session with recorded frame delivery and the real Native owner.
 use super::*;
-use crate::accounts::{native_trade_contracts::fixture as native, recorded_support};
+use crate::accounts::native_trade_contracts::fixture as native;
 use futures_util::{Sink, Stream};
 use okx_ipc_contracts::{AGENT_REQUEST_SCHEMA_V1, AgentRequest, trading::StrategyRequest};
 use std::{
@@ -47,72 +47,34 @@ struct Session {
     output: mpsc::UnboundedReceiver<Message>,
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<AgentResult<()>>,
-    research: crate::research_client::ResearchClient,
-    _coordinator: okx_market_runtime::PublicWsCoordinator,
 }
 impl Session {
     async fn new() -> Self {
-        Self::with_research_only(false).await
+        Self::with_stopped_finance(false).await
     }
-    async fn with_research_only(research_only: bool) -> Self {
+    async fn with_stopped_finance(stopped_finance: bool) -> Self {
+        use crate::finance_dispatch::FinanceDispatch;
+
         let native = native::fixture().await;
-        let environment = okx_api::OkxEnvironment::new(okx_api::Region::Global, false);
-        let budget = okx_api::RateBudget::new();
-        let (coordinator, public_ws) = okx_market_runtime::PublicWsCoordinator::new_with_connector(
-            environment,
-            okx_observation::ReferenceRegistry::from_public("session-test", vec![]).unwrap(),
-            budget.clone(),
-            Arc::new(recorded_support::OfflineSocket),
-        );
-        let market = crate::market_bootstrap::MarketBootstrapper::new(
-            okx_api::OkxPublicClient::with_http_transport(environment, budget, native.feed.clone())
-                .unwrap(),
-        );
-        let ctx = DispatchContext {
-            research: crate::research_test_support::client(
-                native.root.join("session-analytics"),
-                market.clone(),
-            )
-            .unwrap(),
-            public_ws,
-            finance: if research_only {
-                crate::finance_dispatch::FinanceDispatch::missing()
-            } else {
-                crate::finance_dispatch::FinanceDispatch::ready(
-                    native.registry.clone(),
-                    native.trade.clone(),
-                )
-            },
-            market,
+        let finance = if stopped_finance {
+            FinanceDispatch::stopped(native.registry.clone(), native.trade.clone())
+        } else {
+            FinanceDispatch::ready(native.registry.clone(), native.trade.clone())
         };
-        let research = ctx.research.clone();
+        let ctx = DispatchContext { finance };
         let (input, incoming) = mpsc::unbounded_channel();
         let (outgoing, output) = mpsc::unbounded_channel();
         let (stop, stopped) = watch::channel(false);
-        let hello = if research_only {
-            F::HelloResearch {
-                schema: SCHEMA.into(),
-                runtime_id: "windows-primary".into(),
-                connection_id: "native_0123456789abcdef0123456789abcdef".into(),
-                host_scope: "a".repeat(64),
-                contract: okx_ipc_contracts::accounts::PRODUCT_CONTRACT.into(),
-                runtime_profile: DirectRuntimeProfile::Engine,
-                agent_pid: 100,
-                agent_binary_sha256: "a".repeat(64),
-                agent_incarnation: format!("ctl_{}", "b".repeat(32)),
-            }
-        } else {
-            F::Hello {
-                schema: SCHEMA.into(),
-                runtime_id: "windows-primary".into(),
-                connection_id: "native_0123456789abcdef0123456789abcdef".into(),
-                installation_id: native.owner.installation_id().into(),
-                contract: okx_ipc_contracts::accounts::PRODUCT_CONTRACT.into(),
-                runtime_profile: DirectRuntimeProfile::Engine,
-                agent_pid: 100,
-                agent_binary_sha256: "a".repeat(64),
-                agent_incarnation: format!("ctl_{}", "b".repeat(32)),
-            }
+        let hello = F::Hello {
+            schema: SCHEMA.into(),
+            runtime_id: "windows-primary".into(),
+            connection_id: "native_0123456789abcdef0123456789abcdef".into(),
+            installation_id: native.owner.installation_id().into(),
+            contract: okx_ipc_contracts::accounts::PRODUCT_CONTRACT.into(),
+            runtime_profile: DirectRuntimeProfile::Engine,
+            agent_pid: 100,
+            agent_binary_sha256: "a".repeat(64),
+            agent_incarnation: format!("ctl_{}", "b".repeat(32)),
         };
         let task = tokio::spawn(run_connected_session(
             RawFrames {
@@ -129,15 +91,9 @@ impl Session {
             output,
             stop,
             task,
-            research,
-            _coordinator: coordinator,
         };
         let sent_hello = session.next().await;
-        assert!(if research_only {
-            matches!(sent_hello, F::HelloResearch { .. })
-        } else {
-            matches!(sent_hello, F::Hello { .. })
-        });
+        assert!(matches!(sent_hello, F::Hello { .. }));
         session.send(F::HelloAck {
             schema: SCHEMA.into(),
             session_id: SESSION.into(),
@@ -155,7 +111,7 @@ impl Session {
             .unwrap();
         serde_json::from_str(message.to_text().unwrap()).unwrap()
     }
-    async fn end(mut self, expected: Option<&str>) {
+    async fn end(self, expected: Option<&str>) {
         if expected.is_none() {
             self.stop.send(true).unwrap();
         }
@@ -167,19 +123,8 @@ impl Session {
             Some(reason) => assert!(result.unwrap_err().to_string().contains(reason)),
             None => result.unwrap(),
         }
-        if expected == Some("RESEARCH_OPERATION_FORBIDDEN") {
-            while let Ok(message) = self.output.try_recv() {
-                let frame: F = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                assert!(
-                    !matches!(frame, F::DeliveryAck { .. } | F::Response { .. }),
-                    "forbidden operation must not reach dispatch"
-                );
-            }
-        }
         drop(self.input);
         drop(self.output);
-        drop(self._coordinator);
-        self.research.shutdown().await;
         self.native.finish().await;
     }
 }
@@ -196,92 +141,98 @@ fn research_request() -> AgentRequest {
 }
 
 #[tokio::test]
-async fn research_session_forwards_to_real_worker_without_finance() {
-    let mut s = Session::with_research_only(true).await;
-    s.send(F::Request {
-        schema: SCHEMA.into(),
-        session_id: SESSION.into(),
-        connection_generation: GENERATION,
-        request: research_request(),
-        operator_governance: None,
-    });
-    let mut ack = false;
-    loop {
-        match s.next().await {
-            F::DeliveryAck { request_id, .. } => {
-                assert_eq!(request_id, "research_session_capabilities_001");
-                ack = true;
-            }
-            F::Response { response, .. } => {
-                assert!(ack);
-                assert_eq!(
-                    response.status,
-                    okx_ipc_contracts::AgentResponseStatus::Completed
-                );
-                let data = response.result.unwrap();
-                assert_eq!(data["schema"], "okx.research.capabilities/v1");
-                assert!(!data.as_object().unwrap().is_empty());
-                break;
-            }
-            F::Ping { .. } => {}
-            other => panic!("unexpected frame {other:?}"),
+async fn engine_session_routes_research_to_its_owner_and_preserves_stopped_observations() {
+    for stopped in [false, true] {
+        let mut s = Session::with_stopped_finance(stopped).await;
+        let request = research_request();
+        let research_id = request.request_id.clone();
+        let telemetry_id = "engine_session_mailbox_001";
+        for request in [
+            request,
+            AgentRequest {
+                schema: AGENT_REQUEST_SCHEMA_V1.into(),
+                request_id: telemetry_id.into(),
+                account: None,
+                operation: AgentOperation::MailboxTelemetry,
+            },
+        ] {
+            s.send(F::Request {
+                schema: SCHEMA.into(),
+                session_id: SESSION.into(),
+                connection_generation: GENERATION,
+                request,
+                operator_governance: None,
+            });
         }
+        let mut acked = HashSet::new();
+        let mut completed = HashSet::new();
+        while completed.len() < 2 {
+            match s.next().await {
+                F::DeliveryAck { request_id, .. } => assert!(acked.insert(request_id)),
+                F::Response { response, .. } => {
+                    assert!(acked.contains(&response.request_id));
+                    assert!(completed.insert(response.request_id.clone()));
+                    if response.request_id == research_id {
+                        assert_eq!(
+                            response.status,
+                            okx_ipc_contracts::AgentResponseStatus::Rejected
+                        );
+                        assert!(response.result.is_none());
+                        let failure = response.failure.unwrap();
+                        assert_eq!(failure.code, "RESEARCH_OWNER_REQUIRED");
+                        assert!(!failure.retryable);
+                    } else {
+                        assert_eq!(response.request_id, telemetry_id);
+                        assert_eq!(
+                            response.status,
+                            okx_ipc_contracts::AgentResponseStatus::Completed
+                        );
+                        assert_eq!(
+                            response.result.unwrap()["installation_id"],
+                            s.native.owner.installation_id()
+                        );
+                    }
+                }
+                F::Ping { .. } => {}
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+        assert!(s.native.feed.outbound_posts.lock().unwrap().is_empty());
+        s.end(None).await;
     }
-    assert!(s.native.feed.outbound_posts.lock().unwrap().is_empty());
-    s.end(None).await;
 }
 
 #[tokio::test]
-async fn research_session_rejects_finance_and_governance_before_ack() {
-    for governance in [false, true] {
-        let s = Session::with_research_only(true).await;
-        let request = if governance {
-            research_request()
-        } else {
-            AgentRequest {
-                schema: AGENT_REQUEST_SCHEMA_V1.into(),
-                request_id: "research_session_forbidden_001".into(),
-                account: None,
-                operation: AgentOperation::Strategies {
-                    request: StrategyRequest::List {},
-                },
-            }
-        };
-        let snapshot = if governance {
-            Some(s.native.authority.clone())
-        } else {
-            None
-        };
-        s.send(F::Request {
+async fn engine_session_rejects_legacy_research_hello_before_sending_frames() {
+    let (_input, inbound) = mpsc::unbounded_channel();
+    let (outbound, mut output) = mpsc::unbounded_channel();
+    let (_stop, stopped) = watch::channel(false);
+    let result = run_connected_session(
+        RawFrames { inbound, outbound },
+        F::HelloResearch {
             schema: SCHEMA.into(),
-            session_id: SESSION.into(),
-            connection_generation: GENERATION,
-            request,
-            operator_governance: snapshot,
-        });
-        s.end(Some("RESEARCH_OPERATION_FORBIDDEN")).await;
-    }
-    let s = Session::with_research_only(true).await;
-    s.send(F::PolicySnapshot {
-        schema: SCHEMA.into(),
-        session_id: SESSION.into(),
-        connection_generation: GENERATION,
-        snapshot: s.native.authority.clone(),
-    });
-    s.end(Some("RESEARCH_POLICY_FORBIDDEN")).await;
-    let s = Session::with_research_only(true).await;
-    s.send(F::RiskControl {
-        schema: SCHEMA.into(),
-        session_id: SESSION.into(),
-        connection_generation: GENERATION,
-        command: okx_ipc_contracts::risk_authority::RiskCommand {
-            schema: okx_ipc_contracts::risk_authority::RISK_COMMAND_SCHEMA_V1.into(),
-            command_id: "research_risk_command_001".into(),
-            installation_id: s.native.owner.installation_id().into(),
-            action: okx_ipc_contracts::risk_authority::RiskCommandAction::Summary {},
+            runtime_id: "windows-primary".into(),
+            connection_id: "native_0123456789abcdef0123456789abcdef".into(),
+            host_scope: "a".repeat(64),
+            contract: okx_ipc_contracts::accounts::PRODUCT_CONTRACT.into(),
+            runtime_profile: DirectRuntimeProfile::Engine,
+            agent_pid: 100,
+            agent_binary_sha256: "b".repeat(64),
+            agent_incarnation: format!("ctl_{}", "c".repeat(32)),
         },
-    });
-    s.end(Some("UNEXPECTED_FRAME")).await;
+        DispatchContext {
+            finance: crate::finance_dispatch::FinanceDispatch::missing(),
+        },
+        stopped,
+    )
+    .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("INVALID_HELLO_MODE")
+    );
+    assert!(output.try_recv().is_err());
 }
 
 #[test]

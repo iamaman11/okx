@@ -4,7 +4,7 @@ use super::{
     AnalyticsService, jobs,
     result::{read_verified_result, verify_export_manifest},
 };
-use okx_ipc_contracts::analytics::{ResearchDecisionStatus, ResearchRequest};
+use okx_research_protocol::analytics::{ResearchDecisionStatus, ResearchRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -332,8 +332,43 @@ mod tests {
         assert_eq!(service.jobs.snapshot().len(), 1);
         let bootstrap = service.sources.bootstrap.clone();
         drop(service);
-        let reopened = AnalyticsService::new(root.clone(), bootstrap).unwrap();
-        assert_eq!(reopened.research(read(&job, None)).await.unwrap(), second);
+        let scope =
+            okx_research_protocol::research_ipc::ResearchScope::new("decision-scope".into())
+                .unwrap();
+        drop(AnalyticsService::new_scoped(root.clone(), bootstrap.clone(), &scope).unwrap());
+        let producer = crate::producer::Producer::new("a".repeat(64), None, None).unwrap();
+        let reopened = AnalyticsService::new_existing_scoped_with_producer(
+            root.clone(),
+            bootstrap,
+            &scope,
+            producer,
+        )
+        .unwrap();
+        let status = crate::edge_runtime::dispatch_research_for_test(
+            &reopened,
+            ResearchRequest::Status {
+                job_id: job.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(status["state"], "completed");
+        assert_eq!(status["artifact"], result);
+        assert_eq!(
+            crate::edge_runtime::dispatch_research_for_test(&reopened, read(&job, None))
+                .await
+                .unwrap(),
+            second
+        );
+        assert_eq!(
+            crate::edge_runtime::dispatch_research_for_test(
+                &reopened,
+                record(&job, &result, Some(&first_id), "Revised hypothesis")
+            )
+            .await
+            .unwrap(),
+            second
+        );
         assert_eq!(
             reopened
                 .research(read(&job, Some(&first_id)))

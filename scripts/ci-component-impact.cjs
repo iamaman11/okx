@@ -2,6 +2,8 @@
 
 // Diagnostic-only impact evidence for #560. The protected CI selector remains
 // fail-closed and MUST NOT consume this report as permission to skip Native.
+// Both release production and dev-inclusive financial-test dependencies are
+// reported; only the former is used to describe a shipping EXE impact.
 // Cargo metadata is already produced by the existing dependency-audit job.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -71,7 +73,7 @@ function graph(metadata) {
     if (found.length !== 1) throw Error(`RELEASE_ROOT_MISSING:${name}`);
     return {name, binary, id: found[0].id};
   });
-  function dependencyPath(root, wanted) {
+  function dependencyPath(root, wanted, includeDev = false) {
     const queue = [[root]], seen = new Set();
     while (queue.length) {
       const chain = queue.shift(), id = chain.at(-1);
@@ -83,9 +85,9 @@ function graph(metadata) {
       for (const dep of node.deps) {
         if (!Array.isArray(dep.dep_kinds) || !packages.has(dep.pkg))
           throw Error('CARGO_DEPENDENCY_KIND_MISSING');
-        // Conservative over all target configurations, including Windows.
-        // Only normal/build edges affect release binaries; dev-only edges do not.
-        if (dep.dep_kinds.some(k => k && (k.kind === null || k.kind === 'normal' || k.kind === 'build')))
+        // Conservative across target configurations. Dev edges cannot affect
+        // a release binary but *can* affect financial acceptance/test code.
+        if (dep.dep_kinds.some(k => k && (includeDev || k.kind === null || k.kind === 'normal' || k.kind === 'build')))
           queue.push([...chain, dep.pkg]);
       }
     }
@@ -120,10 +122,15 @@ function analyze(metadata, pages) {
     paths: unverified ? [] : [...changed.keys()].map(id => cargo.dependencyPath(root.id, id))
       .filter(Boolean),
   })).filter(root => unverified || root.paths.length);
+  const testRoots = cargo.roots.map(root => ({
+    root: root.name,
+    paths: unverified ? [] : [...changed.keys()].map(id => cargo.dependencyPath(root.id, id, true))
+      .filter(Boolean),
+  })).filter(root => unverified || root.paths.length);
   return {
     schema: 'okx.560.cargo-impact-evidence/v1',
     authority: 'DIAGNOSTIC_ONLY_NOT_A_CI_SKIP_PROOF',
-    dependency_edges: 'normal_and_build_all_target_cfgs_without_dev',
+    dependency_edges: 'release_normal_build_and_separate_dev_inclusive_test_closures_all_target_cfgs',
     diff_verified: files !== null,
     graph_complete: true,
     uncertainty: unverified,
@@ -132,6 +139,7 @@ function analyze(metadata, pages) {
     other_components: [...other].sort(),
     unknown_paths: unknown,
     potentially_affected_windows_binaries: binaries,
+    potentially_affected_windows_test_roots: testRoots,
   };
 }
 
@@ -155,6 +163,13 @@ function markdown(result) {
   }
   if (!result.potentially_affected_windows_binaries.length)
     lines.push('| None from current Cargo normal/build graph | No Rust release binary dependency found |');
+  lines.push('', '| Potential Windows test root | Normal/build/dev dependency paths |', '| --- | --- |');
+  for (const root of result.potentially_affected_windows_test_roots) {
+    lines.push(`| \`${root.root}\` | ${result.uncertainty ? 'Unverified — full test scope required' :
+      root.paths.map(p => p.map(x => `\`${x}\``).join(' → ')).join('; ')} |`);
+  }
+  if (!result.potentially_affected_windows_test_roots.length)
+    lines.push('| None from current Cargo test graph | No Rust test dependency found |');
   lines.push('', 'A Cargo manifest/lock edit needs a separately verified before/after resolver and feature comparison before any scoped exemption.', '');
   return lines.join('\n');
 }

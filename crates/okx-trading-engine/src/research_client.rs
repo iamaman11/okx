@@ -10,6 +10,7 @@ use okx_ipc_contracts::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     future::Future,
@@ -101,7 +102,6 @@ struct Connection {
 #[derive(Clone, Copy)]
 struct WorkerFeatures {
     portfolio_scenario: bool,
-    signal_outbox: bool,
 }
 struct PendingReply {
     pending: PendingReplies,
@@ -137,6 +137,34 @@ fn unique() -> String {
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
 }
+
+// This entire ResearchClient module is compiled only into the historical
+// Engine test harness. A test-feature Research executable uses this isolated
+// singleton namespace; shipping binaries ignore the environment variable and
+// enforce the one installation-wide Research Worker mutex instead.
+fn test_singleton_namespace(root: &std::path::Path) -> String {
+    let test_root = root.to_string_lossy();
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{}:{test_root}", std::process::id()).as_bytes())
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn independent_test_research_roots_have_distinct_valid_mutex_namespaces() {
+    let first = test_singleton_namespace(std::path::Path::new("test/research-a"));
+    let same = test_singleton_namespace(std::path::Path::new("test/research-a"));
+    let second = test_singleton_namespace(std::path::Path::new("test/research-b"));
+    assert_eq!(first.len(), 64);
+    assert!(
+        first
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    );
+    assert_eq!(first, same, "same test catalog must share one singleton");
+    assert_ne!(first, second, "independent tests must not contend");
+}
 fn stop_if_dispatched(c: Option<&Arc<Connection>>, dispatched: bool) {
     if dispatched && let Some(c) = c {
         c.stop.notify_one();
@@ -164,31 +192,6 @@ impl ResearchClient {
         Self {
             config,
             installation_runtime: None,
-            source,
-            connection: Arc::new(Mutex::new(None)),
-            deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
-            #[cfg(test)]
-            after_drain_barrier: None,
-        }
-    }
-    /// Production factory. Pointer changes are checked on demand; images are hashed before launch.
-    pub fn installed(
-        runtime_root: PathBuf,
-        research_root: PathBuf,
-        scope: ResearchScope,
-        bootstrap: crate::market_bootstrap::MarketBootstrapper,
-    ) -> Self {
-        let source: SourceHandler = Arc::new(move |request| {
-            let bootstrap = bootstrap.clone();
-            Box::pin(async move { bootstrap.research_source(request).await })
-        });
-        Self {
-            config: ResearchClientConfig {
-                executable: PathBuf::new(),
-                root: research_root,
-                scope,
-            },
-            installation_runtime: Some(runtime_root),
             source,
             connection: Arc::new(Mutex::new(None)),
             deployment: Arc::new(std::sync::Mutex::new(ResearchDeploymentStatus::default())),
@@ -357,6 +360,10 @@ impl ResearchClient {
             .arg(&self.config.root)
             .arg("--scope")
             .arg(self.config.scope.as_str())
+            .env(
+                "OKX_RESEARCH_TEST_SINGLETON_NAMESPACE",
+                test_singleton_namespace(&self.config.root),
+            )
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
@@ -626,25 +633,6 @@ impl ResearchClient {
         .await?
         .product()
     }
-    /// Correlated read-only computation from the separate Research process.
-    pub async fn evaluate_signal(&self, request: SignalRequest) -> Result<SignalDecision, String> {
-        if !request.valid() {
-            return Err("INVALID_SIGNAL_REQUEST".into());
-        }
-        let decision = self
-            .call(
-                ResearchCommand::EvaluateSignal {
-                    request: request.clone(),
-                },
-                true,
-            )
-            .await?
-            .signal()?;
-        if !decision.matches_request(&request) {
-            return Err("SIGNAL_RESPONSE_MISMATCH".into());
-        }
-        Ok(decision)
-    }
     pub async fn capabilities(&self) -> Result<Value, String> {
         self.call(ResearchCommand::Capabilities, true)
             .await?
@@ -661,7 +649,6 @@ impl ResearchClient {
                         .product()?;
                     Ok::<_, String>(WorkerFeatures {
                         portfolio_scenario: capabilities["portfolio_scenario"] == true,
-                        signal_outbox: capabilities["strategy_signal_outbox"] == true,
                     })
                 })
                 .await?;
@@ -670,12 +657,9 @@ impl ResearchClient {
         .await
         .map_err(|_| "WORKER_CAPABILITIES_TIMEOUT")?
     }
-    pub async fn supports_strategy_signal_outbox(&self) -> Result<bool, String> {
-        Ok(self.worker_features().await?.signal_outbox)
-    }
     pub async fn portfolio_scenario(
         &self,
-        request: okx_ipc_contracts::trading::PortfolioScenarioRequest,
+        request: okx_ipc_contracts::analytics::PortfolioScenarioRequest,
     ) -> Result<Value, String> {
         if !self.worker_features().await?.portfolio_scenario {
             return Err("RESEARCH_PORTFOLIO_SCENARIO_UNSUPPORTED".into());
@@ -683,18 +667,6 @@ impl ResearchClient {
         self.call(ResearchCommand::PortfolioScenario { request }, true)
             .await?
             .product()
-    }
-    pub async fn stage_strategy_signal(
-        &self,
-        request: StrategySignalInput,
-    ) -> Result<Option<StrategySignalProposal>, String> {
-        match self
-            .call(ResearchCommand::ProposeStrategySignal { request }, true)
-            .await?
-        {
-            WorkerReply::StrategyProposal(proposal) => Ok(proposal),
-            _ => Err("WORKER_REPLY_KIND_MISMATCH".into()),
-        }
     }
     pub async fn diagnostic_job(&self, id: &str) -> Result<Value, String> {
         self.call(
