@@ -334,6 +334,46 @@ mod tests {
         let mut updated = a.clone();
         updated.parameters = "{\"fast\":3}".into();
         updated.policy_revision = 2;
+        let changes = tx.total_changes();
+        assert!(matches!(
+            AccountStore::mutate_instance_sql(
+                &tx,
+                scope,
+                "update",
+                "update-hash",
+                "update",
+                &updated,
+                Some(1),
+                4,
+            ),
+            Err(StoreError::Invalid("STRATEGY_UPDATE_REQUIRES_STOPPED"))
+        ));
+        assert_eq!(tx.total_changes(), changes);
+        assert!(
+            AccountStore::operation_sql(&tx, scope, "update")
+                .unwrap()
+                .is_none()
+        );
+
+        let mut stopped = a.clone();
+        stopped.policy_revision = 2;
+        let receipt = AccountStore::mutate_instance_sql(
+            &tx,
+            scope,
+            "stop",
+            "stop-hash",
+            "stop",
+            &stopped,
+            Some(1),
+            5,
+        )
+        .unwrap();
+        let stopped: StrategyInstance = serde_json::from_str(&receipt.result_ref).unwrap();
+        assert!(!stopped.enabled);
+        assert_eq!(stopped.definition_version, a.definition_version);
+
+        updated.enabled = stopped.enabled;
+        updated.policy_revision = 3;
         let receipt = AccountStore::mutate_instance_sql(
             &tx,
             scope,
@@ -341,8 +381,8 @@ mod tests {
             "update-hash",
             "update",
             &updated,
-            Some(1),
-            4,
+            Some(stopped.policy_revision),
+            6,
         )
         .unwrap();
         let updated: StrategyInstance = serde_json::from_str(&receipt.result_ref).unwrap();
@@ -355,24 +395,11 @@ mod tests {
                 "hash",
                 "update",
                 &updated,
-                Some(1),
-                5
+                Some(stopped.policy_revision),
+                7
             ),
             Err(StoreError::Invalid("INSTANCE_REVISION_CONFLICT"))
         ));
-        let mut stopped = updated.clone();
-        stopped.policy_revision = 3;
-        AccountStore::mutate_instance_sql(
-            &tx,
-            scope,
-            "stop",
-            "stop-hash",
-            "stop",
-            &stopped,
-            Some(2),
-            6,
-        )
-        .unwrap();
         for index in 0..51 {
             tx.execute("INSERT INTO position_lots VALUES('installation','strategy-A',?1,'same-instance',NULL,NULL,'BTC-USDT-SWAP','long','1','100',5)",[format!("lot-{index:03}")]).unwrap();
         }
