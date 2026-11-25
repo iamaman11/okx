@@ -2087,62 +2087,181 @@ jobs:
           set -euo pipefail
           test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
           tag="research-component-$ACCEPTED_MAIN"
-          # GitHub can accept one asset and then return 422/500 for another
-          # during a multi-file `gh release create`. Stage an unpublished draft
-          # first and upload each immutable file separately; on an ambiguous
-          # upload error, read back the exact SHA instead of overwriting it.
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            if ! gh release create "$tag" --draft \
-              --target "$ACCEPTED_MAIN" --title "OKX accepted standalone Research $ACCEPTED_MAIN" \
-              --notes 'Exact Research-only PR CI bytes and provenance. No Engine/CONTROL binaries; no automatic Windows installation or financial actions.'; then
+          # target_commitish is ignored if the tag already exists. Bind the
+          # actual Git ref (including peeled annotated tags) to accepted main.
+          tag_ref() {
+            local response status body
+            response="$(curl --silent --show-error \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -w '\n%{http_code}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")"
+            status="${response##*$'\n'}"
+            body="${response%$'\n'*}"
+            case "$status" in
+              200) printf '%s\n' "$body" ;;
+              404) printf 'null\n' ;;
+              *) echo "RESEARCH_TAG_LOOKUP_FAILED_HTTP_$status" >&2; return 1 ;;
+            esac
+          }
+          verify_tag_target() {
+            local required="$1" ref kind sha object
+            ref="$(tag_ref)"
+            if [[ "$ref" == null ]]; then
+              [[ "$required" == optional ]] || { echo 'RESEARCH_PUBLISHED_TAG_REF_MISSING' >&2; return 1; }
+              return 0
+            fi
+            kind="$(jq -r .object.type <<<"$ref")"
+            sha="$(jq -r .object.sha <<<"$ref")"
+            for peel in 1 2 3 4 5; do
+              [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+              if [[ "$kind" == commit ]]; then
+                test "$sha" = "$ACCEPTED_MAIN" || { echo 'RESEARCH_TAG_REF_WRONG_COMMIT' >&2; return 1; }
+                return 0
+              fi
+              [[ "$kind" == tag ]] || { echo 'RESEARCH_TAG_REF_INVALID_TYPE' >&2; return 1; }
+              object="$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$sha")"
+              kind="$(jq -r .object.type <<<"$object")"
+              sha="$(jq -r .object.sha <<<"$object")"
+            done
+            echo 'RESEARCH_TAG_REF_ANNOTATION_DEPTH_EXCEEDED' >&2
+            return 1
+          }
+          verify_tag_target optional
+          # Draft releases are untagged: GitHub's /releases/tags/{tag}
+          # endpoint only resolves published releases. Locate the one draft
+          # through the authenticated paginated list, then use its numeric ID
+          # for ALL draft reads, uploads and the publish transition.
+          find_release() {
+            gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              jq -sc --arg tag "$tag" '
+                [.[][] | select(.tag_name == $tag)] as $matches |
+                if ($matches | length) > 1 then error("RESEARCH_RELEASE_TAG_COLLISION")
+                elif ($matches | length) == 1 then $matches[0]
+                else null end'
+          }
+          existing="$(find_release)"
+          if [[ "$existing" == null ]]; then
+            # Never retry creation after an ambiguous 422/500. Read back the
+            # unique tag; if it is absent or mismatched, stop fail-closed.
+            if ! gh api --method POST "/repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$tag" -f target_commitish="$ACCEPTED_MAIN" \
+              -f name="OKX accepted standalone Research $ACCEPTED_MAIN" \
+              -f body='Exact Research-only PR CI bytes and provenance. No Engine/CONTROL binaries; no automatic Windows installation or financial actions.' \
+              -F draft=true -F prerelease=false > "$RUNNER_TEMP/research-release-create.json"; then
               echo 'RESEARCH_DRAFT_CREATE_AMBIGUOUS_VERIFY_ORIGIN' >&2
             fi
+            # List replication can lag creation; never create a second draft.
+            for poll in 1 2 3 4 5; do
+              existing="$(find_release)"
+              [[ "$existing" != null ]] && break
+              [[ "$poll" == 5 ]] || sleep 2
+            done
           fi
-          release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
-          jq -e --arg tag "$tag" --arg main "$ACCEPTED_MAIN" '
-            .tag_name == $tag and .target_commitish == $main and .prerelease == false and
+          release_id="$(jq -r .id <<<"$existing")"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || { echo 'RESEARCH_DRAFT_ORIGIN_NOT_FOUND' >&2; exit 1; }
+          read_release() {
+            gh api "/repos/$GITHUB_REPOSITORY/releases/$release_id"
+          }
+          verify_release_identity() {
+            jq -e --argjson id "$release_id" --arg tag "$tag" --arg main "$ACCEPTED_MAIN" '
+            .id == $id and .tag_name == $tag and .target_commitish == $main and .prerelease == false and
             ([.assets[].name] | length) == ([.assets[].name] | unique | length) and
             all(.assets[].name; . as $n |
               ["SHA256SUMS.txt", "okx-research-component.zip", "published-research-origin.json"] |
               index($n) != null)
-          ' <<<"$release" >/dev/null
+            ' >/dev/null
+          }
+          release="$(read_release)"
+          verify_release_identity <<<"$release"
           if jq -e '.draft == true' <<<"$release" >/dev/null; then
             for name in okx-research-component.zip published-research-origin.json SHA256SUMS.txt; do
               expected="sha256:$(sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)"
-              present="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")"
+              present="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest // ""' <<<"$release")"
               if [[ -z "$present" ]]; then
                 # Never --clobber: a duplicate 422 or uncertain upload result
                 # is accepted only after the server returns the SAME bytes.
-                if ! gh release upload "$tag" "$RUNNER_TEMP/$name"; then
+                # Upload by release ID: gh release upload TAG fails on drafts.
+                if ! curl --fail-with-body --silent --show-error \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H 'Accept: application/vnd.github+json' \
+                  -H 'Content-Type: application/octet-stream' \
+                  --data-binary "@$RUNNER_TEMP/$name" \
+                  "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$name" \
+                  > "$RUNNER_TEMP/research-release-upload.json"; then
                   echo "RESEARCH_ASSET_UPLOAD_AMBIGUOUS_VERIFY_SHA:$name" >&2
                 fi
-                release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
-                present="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")"
               fi
+              # Also wait for the server's uploaded state (not `starter`).
+              # An existing partial asset must never be uploaded over again.
+              for poll in 1 2 3 4 5; do
+                release="$(read_release)"
+                verify_release_identity <<<"$release"
+                present="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest // ""' <<<"$release")"
+                state="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .state // ""' <<<"$release")"
+                size="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .size // -1' <<<"$release")"
+                asset_id="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id // 0' <<<"$release")"
+                [[ -z "$present" || "$present" == "$expected" ]] || { echo 'RESEARCH_EXISTING_ASSET_SHA_MISMATCH' >&2; exit 1; }
+                if [[ "$present" == "$expected" && "$state" == uploaded && "$size" == "$(stat -c %s "$RUNNER_TEMP/$name")" && "$asset_id" =~ ^[1-9][0-9]*$ ]]; then
+                  break
+                fi
+                [[ "$poll" == 5 ]] || sleep 2
+              done
               test "$present" = "$expected"
+              test "$state" = uploaded
+              test "$size" = "$(stat -c %s "$RUNNER_TEMP/$name")"
+              [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
             done
             # No partial draft becomes an installable release; the complete
             # origin set is read back before the single publish transition.
-            release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+            release="$(read_release)"
+            verify_release_identity <<<"$release"
             jq -e '([.assets[].name] | sort) ==
-              ["SHA256SUMS.txt", "okx-research-component.zip", "published-research-origin.json"]' <<<"$release" >/dev/null
+              ["SHA256SUMS.txt", "okx-research-component.zip", "published-research-origin.json"] and
+              all(.assets[]; .state == "uploaded")' <<<"$release" >/dev/null
+            for name in okx-research-component.zip published-research-origin.json SHA256SUMS.txt; do
+              expected="sha256:$(sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)"
+              test "$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")" = "$expected"
+              test "$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .state' <<<"$release")" = uploaded
+              test "$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .size' <<<"$release")" = "$(stat -c %s "$RUNNER_TEMP/$name")"
+              asset_id="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$release")"
+              [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
+            done
+            verify_tag_target optional
             test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
-            if ! gh release edit "$tag" --draft=false; then
+            if ! gh api --method PATCH "/repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              -F draft=false > "$RUNNER_TEMP/research-release-publish.json"; then
               echo 'RESEARCH_DRAFT_PUBLISH_AMBIGUOUS_VERIFY_RELEASE' >&2
             fi
           fi
-          release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
-          jq -e --arg tag "$tag" --arg main "$ACCEPTED_MAIN" '
-            .tag_name == $tag and .target_commitish == $main and
+          release="$(read_release)"
+          verify_release_identity <<<"$release"
+          jq -e '
             .draft == false and .prerelease == false and
             ([.assets[].name] | sort) ==
-            ["SHA256SUMS.txt", "okx-research-component.zip", "published-research-origin.json"]
+            ["SHA256SUMS.txt", "okx-research-component.zip", "published-research-origin.json"] and
+            all(.assets[]; .state == "uploaded")
           ' <<<"$release" >/dev/null
           for name in okx-research-component.zip published-research-origin.json SHA256SUMS.txt; do
             expected="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest' <<<"$release")"
             actual="$(sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)"
             test "$expected" = "sha256:$actual"
+            test "$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .state' <<<"$release")" = uploaded
+            test "$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .size' <<<"$release")" = "$(stat -c %s "$RUNNER_TEMP/$name")"
+            asset_id="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$release")"
+            [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
           done
+          # The public tag endpoint must now resolve to this very same ID,
+          # never to another release with an alias/collision. The new tag can
+          # briefly lag the completed PATCH; retry reads only, never publish.
+          published=''
+          for poll in 1 2 3 4 5; do
+            if published="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$tag" 2>/dev/null)"; then break; fi
+            [[ "$poll" == 5 ]] || sleep 2
+          done
+          [[ -n "$published" ]] || { echo 'RESEARCH_PUBLISHED_TAG_READBACK_NOT_VISIBLE' >&2; exit 1; }
+          test "$(jq -r .id <<<"$published")" = "$release_id"
+          verify_tag_target required
           test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
           echo 'RESEARCH_COMPONENT_RELEASE=VERIFIED_APPEND_ONLY' >> "$GITHUB_STEP_SUMMARY"
           echo 'RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED' >> "$GITHUB_STEP_SUMMARY"
