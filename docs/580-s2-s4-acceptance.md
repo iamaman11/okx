@@ -27,12 +27,13 @@ Engine. Эти две длительности означают разные о�
 
 Строгая Windows Cargo normal/build/dev граница между Engine/CONTROL/Launcher/Bridge и
 Research protocol/domain принята в #595; Engine `ResearchClient` и
-`legacy-research-test` удалены. Десять Windows Worker process/IPC тестов
-перемещены к Research. Две финансовые T10 нагрузки сохранены с реальным
+`legacy-research-test` удалены. Десять исходных Windows Worker process/IPC тестов
+перемещены к Research; кандидат #596 добавляет два защитных теста и строгий
+контроль **12/12**, не заменяя исходную десятку. Две финансовые T10 нагрузки сохранены с реальным
 non-shipping Research fixture. Edge маршрутизация четырёх публичных market
 операций и отдельный `RESEARCH_RUNTIME_OFFLINE` уже присутствуют в `main`
-через `d0703b6a`, хотя исходный PR #583 ещё открыт: повторное применение
-его патча не требуется. Состояние CONTROL-кода также следует сверять
+через `d0703b6a`. Исходный PR #583 закрыт как дубликат без повторного merge.
+Состояние CONTROL-кода также следует сверять
 по дереву, а не считать каждый открытый PR неперенесённым.
 
 ## S2 · Физическое автономное исполнение
@@ -66,13 +67,87 @@ non-shipping Research fixture. Edge маршрутизация четырёх п
    rollback, сохранность jobs/cursor и отсутствие повторной отправки торговли.
 
 Текущий статус этой физической защиты:
-**`S2 PHYSICAL_DENY=NOT_PROVEN`**. Драфты #588/#592 содержат реализацию,
+**`S2 PHYSICAL_DENY=NOT_PROVEN`**. Интеграционный Draft #596 включает код из
+#588/#592 и проходит Linux owner checks,
 но успешная сборка/синтетические tests не являются свидетельством физического
 запуска LPAC. Пока этот пункт открыт, нельзя делать production cutover,
 Ready/merge security PR или включать отдельный Research token в production.
 Старый каталог с обычными ACL не мигрировать молча: несовместимость —
 типизированный отказ до переключения; допустимая virgin установка или
 отдельно согласованное контролируемое восстановление.
+
+### Контракт одноразового Windows-свидетельства S2
+
+GitHub-hosted `windows-latest` создаёт отдельную Windows VM для стандартного
+job, поэтому подходит для **первой физической проверки механизмов ОС**.
+Однако GitHub запускает Windows runner от администратора с отключённым UAC:
+это не доказательство прав уже установленного CONTROL под пользовательской
+учётной записью и не заменяет S3. Зафиксировать фактический Windows build,
+runner image/version и token ребёнка, а не делать вывод по имени runner.
+См. [GitHub-hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+и [Microsoft AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer).
+
+Опциональная задача **`research-lpac-disposable-windows`** в том же
+`.github/workflows/ci.yml` допускается только при явной метке Draft PR
+`s2-disposable-windows`, установленной через GitHub. Ни один обычный Draft
+не должен запускать её случайно. Она запускает шесть точных, явно
+игнорируемых `--lib` тестов `research_sandbox::native::tests::disposable_real_research_lpac_ready_job_and_bearer`
+и `research_acl::native::tests::disposable_windows_acl_*`, использует
+`OKX_DISPOSABLE_WINDOWS_RUNNER=1`, создаёт все canary и каталог исключительно
+под `${RUNNER_TEMP}` и публикует протокол даже при отказе. Никакого
+`C:\okx`, рабочего finance DB, боевых Credential Manager targets,
+Exchange POST, изменения protected status или публикации релиза.
+Пропущенная цель, ноль исполненных тестов, отсутствие LPAC или отсутствие
+доказательства отказа — **FAIL/NOT_RUN**, никогда PASS.
+
+Машинный протокол `okx.s2.disposable-windows/v1` — это **свидетельство
+запуска, а не сертификат S2 PASS**. Первый opt-in smoke обязан сохранить
+SHA/tree, runner identity, test names, действительное ненулевое число
+проверок и SHA256 логов. Полная матрица S2 PHYSICAL_DENY требует также
+следующих OS-level свидетелей; если тест пока не создаёт их, соответствующая
+строка остаётся `NOT_RUN/NOT_PROVEN`, даже при зелёном CI.
+
+| Поле | Доказательство / допустимое значение | Когда обязательно |
+| --- | --- | --- |
+| `source_head_sha`, `source_tree`, `run_id`, `attempt` | Точные GitHub SHA/tree, PR number, workflow run/attempt и URL одного запуска; сверить с событием PR и receipt, а не с принятым `main` | Smoke |
+| `runner_image`, `windows_build`, `test_root`, `disposable_marker` | Версия ОС и подтверждение изолированного `${RUNNER_TEMP}`, marker присутствует; запрещённый установленный путь не открывался | Smoke: image и root; полный S2: Windows build и marker |
+| `time` | Реальные UTC start/end, queue/build/test/total по отдельности, test duration из runner/log; не выдавать предыдущие 1:25/5:55 за время этого запуска | Smoke: доступные фактические метки; полный S2: все интервалы |
+| `parent`, `child`, `image` | PID и generation, SHA256 и путь образа; источник CONTROL, не вспомогательный подменный процесс | Полный S2 |
+| `token` | Реальные `TokenIsAppContainer`, LPAC, Package SID, Low IL, capability `internetClient`, фактические группы AAP/ARAP, не только расчёт ACL | Полный S2 |
+| `job` | Результат `AssignProcessToJobObject` **до** `ResumeThread`, nested Job, CPU 50%/RAM 4 GiB и readback ограничений | Полный S2 |
+| `image_acl`, `catalog_acl` | Реальные child-попытки RX образа, отказ rewrite/`WRITE_DAC`/`WRITE_OWNER`; catalog create/write/delete и SQLite/WAL/SHM с проверкой Low IL наследования | Полный S2 |
+| `finance_canaries`, `credman_canary` | Parent-positive **до и после READY**, child-negative для синтетических SQLite/WAL/SHM/lock/account/risk и CredMan, наблюдаемый Windows error code | Полный S2 |
+| `startup` | Suspended → Job → token/canary → nonce-bound READY → одноразовый bearer; отсутствие bearer в argv/env/logs | Полный S2 |
+| `test_cases`, `summary`, `receipt_sha256` | Для каждой проверки ID, `PASS/FAIL/NOT_RUN/BLOCKED`, первая недоказанная стадия, expected/observed; число реально выполненных случаев больше нуля; SHA логов и отчёта | Smoke; полный S2 расширяет поля свидетелей |
+
+Одноразовый порядок: сверить source HEAD/tree → создать чистый корень
+в `${RUNNER_TEMP}` → создать уникальные synthetic finance/CredMan canary с
+положительным чтением родителем → запускать **именно** нужные тестовые EXE
+и сохранить child OS-deny + фактические Windows error codes → повторить
+parent-positive → остановить процессы и проверить отсутствие новых/осиротевших
+Job/PID → собрать receipt и SHA256 логов/артефактов → уничтожить VM по
+завершении job. Нулевой exit code Cargo без имён действительно выполненных
+тестов и наблюдений — только `NOT_RUN`. Не создавать synthetic target с
+именем рабочего account/CredMan target; не открывать установленный
+`C:\okx` даже для проверки чистоты. Изолированная temp-root область —
+единственное разрешённое место для синтетических canary/каталога (обычные
+Cargo build/log artefacts допускаются в sandbox runner).
+
+Внешние `BLOCKED` (`CreateAppContainerProfile`/LPAC недоступен, запрещённый
+API, отсутствие admin privilege или OS feature) отличать от `FAIL`
+(child неожиданно прочитал canary, не назначился Job, нарушен DACL/IL,
+выполнен неверный SHA, исчезли старые данные). Непроведённый reboot,
+неразвёрнутая настоящая пара Engine/Research и непротестированный S3 rollback
+суть `NOT_RUN`, не `PASS`. Любая неясная/неполная запись сохраняет
+`S2 PHYSICAL_DENY=NOT_PROVEN` и исключает production activation.
+
+Для полного S2 PASS дополнительно необходимы два отдельно работающих
+компонента, аварийный restart, конкурентный Start, сохранность Research jobs,
+совместная нагрузка и отсутствие влияния на финансовый Engine. Успешный
+**одноразовый LPAC smoke** подтверждает только указанные физические механизмы,
+а не всю S2/S3 приёмку. Ненайденная capability или неподдерживаемый Win32
+вызов классифицируется `BLOCKED` с точной стадией, не выдаётся за успешный
+отказ доступа.
 
 ## S3 · Установка, обновление, диагностика
 
@@ -85,9 +160,18 @@ Ready/merge security PR или включать отдельный Research toke
 | `explain` после restart/offline | Владелец, reference, наблюдаемое состояние, стадия отказа и допустимый следующий шаг; при нехватке фактов `UNVERIFIED`/`UNKNOWN` |
 
 Собирать свидетельства через установленный штатный CONTROL, адресно и без
-ручного копирования бинарников. Для тестовой установки Windows использовать
-только `C:\okx`, подтверждённый GitHub artifact SHA и штатный установщик;
-локально Engine не пересобирать. Выпуск GitHub и Windows installation —
+ручного копирования бинарников. При **последующей приёмке штатной установки**
+Windows использовать только `C:\okx`, подтверждённый GitHub artifact SHA и
+штатный установщик; одноразовый предустановочный S2 smoke выше использует
+исключительно `${RUNNER_TEMP}` и не является установленным приложением.
+Virgin-host bootstrap отдельно `NOT_PROVEN`: Research-only installer требует
+уже доверенный CONTROL/Launcher; Native bootstrap восстанавливает CONTROL
+из полного bundle, а начальная Scheduler policy на чистом Windows может
+отсутствовать. Не обходить этот отказ ручным task/ACL/EXE; документировать
+точный preflight и сценарий корректного отказа/rollback до активации.
+При успешном S3 пути проверить старый/новый SHA, единственный PID/generation,
+сохранность catalog/jobs/SQLite и отсутствие рестарта Engine после rollback.
+Локально Engine не пересобирать. Выпуск GitHub и Windows installation —
 разные события. Финансовые операции запрещены; тесты используют fixtures.
 
 ## S4 · Один CI и происхождение выпуска
@@ -95,6 +179,8 @@ Ready/merge security PR или включать отдельный Research toke
 Единственный автоматический workflow — `.github/workflows/ci.yml`.
 Одна `classify` выбирает component impact; `linux-core` и `windows-native`
 агрегируют доказательства, а не выполняют повторную компиляцию.
+Опциональный Draft S2 disposable Windows job в этом же файле не является
+отдельным workflow, новым protected status или частью release-гарантий.
 
 | Изменение только владельца | Требуемый маршрут Ready | Что не должно выполняться |
 | --- | --- | --- |

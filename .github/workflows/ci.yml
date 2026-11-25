@@ -2,7 +2,9 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+    # `labeled` is an explicit opt-in for disposable Windows S2 probes on a
+    # Draft. Ordinary Draft pushes still run only their selected owner tests.
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
   push:
     branches:
       - main
@@ -357,7 +359,9 @@ jobs:
   draft-component-tests:
     name: draft-owner-feedback
     needs: component_impact
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft
+    # Applying a label does not change the immutable PR head already tested by
+    # the prior Draft feedback run; avoid repeating that expensive Linux build.
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -405,6 +409,56 @@ jobs:
         run: |
           echo "Cargo cache exact hit: $CACHE_HIT" >> "$GITHUB_STEP_SUMMARY"
           python3 -B scripts/check_p0.py --checks "$DRAFT_CHECKS"
+
+  research-lpac-disposable-windows:
+    name: research-lpac-disposable-windows
+    needs: component_impact
+    # This is a separate unprotected, non-shipping experiment: a same-repo
+    # *Draft* with the explicit S2 label, never a normal Draft, Ready PR, main
+    # push, cache-prime dispatch or external fork. A later unrelated label
+    # event must not retrigger an already labeled S2 PR.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 's2-disposable-windows') &&
+      (github.event.action == 'synchronize' ||
+       (github.event.action == 'labeled' && github.event.label.name == 's2-disposable-windows'))
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      OKX_DISPOSABLE_WINDOWS_RUNNER: '1'
+      OKX_S2_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.2
+        with:
+          shared-key: research-lpac-disposable-windows
+          cache-workspace-crates: true
+          save-if: false
+          cache-on-failure: false
+      - name: Execute physical LPAC and ACL witnesses against disposable Windows paths
+        shell: pwsh
+        run: ./scripts/ci-s2-disposable-windows.ps1
+      - name: Retain S2 physical smoke receipt (not a release artifact)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: okx-s2-disposable-windows-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/okx-s2-disposable-evidence-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 14
 
   architecture_contracts:
     name: architecture-contracts

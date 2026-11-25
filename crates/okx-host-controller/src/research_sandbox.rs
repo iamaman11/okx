@@ -12,11 +12,11 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 #[cfg(any(windows, test))]
-const READY_SCHEMA: &str = "okx.research.sandbox-ready/v1";
+const READY_SCHEMA: &str = "okx.research.sandbox-ready/v2";
 #[cfg(any(windows, test))]
 const STARTUP_SCHEMA: &str = "okx.research.startup/v1";
 #[cfg(any(windows, test))]
-const MAX_READY_BYTES: usize = 256;
+const MAX_READY_BYTES: usize = 384;
 #[cfg(any(windows, test))]
 const MAX_STARTUP_BYTES: usize = 1536;
 
@@ -28,6 +28,10 @@ struct SandboxReady {
     nonce: String,
     credman_denied: bool,
     finance_file_denied: bool,
+    image_write_dac_denied: bool,
+    image_write_owner_denied: bool,
+    catalog_write_dac_denied: bool,
+    catalog_write_owner_denied: bool,
 }
 
 /// A forged, missing, repeated or oversized attestation must never unlock the
@@ -48,6 +52,10 @@ fn verify_ready(bytes: &[u8], nonce: &str) -> bool {
         && ready.nonce == nonce
         && ready.credman_denied
         && ready.finance_file_denied
+        && ready.image_write_dac_denied
+        && ready.image_write_owner_denied
+        && ready.catalog_write_dac_denied
+        && ready.catalog_write_owner_denied
 }
 
 #[cfg(any(windows, test))]
@@ -77,7 +85,7 @@ mod native {
     use std::{
         ffi::{OsStr, c_void},
         fs::{self, File},
-        io::Write,
+        io::{Read, Write},
         mem::{size_of, zeroed},
         os::windows::{
             ffi::OsStrExt,
@@ -1381,6 +1389,198 @@ mod native {
     mod tests {
         use super::*;
 
+        struct DisposableResearchDirectory(PathBuf);
+
+        impl Drop for DisposableResearchDirectory {
+            fn drop(&mut self) {
+                // The path is exclusively created by this test, underneath a
+                // positively marked disposable runner root. Never remove that
+                // root itself or any installed OKX directory.
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        struct DisposableResearchBearer {
+            entry: keyring::Entry,
+            deleted: bool,
+        }
+
+        impl DisposableResearchBearer {
+            fn create(nonce: &str) -> Self {
+                use keyring::api::CredentialStoreApi;
+
+                let store = windows_native_keyring_store::Store::new()
+                    .expect("disposable Windows Credential Manager must be available");
+                let entry = store
+                    .build(
+                        "iamaman11.okx-research-service.cloudflare",
+                        "runtime-token",
+                        None,
+                    )
+                    .expect("disposable Research credential target must be available");
+                // Refuse to overwrite or delete any pre-existing credential.
+                // A dedicated empty runner identity is part of this test's
+                // safety contract, not something this test provisions.
+                assert!(
+                    matches!(entry.get_secret(), Err(keyring::Error::NoEntry)),
+                    "Research credential target is occupied or cannot be proven empty"
+                );
+                let secret = Zeroizing::new(format!("okx_disposable_research_only_{nonce}"));
+                entry
+                    .set_secret(secret.as_bytes())
+                    .expect("write synthetic Research bearer to empty disposable target");
+                let guard = Self {
+                    entry,
+                    deleted: false,
+                };
+                let readback = Zeroizing::new(
+                    guard.entry.get_secret().expect("read back synthetic bearer"),
+                );
+                assert_eq!(readback.as_slice(), secret.as_bytes());
+                guard
+            }
+
+            fn delete(mut self) {
+                self.entry
+                    .delete_credential()
+                    .expect("remove synthetic credential from disposable runner");
+                self.deleted = true;
+            }
+        }
+
+        impl Drop for DisposableResearchBearer {
+            fn drop(&mut self) {
+                if !self.deleted {
+                    let _ = self.entry.delete_credential();
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "requires a positively marked disposable Windows runner and real built Research EXE"]
+        fn disposable_real_research_lpac_ready_job_and_bearer() {
+            use sha2::{Digest, Sha256};
+
+            assert_eq!(
+                std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref(),
+                Ok("1"),
+                "real LPAC launch is forbidden outside a disposable runner"
+            );
+            let declared_root = PathBuf::from(
+                std::env::var_os("OKX_DISPOSABLE_WINDOWS_ROOT")
+                    .expect("explicit disposable Windows root is required"),
+            );
+            assert!(declared_root.is_absolute());
+            let runner_temp = std::env::var_os("RUNNER_TEMP")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let temp = fs::canonicalize(runner_temp).expect("runner temp must already exist");
+            let root = fs::canonicalize(declared_root)
+                .expect("disposable Windows root must already exist");
+            assert!(
+                root.starts_with(&temp) && root != temp,
+                "disposable root must be a dedicated subdirectory of runner temp"
+            );
+            assert!(
+                !root.to_string_lossy().to_ascii_lowercase().starts_with(r"c:\okx\"),
+                "installed OKX root is never an acceptable disposable test root"
+            );
+            let marker = root.join(".okx-disposable-windows-runner");
+            checked_regular_path(&marker).expect("marker must not use reparse points");
+            assert_eq!(
+                fs::read(&marker).expect("explicit runner marker is required"),
+                b"okx-s2-disposable-v1\n",
+                "unrecognized disposable runner marker"
+            );
+
+            let worker_source = PathBuf::from(
+                std::env::var_os("OKX_DISPOSABLE_RESEARCH_EXE")
+                    .expect("real compiled Research worker path is required"),
+            );
+            assert_eq!(
+                worker_source.file_name(),
+                Some(OsStr::new("okx-research-service.exe")),
+                "only the real built Research worker may be launched"
+            );
+            checked_regular_path(&worker_source)
+                .expect("Research source EXE must be a regular, non-reparse path");
+            let worker_source = fs::canonicalize(worker_source).unwrap();
+            assert!(
+                !worker_source
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with(r"c:\okx\"),
+                "never execute an installed OKX Research binary in this test"
+            );
+            let image_bytes = fs::read(&worker_source).expect("read compiled Research EXE");
+            assert!(
+                image_bytes.len() >= 4096 && image_bytes.starts_with(b"MZ"),
+                "Research input must be a compiled Windows PE executable"
+            );
+            let sha = format!("{:x}", Sha256::digest(&image_bytes));
+
+            let nonce = fresh_nonce().unwrap();
+            let work = root.join(format!("lpac-launch-{nonce}"));
+            fs::create_dir(&work).expect("create exclusive synthetic test directory");
+            let _guard = DisposableResearchDirectory(work.clone());
+            let research = work.join("research");
+            let versions = research.join("versions");
+            fs::create_dir(&research).unwrap();
+            fs::create_dir(&versions).unwrap();
+            let version = versions.join(&sha);
+            crate::research_acl::prepare_version_directory(&version).unwrap();
+            let staged =
+                crate::research_acl::write_staged_image_file(&version, &image_bytes).unwrap();
+            let executable = version.join("okx-research-service.exe");
+            fs::rename(staged, &executable).unwrap();
+            crate::research_acl::verify_version_image(&executable, &sha).unwrap();
+            let catalog = research.join("edge-catalog");
+            crate::research_acl::ensure_independent_catalog(&catalog).unwrap();
+            let runtime_root = work.join("runtime");
+            fs::create_dir(&runtime_root).unwrap();
+
+            // Credential creation is the final setup step and its own guard
+            // deletes the exact synthetic target on all ordinary exit paths.
+            let bearer = DisposableResearchBearer::create(&nonce);
+            let job = AgentJob::new().expect("create CONTROL kill-on-close Job");
+            let scope = "a".repeat(64);
+            let host_scope = "b".repeat(64);
+            let incarnation = format!("ctl_{nonce}");
+            let mut child = launch_research(
+                &job,
+                &executable,
+                &catalog,
+                &runtime_root,
+                &scope,
+                &host_scope,
+                &incarnation,
+                "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime",
+                false,
+            )
+            .expect("real suspended LPAC CreateProcessW, token, ACL, Job and READY required");
+            assert!(child.id() > 0, "actual native child PID is required");
+            assert!(
+                !job.is_empty().expect("kernel Job accounting must be readable"),
+                "actual Research child must still belong to active CONTROL Job"
+            );
+
+            // Research must not outlive the disposable proof. Terminate the
+            // exact CONTROL Job, wait for a typed process exit, and prove no
+            // descendant remains in the same kernel Job.
+            job.terminate().expect("terminate isolated CONTROL Job");
+            let status = child.wait().expect("typed native process exit is required");
+            assert!(!status.success(), "terminated Research child must not report success");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !job.is_empty().expect("kernel Job accounting must remain readable")
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(job.is_empty().unwrap(), "CONTROL Job retained a child/descendant");
+            bearer.delete();
+            println!("OKX_S2_WITNESS=disposable_real_research_lpac_ready_job_and_bearer");
+        }
+
         #[test]
         fn readiness_exit_codes_identify_stage_without_disclosing_child_output() {
             assert_eq!(
@@ -1492,9 +1692,15 @@ mod tests {
     fn attestation_rejects_false_missing_duplicate_oversized_and_wrong_nonce() {
         let nonce = "a".repeat(32);
         let proof = format!(
-            "{{\"schema\":\"{READY_SCHEMA}\",\"nonce\":\"{nonce}\",\"credman_denied\":true,\"finance_file_denied\":true}}\n"
+            "{{\"schema\":\"{READY_SCHEMA}\",\"nonce\":\"{nonce}\",\"credman_denied\":true,\"finance_file_denied\":true,\"image_write_dac_denied\":true,\"image_write_owner_denied\":true,\"catalog_write_dac_denied\":true,\"catalog_write_owner_denied\":true}}\n"
         );
+        assert!(proof.len() <= MAX_READY_BYTES);
         assert!(verify_ready(proof.as_bytes(), &nonce));
+        assert!(!verify_ready(
+            proof.replace(READY_SCHEMA, "okx.research.sandbox-ready/v1")
+                .as_bytes(),
+            &nonce,
+        ));
         assert!(!verify_ready(proof.as_bytes(), &"b".repeat(32)));
         assert!(!verify_ready(proof.trim_end().as_bytes(), &nonce));
         assert!(!verify_ready(
@@ -1506,6 +1712,35 @@ mod tests {
             proof.replace("true", "false").as_bytes(),
             &nonce
         ));
+        for field in [
+            "credman_denied",
+            "finance_file_denied",
+            "image_write_dac_denied",
+            "image_write_owner_denied",
+            "catalog_write_dac_denied",
+            "catalog_write_owner_denied",
+        ] {
+            let key_true = format!("\"{field}\":true");
+            assert!(proof.contains(&key_true));
+            let missing = if proof.contains(&format!("{key_true},")) {
+                proof.replace(&format!("{key_true},"), "")
+            } else {
+                proof.replace(&format!(",{key_true}"), "")
+            };
+            assert!(serde_json::from_str::<serde_json::Value>(&missing).is_ok());
+            assert!(
+                !verify_ready(missing.as_bytes(), &nonce),
+                "missing {field} must not be accepted"
+            );
+            assert!(
+                !verify_ready(
+                    proof.replace(&key_true, &format!("\"{field}\":false"))
+                        .as_bytes(),
+                    &nonce
+                ),
+                "false {field} must not be accepted"
+            );
+        }
         assert!(!verify_ready(
             proof
                 .replace("\"nonce\":", "\"extra\":true,\"nonce\":")

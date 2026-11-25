@@ -679,7 +679,23 @@ fn activate_verified_research_image(
     record: &InstalledResearch,
     worker: &[u8],
 ) -> HostControlResult<(Value, Instant)> {
-    let root = Path::new(okx_host_launcher::RUNTIME_ROOT);
+    activate_verified_research_image_at(
+        Path::new(okx_host_launcher::RUNTIME_ROOT),
+        supervisor,
+        record,
+        worker,
+    )
+}
+
+/// Production and disposable-root verification share exactly one guarded
+/// transition. A caller may supply a root only inside this module; no new
+/// deploy command or migration path is exposed.
+fn activate_verified_research_image_at(
+    root: &Path,
+    supervisor: &mut ResearchSupervisor,
+    record: &InstalledResearch,
+    worker: &[u8],
+) -> HostControlResult<(Value, Instant)> {
     let _pointer_guard = ResearchPointerGuard::acquire(root)?;
     let staged = prepare_research_transition(root, record, worker)?;
     let expected_generation = supervisor.process_generation();
@@ -1006,9 +1022,19 @@ pub(crate) fn resolve_verified_installed_research(
 ) -> HostControlResult<VerifiedResearchImage> {
     validate_existing_ancestors(root)?;
     existing_plain_directory(root)?;
-    let installed = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?.ok_or(
-        HostControlError::ArtifactVerification("installed research pointer missing"),
-    )?;
+    let installed = match read_research_pointer(root, CURRENT_RESEARCH_POINTER)? {
+        Some(installed) => installed,
+        None => {
+            if read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)?.is_some() {
+                return Err(HostControlError::ArtifactVerification(
+                    "orphaned research rollback pointer",
+                ));
+            }
+            return Err(HostControlError::ArtifactVerification(
+                "installed research pointer missing",
+            ));
+        }
+    };
     verify_staged_research(root, &installed)?;
     let version = root
         .join("research/versions")
@@ -1021,6 +1047,20 @@ pub(crate) fn resolve_verified_installed_research(
         }
         Err(error) => return Err(error.into()),
     };
+    // STATUS is a read-only diagnostic, but it must not claim an unsealed
+    // legacy image is installed merely because its bytes hash correctly.
+    // The same exact descriptor and immutable inventory are enforced before
+    // a Research process can launch or an old image can be rolled back.
+    #[cfg(windows)]
+    crate::research_acl::verify_version_image(&binary, &installed.worker_sha256)?;
+    if let Some(previous) = read_research_pointer(root, ROLLBACK_RESEARCH_POINTER)? {
+        verify_staged_research(root, &previous)?;
+        #[cfg(windows)]
+        crate::research_acl::verify_version_image(
+            &research_binary_path(root, &previous.worker_sha256)?,
+            &previous.worker_sha256,
+        )?;
+    }
     Ok(VerifiedResearchImage {
         binary,
         sha256: installed.worker_sha256,
@@ -1771,6 +1811,272 @@ mod tests {
         assert!(!runtime.join("okx-agent.exe").exists());
         assert!(!runtime.join("installed-agent.json").exists());
         assert!(!runtime.join("desired-state.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn virgin_research_bootstrap_is_idempotent_and_rollback_is_pointer_fenced() {
+        let root = std::env::temp_dir().join(format!(
+            "research-virgin-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime = root.join("runtime");
+        let control = root.join("control");
+        fs::create_dir(&root).unwrap();
+
+        // A read-only CONTROL inspection cannot provision even an empty
+        // desired state, runtime directory, catalog or Engine placeholder.
+        let mut owner = ResearchSupervisor::at(control.clone(), runtime.clone()).unwrap();
+        let before = owner.status().unwrap();
+        assert_eq!(before["phase"], "STOPPED");
+        assert_eq!(before["last_error"], "RESEARCH_NOT_INSTALLED");
+        assert!(!control.exists());
+        assert!(!runtime.exists());
+
+        let initial_bytes = fixture_pe_image();
+        let first = fixture_record(&initial_bytes, 'a');
+        let (status, _) =
+            activate_verified_research_image_at(&runtime, &mut owner, &first, &initial_bytes)
+                .unwrap();
+        assert_eq!(status["phase"], "STOPPED");
+        assert_eq!(status["installed_worker_sha256"], first.worker_sha256);
+        assert_eq!(status["process_generation"], 0);
+        assert_eq!(status["pid"], Value::Null);
+        assert_eq!(
+            read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(first.clone())
+        );
+        assert!(read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
+            .unwrap()
+            .is_none());
+        assert!(control.join("research-state.json").is_file());
+        assert!(!runtime.join("okx-agent.exe").exists());
+        assert!(!runtime.join("installed-agent.json").exists());
+        assert!(!runtime.join("desired-state.json").exists());
+        assert!(!runtime.join("research/edge-catalog").exists());
+
+        // Repeating the exact initial promotion is a no-op even for on-disk
+        // pointer/state bytes; it must not invent a rollback image or PID.
+        let pointer_before = fs::read(runtime.join(CURRENT_RESEARCH_POINTER)).unwrap();
+        let state_before = fs::read(control.join("research-state.json")).unwrap();
+        let (repeat, _) =
+            activate_verified_research_image_at(&runtime, &mut owner, &first, &initial_bytes)
+                .unwrap();
+        assert_eq!(repeat["process_generation"], 0);
+        assert_eq!(
+            fs::read(runtime.join(CURRENT_RESEARCH_POINTER)).unwrap(),
+            pointer_before
+        );
+        assert_eq!(
+            fs::read(control.join("research-state.json")).unwrap(),
+            state_before
+        );
+        assert!(read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
+            .unwrap()
+            .is_none());
+
+        let mut next_bytes = initial_bytes.clone();
+        next_bytes[64] = 0x42;
+        let next = fixture_record(&next_bytes, 'c');
+        let (promoted, _) =
+            activate_verified_research_image_at(&runtime, &mut owner, &next, &next_bytes)
+                .unwrap();
+        assert_eq!(promoted["installed_worker_sha256"], next.worker_sha256);
+        assert_eq!(
+            read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER).unwrap(),
+            Some(first.clone())
+        );
+        let rollback = rollback_research_with_supervisor(
+            &runtime,
+            &mut owner,
+            &next.worker_sha256,
+            &first.worker_sha256,
+        )
+        .unwrap();
+        assert_eq!(rollback["rolled_back"], true);
+        assert_eq!(rollback["research_process"]["phase"], "STOPPED");
+        assert_eq!(rollback["research_process"]["process_generation"], 0);
+        assert_eq!(
+            read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(first)
+        );
+        assert!(!runtime.join("okx-agent.exe").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn virgin_research_activation_failure_removes_only_its_unpublished_pointer() {
+        let root = std::env::temp_dir().join(format!(
+            "research-virgin-compensation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime = root.join("runtime");
+        let control = root.join("control");
+        fs::create_dir(&root).unwrap();
+        let bytes = fixture_pe_image();
+        let first = fixture_record(&bytes, 'a');
+        let staged = prepare_research_transition(&runtime, &first, &bytes).unwrap();
+        assert!(staged.current.is_none());
+        assert!(staged.rollback.is_none());
+        let mut owner = ResearchSupervisor::at(control, runtime.clone()).unwrap();
+        let error = owner
+            .transition_image(
+                None,
+                0,
+                &first.worker_sha256,
+                || {
+                    commit_research_transition(&runtime, &staged)?;
+                    Err(HostControlError::ArtifactVerification(
+                        "injected virgin activation failure",
+                    ))
+                },
+                || restore_research_transition(&runtime, &staged),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "RESEARCH_ACTIVATION_ROLLED_BACK");
+        assert!(read_research_pointer(&runtime, CURRENT_RESEARCH_POINTER)
+            .unwrap()
+            .is_none());
+        assert!(read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
+            .unwrap()
+            .is_none());
+        assert_eq!(owner.status().unwrap()["last_error"], "RESEARCH_ACTIVATION_ROLLED_BACK");
+        assert!(!runtime.join("okx-agent.exe").exists());
+        assert!(!runtime.join("installed-agent.json").exists());
+        assert!(!runtime.join("desired-state.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an explicitly disposable Windows ACL-capable test root"]
+    fn unsealed_legacy_research_is_diagnosed_read_only_and_never_promoted() {
+        assert_eq!(
+            std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref(),
+            Ok("1")
+        );
+        let root = std::env::temp_dir().join(format!(
+            "research-unsealed-legacy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime = root.join("runtime");
+        let control = root.join("control");
+        fs::create_dir_all(&runtime).unwrap();
+        let legacy_bytes = fixture_pe_image();
+        let legacy = fixture_record(&legacy_bytes, 'a');
+        let legacy_dir = runtime.join("research/versions").join(&legacy.worker_sha256);
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(legacy_dir.join("okx-research-service.exe"), &legacy_bytes).unwrap();
+        write_research_pointer(&runtime, CURRENT_RESEARCH_POINTER, &legacy).unwrap();
+        let original_pointer = fs::read(runtime.join(CURRENT_RESEARCH_POINTER)).unwrap();
+
+        let mut owner = ResearchSupervisor::at(control.clone(), runtime.clone()).unwrap();
+        let status = owner.status().unwrap();
+        assert_eq!(status["phase"], "INVALID_PROVENANCE");
+        assert_eq!(status["last_error"], "RESEARCH_IMAGE_INVALID");
+        assert!(!control.exists(), "STATUS must remain read-only");
+        assert_eq!(
+            fs::read(runtime.join(CURRENT_RESEARCH_POINTER)).unwrap(),
+            original_pointer
+        );
+
+        let mut candidate_bytes = legacy_bytes.clone();
+        candidate_bytes[64] = 0x43;
+        let candidate = fixture_record(&candidate_bytes, 'c');
+        assert!(activate_verified_research_image_at(
+            &runtime,
+            &mut owner,
+            &candidate,
+            &candidate_bytes
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(runtime.join(CURRENT_RESEARCH_POINTER)).unwrap(),
+            original_pointer,
+            "legacy current must never be silently resealed or replaced"
+        );
+        assert!(read_research_pointer(&runtime, ROLLBACK_RESEARCH_POINTER)
+            .unwrap()
+            .is_none());
+        assert!(!control.exists());
+
+        // The rollback pointer is also provenance, not permission to adopt
+        // an older pre-Research ACL layout. A sealed current image does not
+        // allow promotion over an unsealed but hash-correct rollback image.
+        let rollback_runtime = root.join("rollback-runtime");
+        let rollback_control = root.join("rollback-control");
+        let mut rollback_owner =
+            ResearchSupervisor::at(rollback_control.clone(), rollback_runtime.clone()).unwrap();
+        let (initial_status, _) = activate_verified_research_image_at(
+            &rollback_runtime,
+            &mut rollback_owner,
+            &legacy,
+            &legacy_bytes,
+        )
+        .unwrap();
+        assert_eq!(initial_status["phase"], "STOPPED");
+        let unsealed_rollback = fixture_record(&candidate_bytes, 'c');
+        let unsealed_dir = rollback_runtime
+            .join("research/versions")
+            .join(&unsealed_rollback.worker_sha256);
+        fs::create_dir_all(&unsealed_dir).unwrap();
+        fs::write(
+            unsealed_dir.join("okx-research-service.exe"),
+            &candidate_bytes,
+        )
+        .unwrap();
+        write_research_pointer(
+            &rollback_runtime,
+            ROLLBACK_RESEARCH_POINTER,
+            &unsealed_rollback,
+        )
+        .unwrap();
+        let current_before = fs::read(rollback_runtime.join(CURRENT_RESEARCH_POINTER)).unwrap();
+        let rollback_before = fs::read(rollback_runtime.join(ROLLBACK_RESEARCH_POINTER)).unwrap();
+        let state_before = fs::read(rollback_control.join("research-state.json")).unwrap();
+        let rollback_diagnostic = rollback_owner.status().unwrap();
+        assert_eq!(rollback_diagnostic["phase"], "INVALID_PROVENANCE");
+        assert_eq!(rollback_diagnostic["last_error"], "RESEARCH_IMAGE_INVALID");
+        assert_eq!(
+            fs::read(rollback_control.join("research-state.json")).unwrap(),
+            state_before,
+            "diagnosis of an unsealed rollback is read-only"
+        );
+        let mut replacement_bytes = candidate_bytes;
+        replacement_bytes[65] = 0x44;
+        let replacement = fixture_record(&replacement_bytes, 'd');
+        assert!(activate_verified_research_image_at(
+            &rollback_runtime,
+            &mut rollback_owner,
+            &replacement,
+            &replacement_bytes,
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(rollback_runtime.join(CURRENT_RESEARCH_POINTER)).unwrap(),
+            current_before
+        );
+        assert_eq!(
+            fs::read(rollback_runtime.join(ROLLBACK_RESEARCH_POINTER)).unwrap(),
+            rollback_before,
+            "unsealed legacy rollback must not be silently resealed"
+        );
+        assert_eq!(
+            fs::read(rollback_control.join("research-state.json")).unwrap(),
+            state_before
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

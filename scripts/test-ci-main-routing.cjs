@@ -10,6 +10,8 @@ const path = require('node:path');
 const root = path.join(__dirname, '..', '.github', 'workflows');
 const workflows = fs.readdirSync(root).filter(x => /\.ya?ml$/.test(x));
 const source = fs.readFileSync(path.join(root, 'ci.yml'), 'utf8').replaceAll('\r\n', '\n');
+const disposableScript = fs.readFileSync(path.join(root, '..', '..', 'scripts',
+  'ci-s2-disposable-windows.ps1'), 'utf8').replaceAll('\r\n', '\n');
 const researchRelease = fs.readFileSync(path.join(root, '..', '..', 'scripts', 'prepare-research-release.ps1'), 'utf8').replaceAll('\r\n', '\n');
 const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
   'okx-research-service', 'tests', 'ipc_process.rs'), 'utf8').replaceAll('\r\n', '\n');
@@ -35,8 +37,23 @@ const nativeCacheJobs = [
   ['trading_engine_build_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
   ['trusted_main_cache_prime', warmPrefix, 'trading-engine-${{ matrix.profile }}-windows', mainCacheWriter],
 ];
+const s2ExactTests = [
+  'research_sandbox::native::tests::disposable_real_research_lpac_ready_job_and_bearer',
+  'research_acl::native::tests::disposable_windows_acl_image_package_rx_and_inventory',
+  'research_acl::native::tests::disposable_windows_acl_unsealed_catalog_is_rejected',
+  'research_acl::native::tests::disposable_windows_acl_reparse_and_hardlink_rejected',
+  'research_acl::native::tests::disposable_windows_acl_catalog_sqlite_sidecars_inherit_low_il',
+  'research_acl::native::tests::disposable_windows_acl_finance_sqlite_locks_untouched',
+];
+const s2JobGate = `    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 's2-disposable-windows') &&
+      (github.event.action == 'synchronize' ||
+       (github.event.action == 'labeled' && github.event.label.name == 's2-disposable-windows'))`;
 
-function validate(yaml, fileNames) {
+function validate(yaml, fileNames, runnerScript = disposableScript) {
   assert.ok(!fileNames.includes('publish-native-base.yml'), 'SECOND_PUBLICATION_WORKFLOW');
   assert.ok(!fileNames.includes('all26-slice-targeted.yml'), 'RETIRED_FINANCE_WORKFLOW_RESURRECTED');
   const parts = yaml.split(/^jobs:\s*$/m);
@@ -46,6 +63,9 @@ function validate(yaml, fileNames) {
   assert.match(header, /^  push:$/m);
   assert.match(header, /^      - main$/m);
   assert.match(header, /^  pull_request:$/m);
+  assert.match(header, /^    types: \[opened, reopened, synchronize, ready_for_review, labeled\]$/m,
+    'EXPLICIT_LABELED_EVENT_REQUIRED_WITHOUT_CHANGING_READY_TRIGGERS');
+  assert.doesNotMatch(header, /^  pull_request_target:$/m);
   assert.doesNotMatch(header, /^  workflow_run:$/m);
   assert.match(header, /^  workflow_dispatch:$/m);
   assert.match(header, /^      prime_windows_cargo_cache:$/m);
@@ -120,7 +140,55 @@ function validate(yaml, fileNames) {
   assert.match(draft, /needs: component_impact/);
   assert.match(draft, /DRAFT_CHECKS: \$\{\{ needs\.component_impact\.outputs\.draft_checks \}\}/);
   assert.match(draft, /check_p0\.py --checks "\$DRAFT_CHECKS"/);
+  assert.match(draft,
+    /if: github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'labeled'/,
+    'LABEL_ONLY_EVENT_MUST_NOT_RECOMPILE_UNCHANGED_DRAFT_OWNER_TESTS');
   assert.doesNotMatch(draft, /check_p0\.py --base|fetch-depth: 0/);
+  // The sole additional Windows job is a same-repo Draft S2 experiment, not
+  // a finance Ready alias, a release, or a runner for every normal Draft.
+  const s2 = job('research-lpac-disposable-windows');
+  assert.match(s2, /^    name: research-lpac-disposable-windows$/m);
+  assert.match(s2, /^    needs: component_impact$/m);
+  assert.ok(s2.includes(s2JobGate), 'S2_EXACT_DRAFT_LABEL_SAME_REPO_EVENT_GATE_REQUIRED');
+  assert.match(s2, /^    runs-on: windows-latest$/m);
+  assert.match(s2, /^    timeout-minutes: 45$/m);
+  assert.match(s2, /^      OKX_DISPOSABLE_WINDOWS_RUNNER: '1'$/m);
+  assert.match(s2, /^      OKX_S2_EXPECTED_HEAD: \$\{\{ github.event.pull_request.head.sha \}\}$/m);
+  assert.match(s2, /ref: \$\{\{ github.event.pull_request.head.sha \}\}/);
+  assert.match(s2, /persist-credentials: false/);
+  assert.match(s2, /run: \.\/scripts\/ci-s2-disposable-windows\.ps1/);
+  assert.match(s2, /if: always\(\)\n        uses: actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(s2, /name: okx-s2-disposable-windows-\$\{\{ github.event.pull_request.head.sha \}\}-\$\{\{ github.run_attempt \}\}/);
+  assert.match(s2, /path: \$\{\{ runner.temp \}\}\/okx-s2-disposable-evidence-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}\//);
+  assert.match(s2, /if-no-files-found: error/);
+  assert.match(s2, /save-if: false/);
+  assert.doesNotMatch(s2, /gh release|actions\/attest|cargo build --locked --release|okx-windows-bundle-/);
+  assert.match(runnerScript, /schema = 'okx\.s2\.disposable-windows\/v1'/);
+  assert.match(runnerScript, /acceptance_status = 'NOT_PROVEN_UNTIL_INDEPENDENT_REVIEW'/);
+  assert.match(runnerScript, /\$env:RUNNER_ENVIRONMENT -ne 'github-hosted'/);
+  assert.match(runnerScript, /\$env:RUNNER_OS -ne 'Windows'/);
+  assert.match(runnerScript, /\$env:OKX_DISPOSABLE_WINDOWS_RUNNER -cne '1'/);
+  assert.match(runnerScript, /\$head -cne \$env:OKX_S2_EXPECTED_HEAD/);
+  assert.match(runnerScript, /git rev-parse 'HEAD\^\{tree\}'/);
+  assert.match(runnerScript, /Join-Path \$runnerTemp "okx-s2-disposable-\$suffix"/);
+  assert.match(runnerScript, /\.okx-disposable-windows-runner/);
+  assert.match(runnerScript, /okx-s2-disposable-v1`n/);
+  assert.match(runnerScript, /\$env:OKX_DISPOSABLE_WINDOWS_ROOT = \$root/);
+  assert.match(runnerScript, /cargo build --locked -p okx-research-service --bin okx-research-service/);
+  assert.match(runnerScript, /\$env:OKX_DISPOSABLE_RESEARCH_EXE = /);
+  assert.match(runnerScript, /cargo test --locked -p okx-host-controller --lib \$testName -- --ignored --exact --nocapture --test-threads 1/);
+  assert.match(runnerScript, /\$namedPass = \$log -cmatch/);
+  assert.match(runnerScript, /test result: ok\\\. 1 passed; 0 failed; 0 ignored; 0 measured; \[1-9\]\[0-9\]\* filtered out;/);
+  assert.match(runnerScript, /\$hasWitness = \$log\.Contains\(\$witness\)/);
+  assert.match(runnerScript, /\$testExit -ne 0 -or -not \$namedPass -or -not \$onePassed -or -not \$hasWitness/);
+  assert.match(runnerScript, /\$receipt.executed_exact_test_count -ne \$tests.Count -or \$tests.Count -ne 6/);
+  assert.match(runnerScript, /Get-FileHash -Algorithm SHA256 -LiteralPath \$testLog/);
+  assert.match(runnerScript, /\$receipt \| ConvertTo-Json -Depth 8 \| Set-Content/);
+  assert.doesNotMatch(runnerScript, /gh release|cargo build --locked --release|C:\\okx|gh api --method POST/);
+  const quotedDeclared = [...runnerScript.matchAll(/^    '(research_(?:sandbox|acl)::[^']+)'[,]?$/gm)]
+    .map(match => match[1]);
+  assert.deepEqual(quotedDeclared, s2ExactTests, 'EXACT_SIX_IN_CRATE_IGNORED_WINDOWS_TEST_NAMES');
+  assert.equal(new Set(quotedDeclared).size, 6, 'S2_TEST_NAMES_NOT_UNIQUE');
   assert.match(job('dependency-audit'), /if: \(github.event_name != 'pull_request' \|\| github.event.pull_request.draft != true\)/);
   const research = job('research_service_tests_windows');
   assert.match(research, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true'/,
@@ -955,6 +1023,77 @@ function changeJobInput(yaml, id, before, after) {
   assert.ok(block.includes(before), `MISSING_CACHE_INPUT:${id}`);
   return yaml.slice(0, start) + block.replace(before, after) + yaml.slice(end);
 }
+// Exact GitHub event eligibility is independently modeled and checked against
+// the mandatory literal workflow gate above. These cases catch an accidental
+// switch to a generic Draft, an unrelated label, a fork or a Ready run.
+function s2Eligible(event) {
+  return event.name === 'pull_request' && event.draft === true &&
+    event.headRepo === event.repository && event.labels.includes('s2-disposable-windows') &&
+    (event.action === 'synchronize' ||
+      (event.action === 'labeled' && event.appliedLabel === 's2-disposable-windows'));
+}
+const allowedS2 = {name: 'pull_request', action: 'labeled', draft: true,
+  headRepo: 'iamaman11/okx', repository: 'iamaman11/okx',
+  labels: ['s2-disposable-windows'], appliedLabel: 's2-disposable-windows'};
+assert.equal(s2Eligible(allowedS2), true, 'S2_EXPLICIT_LABEL_EVENT_MUST_ROUTE');
+assert.equal(s2Eligible({...allowedS2, action: 'synchronize', appliedLabel: ''}), true,
+  'S2_SYNC_WITH_EXISTING_LABEL_MUST_ROUTE');
+for (const [name, event] of [
+  ['ORDINARY_DRAFT', {...allowedS2, labels: []}],
+  ['UNRELATED_LABEL_EVENT', {...allowedS2, appliedLabel: 'enhancement'}],
+  ['READY_PR', {...allowedS2, draft: false}],
+  ['FORK', {...allowedS2, headRepo: 'someone-else/okx'}],
+  ['MAIN_PUSH', {...allowedS2, name: 'push'}],
+  ['DISPATCH', {...allowedS2, name: 'workflow_dispatch'}],
+  ['REOPENED', {...allowedS2, action: 'reopened'}],
+  ['READY_FOR_REVIEW', {...allowedS2, action: 'ready_for_review', draft: false}],
+  ['TITLE_EDIT', {...allowedS2, action: 'edited'}],
+]) assert.equal(s2Eligible(event), false, `S2_MUST_NOT_START_WINDOWS:${name}`);
+
+function rejectS2RoutingMutation(before, after, reason) {
+  const mutated = changeJobInput(source, 'research-lpac-disposable-windows', before, after);
+  assert.notEqual(mutated, source, `S2_ROUTING_MUTATION_NOT_APPLIED:${reason}`);
+  assert.throws(() => validate(mutated, workflows), reason);
+}
+for (const [before, after, reason] of [
+  ["github.event.pull_request.draft == true", 'true', 'S2_READY_CANNOT_EXECUTE'],
+  ["github.event.pull_request.head.repo.full_name == github.repository", 'true', 'S2_FORK_CANNOT_EXECUTE'],
+  ["contains(github.event.pull_request.labels.*.name, 's2-disposable-windows')", 'true',
+    'S2_UNLABELED_CANNOT_EXECUTE'],
+  ["github.event.action == 'labeled' && github.event.label.name == 's2-disposable-windows'",
+    "github.event.action == 'labeled'", 'S2_UNRELATED_LABEL_CANNOT_EXECUTE'],
+  ["github.event.action == 'synchronize'", "github.event.action == 'opened'", 'S2_SYNC_MUST_RETAIN_OPT_IN'],
+  ['runs-on: windows-latest', 'runs-on: self-hosted', 'S2_RUNNER_MUST_BE_EPHEMERAL'],
+  ["OKX_DISPOSABLE_WINDOWS_RUNNER: '1'", "OKX_DISPOSABLE_WINDOWS_RUNNER: '0'",
+    'S2_GUARD_CANNOT_BE_DISABLED'],
+  ['persist-credentials: false', 'persist-credentials: true', 'S2_CHECKOUT_CANNOT_RETAIN_WRITE_CREDENTIALS'],
+  ['save-if: false', 'save-if: true', 'S2_UNREVIEWED_CARGO_CACHE_CANNOT_BE_SAVED'],
+  ['if: always()', 'if: success()', 'S2_FAILED_RUN_MUST_ATTEMPT_RECEIPT_UPLOAD'],
+  ['if-no-files-found: error', 'if-no-files-found: warn', 'S2_MISSING_RECEIPT_CANNOT_BE_SILENT'],
+  ['run: ./scripts/ci-s2-disposable-windows.ps1', 'run: echo skipped', 'S2_PHYSICAL_RUNNER_REQUIRED'],
+]) rejectS2RoutingMutation(before, after, reason);
+
+function rejectS2ScriptMutation(before, after, reason) {
+  assert.ok(disposableScript.includes(before), `S2_SCRIPT_MUTATION_NOT_APPLIED:${reason}`);
+  assert.throws(() => validate(source, workflows, disposableScript.replace(before, after)), reason);
+}
+for (const [before, after, reason] of [
+  ["$env:RUNNER_ENVIRONMENT -ne 'github-hosted'", '$false', 'S2_HOSTED_WINDOWS_ONLY'],
+  ["$env:OKX_DISPOSABLE_WINDOWS_RUNNER -cne '1'", '$false', 'S2_RUNTIME_GUARD_REQUIRED'],
+  ["$head -cne $env:OKX_S2_EXPECTED_HEAD", '$false', 'S2_IMMUTABLE_HEAD_REQUIRED'],
+  ["git rev-parse 'HEAD^{tree}'", 'git rev-parse HEAD', 'S2_TREE_PROVENANCE_REQUIRED'],
+  ["$env:OKX_DISPOSABLE_WINDOWS_ROOT = $root", '$env:OKX_DISPOSABLE_WINDOWS_ROOT = "C:\\okx"',
+    'S2_TEMP_ROOT_REQUIRED'],
+  ['.okx-disposable-windows-runner', '.unverified-runner-marker', 'S2_DISPOSABLE_MARKER_REQUIRED'],
+  ['-- --ignored --exact --nocapture --test-threads 1', '-- --nocapture', 'S2_IGNORED_EXACT_ONLY'],
+  ['$namedPass = $log -cmatch', '$namedPass = $true #', 'S2_NAMED_PASS_REQUIRED'],
+  ['$hasWitness = $log.Contains($witness)', '$hasWitness = $true #', 'S2_NATIVE_WITNESS_REQUIRED'],
+  ['1 passed; 0 failed;', '0 passed; 0 failed;', 'S2_NONZERO_EXECUTED_CASE_REQUIRED'],
+  ["$tests.Count -ne 6", '$tests.Count -ne 0', 'S2_SIX_PHYSICAL_TESTS_REQUIRED'],
+  ['Get-FileHash -Algorithm SHA256 -LiteralPath $testLog', '"unverified"', 'S2_LOG_SHA256_REQUIRED'],
+  ['acceptance_status = \'NOT_PROVEN_UNTIL_INDEPENDENT_REVIEW\'',
+    "acceptance_status = 'READY'", 'S2_CANNOT_DECLARE_READY'],
+]) rejectS2ScriptMutation(before, after, reason);
 for (const [id, prefix, , save] of nativeCacheJobs) {
   for (const [before, after] of [
     [`prefix-key: ${prefix}`, 'prefix-key: v0-rust'],

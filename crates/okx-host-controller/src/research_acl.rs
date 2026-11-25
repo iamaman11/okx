@@ -857,14 +857,152 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::{
+            fs::OpenOptions,
+            io::{Read, Write},
+            os::windows::fs::MetadataExt,
+            path::PathBuf,
+        };
+
+        // These are CONTROL-user Win32 descriptor/inheritance witnesses. They
+        // are deliberately separate from the physical LPAC-child AccessCheck,
+        // file-operation and CredMan witnesses in research_sandbox tests.
+        // Parent-created SQLite fixtures alone must not be reported as an
+        // LPAC child write proof.
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct AclSnapshot {
+            owner: String,
+            protected: bool,
+            aces: Vec<(u8, u8, u32, String)>,
+        }
+
+        fn snapshot_acl(path: &Path, directory: bool) -> AclSnapshot {
+            let handle = open(path, directory, false).unwrap();
+            let (mut descriptor, mut owner, mut dacl) =
+                (null_mut(), null_mut(), null_mut());
+            assert_eq!(
+                unsafe {
+                    GetSecurityInfo(
+                        handle.raw,
+                        SE_FILE_OBJECT,
+                        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                        &mut owner,
+                        null_mut(),
+                        &mut dacl,
+                        null_mut(),
+                        &mut descriptor,
+                    )
+                },
+                0,
+                "GetSecurityInfo failed for {}",
+                path.display()
+            );
+            assert!(!descriptor.is_null());
+            assert!(!owner.is_null());
+            assert!(!dacl.is_null());
+            let _guard = LocalDescriptor(descriptor);
+            let mut control = 0u16;
+            let mut revision = 0u32;
+            assert_ne!(
+                unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) },
+                0
+            );
+            let mut aces = Vec::new();
+            for index in 0..unsafe { (*dacl).AceCount } {
+                let mut ptr = null_mut();
+                assert_ne!(unsafe { GetAce(dacl, index as u32, &mut ptr) }, 0);
+                assert!(!ptr.is_null());
+                let header = unsafe { &*(ptr.cast::<ACE_HEADER>()) };
+                assert_eq!(header.AceType, 0, "unexpected ACE type on {}", path.display());
+                assert!((header.AceSize as usize) >= size_of::<ACCESS_ALLOWED_ACE>());
+                let allow = unsafe { &*(ptr.cast::<ACCESS_ALLOWED_ACE>()) };
+                let sid = (&allow.SidStart as *const u32).cast_mut().cast();
+                aces.push((
+                    header.AceType,
+                    header.AceFlags,
+                    allow.Mask,
+                    sid_string(sid).unwrap(),
+                ));
+            }
+            AclSnapshot {
+                owner: sid_string(owner).unwrap(),
+                protected: control & SE_DACL_PROTECTED != 0,
+                aces,
+            }
+        }
+
+        fn assert_package_mask(path: &Path, directory: bool, expected_mask: u32) {
+            let acl = snapshot_acl(path, directory);
+            let package = identity().unwrap().package;
+            assert_ne!(acl.owner, package, "package SID unexpectedly owns an object");
+            let grants: Vec<_> = acl
+                .aces
+                .iter()
+                .filter(|(_, _, _, sid)| sid == &package)
+                .collect();
+            assert_eq!(grants.len(), 1, "exactly one package grant required");
+            assert_eq!(grants[0].2, expected_mask);
+            assert_eq!(grants[0].2 & (WRITE_DAC | WRITE_OWNER), 0);
+            assert!(acl.aces.iter().all(|(_, flags, _, _)| flags & INHERITED_ACE == 0)
+                || !acl.protected, "protected image/catalog root has inherited ACEs");
+        }
+
+        fn assert_no_exact_package_grant(path: &Path, directory: bool) {
+            let acl = snapshot_acl(path, directory);
+            let package = identity().unwrap().package;
+            assert!(
+                acl.aces.iter().all(|(_, _, _, sid)| sid != &package),
+                "Research package was granted access to synthetic finance {}",
+                path.display()
+            );
+        }
 
         struct DisposableRoot(std::path::PathBuf);
 
         impl DisposableRoot {
             fn new() -> Self {
+                assert_eq!(
+                    std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref(),
+                    Ok("1"),
+                    "Windows ACL physical probes require explicit opt-in"
+                );
+                let runner_temp = PathBuf::from(
+                    std::env::var_os("RUNNER_TEMP").expect("RUNNER_TEMP must be set"),
+                );
+                let base = PathBuf::from(
+                    std::env::var_os("OKX_DISPOSABLE_WINDOWS_ROOT")
+                        .expect("OKX_DISPOSABLE_WINDOWS_ROOT must be set"),
+                );
+                assert!(runner_temp.is_absolute() && base.is_absolute());
+                assert!(runner_temp.file_name().is_some(), "RUNNER_TEMP must not be a volume root");
+                assert!(
+                    !runner_temp.components().any(|component| component
+                        .as_os_str()
+                        .to_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("okx"))),
+                    "never use an installed OKX tree as RUNNER_TEMP"
+                );
+                assert_ne!(base, runner_temp, "never use RUNNER_TEMP itself as test root");
+                assert!(base.starts_with(&runner_temp), "disposable root must be below RUNNER_TEMP");
+                assert!(
+                    base.file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|name| name.starts_with("okx-s2-")),
+                    "disposable root must have okx-s2- prefix"
+                );
+                fs::create_dir_all(&base).unwrap();
+                checked_ancestors(&base).unwrap();
+                let canonical_runner = runner_temp.canonicalize().unwrap();
+                let canonical_base = base.canonicalize().unwrap();
+                assert_ne!(canonical_base, canonical_runner);
+                assert!(
+                    canonical_base.starts_with(canonical_runner),
+                    "disposable root escaped RUNNER_TEMP"
+                );
                 let mut nonce = [0u8; 16];
                 getrandom::fill(&mut nonce).unwrap();
-                let path = std::env::temp_dir().join(format!(
+                let path = base.join(format!(
                     "okx-research-acl-disposable-{:032x}",
                     u128::from_le_bytes(nonce)
                 ));
@@ -906,11 +1044,7 @@ mod native {
 
         #[test]
         #[ignore = "manual disposable Windows ACL proof; not installed PHYSICAL_DENY"]
-        fn disposable_research_image_and_catalog_acl_roundtrip() {
-            assert_eq!(
-                std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref(),
-                Ok("1")
-            );
+        fn disposable_windows_acl_image_package_rx_and_inventory() {
             let root = DisposableRoot::new();
             let research = root.0.join("research");
             let versions = research.join("versions");
@@ -924,22 +1058,19 @@ mod native {
             let binary = version.join("okx-research-service.exe");
             fs::rename(staged, &binary).unwrap();
             verify_version_image(&binary, &sha).unwrap();
-            let catalog = research.join("edge-catalog");
-            ensure_independent_catalog(&catalog).unwrap();
-            fs::write(catalog.join("research-catalog.sqlite"), b"synthetic-only").unwrap();
-            ensure_independent_catalog(&catalog).unwrap();
+            assert_package_mask(&version, true, IMAGE_PACKAGE_RX);
+            assert_package_mask(&binary, false, IMAGE_PACKAGE_RX);
+            assert!(snapshot_acl(&version, true).protected);
+            assert!(snapshot_acl(&binary, false).protected);
             // An extra image-side DLL violates the exact version inventory.
             fs::write(version.join("unauthorized.dll"), b"synthetic-only").unwrap();
             assert!(verify_version_image(&binary, &sha).is_err());
+            println!("OKX_S2_WITNESS=disposable_windows_acl_image_package_rx_and_inventory");
         }
 
         #[test]
         #[ignore = "manual disposable Windows negative ACL proof"]
-        fn nonempty_unsealed_catalog_is_never_auto_granted() {
-            assert_eq!(
-                std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref(),
-                Ok("1")
-            );
+        fn disposable_windows_acl_unsealed_catalog_is_rejected() {
             let root = DisposableRoot::new();
             let research = root.0.join("research");
             let catalog = research.join("edge-catalog");
@@ -947,15 +1078,12 @@ mod native {
             fs::create_dir(&catalog).unwrap();
             fs::write(catalog.join("research-catalog.sqlite"), b"unsealed").unwrap();
             assert!(ensure_independent_catalog(&catalog).is_err());
+            println!("OKX_S2_WITNESS=disposable_windows_acl_unsealed_catalog_is_rejected");
         }
 
         #[test]
         #[ignore = "manual disposable Windows hardlink negative"]
-        fn executable_hardlink_must_not_be_resealed() {
-            assert_eq!(
-                std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref(),
-                Ok("1")
-            );
+        fn disposable_windows_acl_reparse_and_hardlink_rejected() {
             let root = DisposableRoot::new();
             let research = root.0.join("research");
             let versions = research.join("versions");
@@ -970,6 +1098,127 @@ mod native {
             fs::rename(staged, &binary).unwrap();
             fs::hard_link(&binary, root.0.join("linked-image-canary")).unwrap();
             assert!(verify_version_image(&binary, &sha).is_err());
+
+            // A symlink must be an actual Windows reparse point. Failure to
+            // construct this fixture is NOT_PROVEN and fails the test; no
+            // feature/privilege-based skip is allowed in the physical lane.
+            let catalog = research.join("edge-catalog");
+            let target = root.0.join("synthetic-catalog-target");
+            fs::create_dir(&target).unwrap();
+            std::os::windows::fs::symlink_dir(&target, &catalog)
+                .expect("Windows reparse witness unavailable");
+            assert!(ensure_independent_catalog(&catalog).is_err());
+
+            let finance = root.0.join("finance");
+            fs::create_dir(&finance).unwrap();
+            let target = finance.join("finance.sqlite");
+            fs::write(&target, b"synthetic finance data").unwrap();
+            let link = finance.join("finance.sqlite-wal");
+            std::os::windows::fs::symlink_file(&target, &link)
+                .expect("Windows file reparse witness unavailable");
+            assert_ne!(
+                fs::symlink_metadata(&link).unwrap().file_attributes()
+                    & FILE_ATTRIBUTE_REPARSE_POINT,
+                0,
+            );
+            assert!(checked_ancestors(&link).is_err());
+            println!("OKX_S2_WITNESS=disposable_windows_acl_reparse_and_hardlink_rejected");
+        }
+
+        #[test]
+        #[ignore = "manual disposable Windows catalog sidecar/Low IL witness"]
+        fn disposable_windows_acl_catalog_sqlite_sidecars_inherit_low_il() {
+            let root = DisposableRoot::new();
+            let research = root.0.join("research");
+            fs::create_dir(&research).unwrap();
+            let catalog = research.join("edge-catalog");
+            ensure_independent_catalog(&catalog).unwrap();
+            assert_package_mask(&catalog, true, CATALOG_PACKAGE_MODIFY);
+            assert!(snapshot_acl(&catalog, true).protected);
+            let id = identity().unwrap();
+            for name in [
+                "research-catalog.sqlite",
+                "research-catalog.sqlite-wal",
+                "research-catalog.sqlite-shm",
+            ] {
+                let file = catalog.join(name);
+                fs::write(&file, b"synthetic SQLite sidecar only").unwrap();
+                let mut output = OpenOptions::new().append(true).open(&file).unwrap();
+                output.write_all(b"\nappend/delete canary").unwrap();
+                output.sync_all().unwrap();
+                drop(output);
+                let handle = open(&file, false, false).unwrap();
+                verify_catalog_child(&handle, &id, false).unwrap();
+                drop(handle);
+                let acl = snapshot_acl(&file, false);
+                assert_eq!(acl.aces.len(), 4);
+                assert!(!acl.protected, "children should inherit the catalog DACL");
+                let package: Vec<_> = acl
+                    .aces.iter()
+                    .filter(|(_, _, _, sid)| sid == &id.package)
+                    .collect();
+                assert_eq!(package.len(), 1);
+                assert_eq!(package[0].2, CATALOG_PACKAGE_MODIFY);
+                assert_ne!(package[0].1 & INHERITED_ACE, 0);
+                assert_eq!(package[0].2 & (WRITE_DAC | WRITE_OWNER), 0);
+                let mut bytes = Vec::new();
+                fs::File::open(&file).unwrap().read_to_end(&mut bytes).unwrap();
+                assert!(bytes.ends_with(b"\nappend/delete canary"));
+            }
+            ensure_independent_catalog(&catalog).unwrap();
+            for name in [
+                "research-catalog.sqlite",
+                "research-catalog.sqlite-wal",
+                "research-catalog.sqlite-shm",
+            ] {
+                fs::remove_file(catalog.join(name)).unwrap();
+            }
+            ensure_independent_catalog(&catalog).unwrap();
+            println!("OKX_S2_WITNESS=disposable_windows_acl_catalog_sqlite_sidecars_inherit_low_il");
+        }
+
+        #[test]
+        #[ignore = "manual disposable Windows synthetic Finance ACL nonmutation witness"]
+        fn disposable_windows_acl_finance_sqlite_locks_untouched() {
+            let root = DisposableRoot::new();
+            provisioning_identity().unwrap();
+            let finance = root.0.join("finance");
+            fs::create_dir(&finance).unwrap();
+            let mut paths = vec![(finance.clone(), true)];
+            for name in [
+                "finance.sqlite",
+                "finance.sqlite-wal",
+                "finance.sqlite-shm",
+                "finance.sqlite.writer.lock",
+                "authority-mode.lock",
+            ] {
+                let file = finance.join(name);
+                fs::write(&file, format!("synthetic-only:{name}")).unwrap();
+                paths.push((file, false));
+            }
+            let snapshots: Vec<_> = paths
+                .iter()
+                .map(|(path, directory)| {
+                    assert_no_exact_package_grant(path, *directory);
+                    snapshot_acl(path, *directory)
+                })
+                .collect();
+
+            // Exercise the production Research-only provisioner while keeping
+            // a synthetic Finance tree adjacent to it. No real Finance root,
+            // account state, exchange or installed directory is opened.
+            let research = root.0.join("research");
+            fs::create_dir(&research).unwrap();
+            ensure_independent_catalog(&research.join("edge-catalog")).unwrap();
+
+            for ((path, directory), baseline) in paths.iter().zip(snapshots.iter()) {
+                assert_eq!(&snapshot_acl(path, *directory), baseline);
+                assert_no_exact_package_grant(path, *directory);
+                if !directory {
+                    assert!(fs::read_to_string(path).unwrap().starts_with("synthetic-only:"));
+                }
+            }
+            println!("OKX_S2_WITNESS=disposable_windows_acl_finance_sqlite_locks_untouched");
         }
     }
 }

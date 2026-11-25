@@ -27,13 +27,17 @@ fn valid_sandbox_canary(
 #[cfg(any(test, windows))]
 fn sandbox_ready_line(nonce: &str) -> Result<Vec<u8>, String> {
     let ready = serde_json::json!({
-        "schema": "okx.research.sandbox-ready/v1",
+        "schema": "okx.research.sandbox-ready/v2",
         "nonce": nonce,
         "credman_denied": true,
         "finance_file_denied": true,
+        "image_write_dac_denied": true,
+        "image_write_owner_denied": true,
+        "catalog_write_dac_denied": true,
+        "catalog_write_owner_denied": true,
     })
     .to_string();
-    if ready.len() + 1 > 256 {
+    if ready.len() + 1 > 384 {
         return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
     }
     let mut ready = ready.into_bytes();
@@ -47,17 +51,22 @@ fn sandbox_ready_line(nonce: &str) -> Result<Vec<u8>, String> {
 /// child and requires this attestation before writing the startup secret.
 /// No real financial credential or financial filesystem path is inspected.
 #[cfg(windows)]
-pub fn attest_startup_sandbox() -> Result<(), String> {
+pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), String> {
     use std::{ffi::OsStr, io::Write as _, os::windows::ffi::OsStrExt as _};
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, ERROR_ACCESS_DENIED, ERROR_NO_SUCH_LOGON_SESSION, ERROR_NOT_FOUND,
-            GENERIC_READ, GetLastError, INVALID_HANDLE_VALUE,
+            DELETE, GENERIC_READ, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE,
+            WRITE_DAC, WRITE_OWNER,
         },
         Security::Credentials::{
-            CRED_TYPE_GENERIC, CREDENTIALW, CredEnumerateW, CredFree, CredReadW,
+            CRED_PERSIST_SESSION, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredEnumerateW,
+            CredFree, CredReadW, CredWriteW,
         },
-        Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING},
+        Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        },
     };
 
     fn denied_or_missing(error: u32) -> bool {
@@ -68,6 +77,36 @@ pub fn attest_startup_sandbox() -> Result<(), String> {
     }
     fn to_wide(s: &OsStr) -> Vec<u16> {
         s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+    fn require_access_denied(
+        path: &std::path::Path,
+        access: u32,
+        flags: u32,
+        exposed_code: &str,
+    ) -> Result<(), String> {
+        let wide = to_wide(path.as_os_str());
+        // SAFETY: a NUL-terminated, owned path is kept live for CreateFileW;
+        // a successful handle is closed before any failure is returned.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                flags,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle != INVALID_HANDLE_VALUE {
+            unsafe { CloseHandle(handle) };
+            return Err(exposed_code.into());
+        }
+        if unsafe { GetLastError() } != ERROR_ACCESS_DENIED {
+            // Sharing violations and missing paths are not ACL evidence.
+            return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+        }
+        Ok(())
     }
 
     let nonce = std::env::var("OKX_RESEARCH_SANDBOX_NONCE")
@@ -81,7 +120,15 @@ pub fn attest_startup_sandbox() -> Result<(), String> {
         return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
     }
 
-    let target_wide = to_wide(OsStr::new(&target));
+    if !catalog_root.is_absolute() || !catalog_root.is_dir() {
+        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+    }
+    let image = std::env::current_exe().map_err(|_| "RESEARCH_SANDBOX_ATTESTATION_INVALID")?;
+    if !image.is_file() {
+        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+    }
+
+    let mut target_wide = to_wide(OsStr::new(&target));
     let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
     // SAFETY: all pointers refer to owned, NUL-terminated UTF-16 buffers or
     // writable pointer outputs. CredFree handles any successful allocation.
@@ -109,26 +156,53 @@ pub fn attest_startup_sandbox() -> Result<(), String> {
         return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
     }
 
-    let file_wide = to_wide(finance_canary.as_os_str());
-    let handle = unsafe {
-        CreateFileW(
-            file_wide.as_ptr(),
-            GENERIC_READ,
-            FILE_SHARE_READ,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            std::ptr::null_mut(),
-        )
+    let mut synthetic_blob = [0x53u8; 32];
+    let mut synthetic_username = to_wide(OsStr::new("sandbox-negative-control"));
+    let synthetic_credential = CREDENTIALW {
+        Type: CRED_TYPE_GENERIC,
+        TargetName: target_wide.as_mut_ptr(),
+        CredentialBlob: synthetic_blob.as_mut_ptr(),
+        CredentialBlobSize: synthetic_blob.len() as u32,
+        Persist: CRED_PERSIST_SESSION,
+        UserName: synthetic_username.as_mut_ptr(),
+        ..Default::default()
     };
-    if handle != INVALID_HANDLE_VALUE {
-        unsafe { CloseHandle(handle) };
-        return Err("RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED".into());
+    // These are nonce-scoped *synthetic* targets created by the parent. The
+    // parent verifies their original content after the child has exited.
+    if unsafe { CredWriteW(&synthetic_credential, 0) } != 0 {
+        return Err("RESEARCH_SANDBOX_CREDMAN_EXPOSED".into());
     }
-    if unsafe { GetLastError() } != ERROR_ACCESS_DENIED {
-        // A missing synthetic file, invalid path or sharing violation is NOT
-        // evidence of a successfully enforced AppContainer ACL.
+    if !denied_or_missing(unsafe { GetLastError() }) {
         return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+    }
+    if unsafe { CredDeleteW(target_wide.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 {
+        return Err("RESEARCH_SANDBOX_CREDMAN_EXPOSED".into());
+    }
+    if !denied_or_missing(unsafe { GetLastError() }) {
+        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+    }
+
+    for access in [GENERIC_READ, GENERIC_WRITE, DELETE, WRITE_DAC, WRITE_OWNER] {
+        require_access_denied(
+            &finance_canary,
+            access,
+            FILE_ATTRIBUTE_NORMAL,
+            "RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED",
+        )?;
+    }
+    for access in [WRITE_DAC, WRITE_OWNER] {
+        require_access_denied(
+            &image,
+            access,
+            FILE_ATTRIBUTE_NORMAL,
+            "RESEARCH_SANDBOX_IMAGE_ACL_EXPOSED",
+        )?;
+        require_access_denied(
+            catalog_root,
+            access,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            "RESEARCH_SANDBOX_CATALOG_ACL_EXPOSED",
+        )?;
     }
 
     let ready = sandbox_ready_line(&nonce)?;
@@ -184,14 +258,22 @@ mod tests {
             &root.path().join("finance.sqlite")
         ));
         let ready = sandbox_ready_line(&nonce).unwrap();
-        assert!(ready.len() <= 256);
+        assert!(ready.len() <= 384);
         assert_eq!(ready.last(), Some(&b'\n'));
         assert_eq!(ready.iter().filter(|&&byte| byte == b'\n').count(), 1);
         let value: serde_json::Value = serde_json::from_slice(&ready).unwrap();
-        assert_eq!(value["schema"], "okx.research.sandbox-ready/v1");
+        assert_eq!(value["schema"], "okx.research.sandbox-ready/v2");
         assert_eq!(value["nonce"], nonce);
         assert_eq!(value["credman_denied"], true);
         assert_eq!(value["finance_file_denied"], true);
+        for field in [
+            "image_write_dac_denied",
+            "image_write_owner_denied",
+            "catalog_write_dac_denied",
+            "catalog_write_owner_denied",
+        ] {
+            assert_eq!(value[field], true);
+        }
         assert!(value.get("bearer").is_none());
         assert!(value.get("canary").is_none());
         assert!(value.get("path").is_none());

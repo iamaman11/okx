@@ -212,7 +212,10 @@ means proven reusable binary bytes, not a runtime library. Existing
 
 ## CI job names and exact ownership
 
-One `.github/workflows/ci.yml` contains **16 job definitions**. GitHub renders
+The accepted `main` has **16 job definitions** in the one
+`.github/workflows/ci.yml`. S2 Draft #596 adds one opt-in
+`research-lpac-disposable-windows` job, making **17 definitions in that
+candidate**. This is not a second workflow. GitHub renders
 all of their names even when the selected component route correctly skips a
 job. Four Windows regression matrix cells and at most two manual cache
 profiles can add displayed rows; they are **not extra application components**.
@@ -224,6 +227,7 @@ protection and accepted-artifact verification use the **displayed names**.
 | --- | --- |
 | `classify` | Every event, Ubuntu: immutable change scope, fail-closed owner routing and Windows Cargo closure |
 | `draft-owner-feedback` | Draft PR, Ubuntu: selected owner/consumer feedback (`draft-component-tests` YAML ID); does **not** compile Windows-only code |
+| `research-lpac-disposable-windows` | **Only** explicitly labeled `s2-disposable-windows` Draft PR, ephemeral Windows VM, six exact ignored `--lib` tests for synthetic LPAC/ACL/Job/CredMan/SQLite; not protected, no release/publish and never installed `C:\okx`. Nonzero executed tests and an exact-SHA preliminary receipt are mandatory; green smoke is **not** full physical S2 acceptance |
 | `dependency-audit` | Ready/main for Rust owners: locked dependency graph, advisories, licences and sources; an applicable failure makes protected `linux-core` fail |
 | `architecture-contracts` | Fresh non-Edge Rust changes: ownership, schema, product contracts and negative CI/release checks |
 | `rust-tests-linux` | Full/Engine route only: portable Rust Clippy, tests and Research-owned real IPC/process contracts; **not** an Engine dev-only Research client or Windows runtime test |

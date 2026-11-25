@@ -121,7 +121,9 @@ async fn run() -> Result<(), String> {
         // its own sandbox cannot read disposable CredMan/file canaries.
         // Only a nonce and denial booleans are emitted on inherited stdout.
         #[cfg(windows)]
-        okx_research_service::edge_credentials::attest_startup_sandbox()?;
+        okx_research_service::edge_credentials::attest_startup_sandbox(
+            root.as_deref().ok_or("MISSING_ROOT")?,
+        )?;
         // CONTROL may send one bounded JSON bearer only after it has verified
         // the readiness attestation. EOF is required before proceeding.
         Some(okx_research_service::edge_runtime::await_supervisor_startup().await?)
