@@ -170,7 +170,7 @@ async fn research_owner_instrument_type_filter_precedes_public_fifty_row_limit()
         )
         .await
         .unwrap_err(),
-        "INVALID_COMMAND"
+        "INVALID_RESEARCH_REQUEST"
     );
     assert_eq!(
         venue.0.load(Ordering::Relaxed),
