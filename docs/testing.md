@@ -6,9 +6,11 @@ For an invalid plan, start with `cargo test --locked -p okx-strategy-core --lib 
 
 On a Draft PR the same selector runs on Linux as `draft-owner-feedback` (YAML job ID `draft-component-tests`). A change to shared configuration, the workflow or an unknown/deleted path expands the Linux checks. The editable loop does not start the Windows release matrix. Ready-for-review, protected checks, verified Research-only releases and exact-tree main reuse remain integration decisions; a successful Draft by itself cannot authorize reuse. Compare cache state, queue and job wall time separately.
 
-Current Ready CI keeps the three protected display names `classify`,
-`linux-core` and `windows-native`. For applicable Rust changes,
-`dependency-audit` must succeed before protected `linux-core` can succeed;
+Current Ready CI emits one target required status `ci` and retains the three
+legacy provenance display names `classify`, `linux-core` and `windows-native`.
+The branch-protection rule must be switched after the new check is observed.
+For applicable Rust changes,
+`dependency-audit` must succeed before `linux-core` and `ci` can succeed;
 docs-only and Edge-only changes require the audit job to be explicitly
 **skipped**. Full Native/Engine changes retain a separate Windows financial
 collector, release builder and four Windows regression suites: `engine`,
