@@ -77,6 +77,18 @@ impl PublicGet for Venue {
     }
 }
 
+#[derive(Default)]
+struct OfflineVenue(AtomicUsize);
+
+impl PublicGet for OfflineVenue {
+    fn get(&self, _path: &'static str, _query: Vec<(&'static str, String)>) -> GetFuture<'_> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Err("RESEARCH_PUBLIC_TRANSPORT_FAILED".into())
+        })
+    }
+}
+
 async fn request(
     service: &AnalyticsService,
     public: &IndependentOkxPublicSource,
@@ -94,6 +106,63 @@ async fn request(
         panic!("expected Research request")
     };
     dispatch(service, public, ResearchCommand::try_from(*request)?).await
+}
+
+#[tokio::test]
+async fn standalone_market_only_runtime_fails_closed_without_engine_or_public_source() {
+    // Disposable Research catalog and a recorded failing GET are the complete
+    // environment: no Engine process, account DB, credentials or network.
+    let root = tempfile::tempdir().unwrap();
+    let venue = Arc::new(OfflineVenue::default());
+    let public = Arc::new(IndependentOkxPublicSource::with_get(venue.clone()));
+    let scope = ResearchScope::new("market-offline-standalone".into()).unwrap();
+    let service = AnalyticsService::new_scoped(
+        root.path().into(),
+        PublicSourceClient::new(public.clone()),
+        &scope,
+    )
+    .unwrap();
+
+    let capabilities = request(&service, &public, json!({"type":"market_capabilities"}))
+        .await
+        .unwrap();
+    assert_eq!(capabilities["effects"]["venue_post"], false);
+    assert_eq!(capabilities["effects"]["write_finance"], false);
+    assert_eq!(venue.0.load(Ordering::Relaxed), 0);
+
+    // A Research identity must never fall back to Engine for private or
+    // account-bound actions, including when no public source is reachable.
+    for operation in [
+        json!({"type":"trade","request":{"action":"capabilities"}}),
+        json!({"type":"strategies","request":{"action":"list"}}),
+        json!({"type":"account_summary"}),
+    ] {
+        assert_eq!(
+            request(&service, &public, operation).await.unwrap_err(),
+            "RESEARCH_OPERATION_FORBIDDEN"
+        );
+    }
+    assert_eq!(venue.0.load(Ordering::Relaxed), 0);
+
+    // An allowed read may use only the independently owned public GET. If it
+    // is unavailable, failure stays local; no financial path or empty result
+    // is fabricated, and no research job is persisted for the failed lookup.
+    let lookup = json!({
+        "type":"find_instruments", "asset":"BTC", "settle_currency":"USDT",
+        "instrument_type":"SWAP"
+    });
+    assert_eq!(
+        request(&service, &public, lookup).await.unwrap_err(),
+        "RESEARCH_PUBLIC_TRANSPORT_FAILED"
+    );
+    assert!(venue.0.load(Ordering::Relaxed) > 0);
+
+    drop(service);
+    let conn = rusqlite::Connection::open(root.path().join("research-catalog.sqlite")).unwrap();
+    let jobs: i64 = conn
+        .query_row("SELECT COUNT(*) FROM research_jobs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(jobs, 0);
 }
 
 #[tokio::test]
