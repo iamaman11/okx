@@ -15,6 +15,8 @@ use okx_ipc_contracts::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
+#[cfg(windows)]
+use zeroize::Zeroizing;
 
 use crate::{
     HostControlError, HostControlResult,
@@ -44,6 +46,94 @@ const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
 const NATIVE_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(300);
 const ENGINE_CONTRACT_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_REPLY_MAX_BYTES: u64 = 4096;
+
+// These are Research's exact historical Credential Manager identity. The
+// CONTROL process writes it directly; no Research EXE ever gets a privileged
+// provisioning invocation (even when installed Research is verified).
+#[cfg(windows)]
+const RESEARCH_CREDENTIAL_SERVICE: &str = "iamaman11.okx-research-service.cloudflare";
+#[cfg(windows)]
+const RESEARCH_CREDENTIAL_ACCOUNT: &str = "runtime-token";
+#[cfg(windows)]
+const RESEARCH_WORKER_MUTEX: &str = r"Global\iamaman11-okx-research-single-worker-v1";
+
+#[cfg(windows)]
+struct ResearchProvisionLease(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl ResearchProvisionLease {
+    fn acquire() -> HostControlResult<Self> {
+        use windows_sys::Win32::{
+            Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
+            System::Threading::CreateMutexW,
+        };
+        let name = RESEARCH_WORKER_MUTEX
+            .encode_utf16()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(HostControlError::ResearchSandboxDenied(
+                "provision_mutex_unavailable",
+            ));
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            return Err(HostControlError::ResearchSandboxDenied(
+                "research_worker_active",
+            ));
+        }
+        Ok(Self(handle))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ResearchProvisionLease {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn research_credential_entry(
+    store: &dyn keyring::api::CredentialStoreApi,
+) -> HostControlResult<keyring::Entry> {
+    store
+        .build(
+            RESEARCH_CREDENTIAL_SERVICE,
+            RESEARCH_CREDENTIAL_ACCOUNT,
+            None,
+        )
+        .map_err(|_| HostControlError::SecretStore("RESEARCH_CREDENTIAL_ENTRY_UNAVAILABLE".into()))
+}
+
+#[cfg(windows)]
+fn write_and_verify_research_credential(
+    entry: &keyring::Entry,
+    bearer: &[u8],
+) -> HostControlResult<()> {
+    let secret = Zeroizing::new(bearer.to_vec());
+    entry
+        .set_secret(&secret)
+        .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
+    let readback = Zeroizing::new(
+        entry
+            .get_secret()
+            .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?,
+    );
+    // The byte comparison and digest deliberately remain local; neither
+    // secret nor readback is serialized into status/errors/logs.
+    if readback.as_slice() != secret.as_slice()
+        || Sha256::digest(readback.as_slice()) != Sha256::digest(secret.as_slice())
+    {
+        return Err(HostControlError::NativeStorageOutcomeUnknown);
+    }
+    Ok(())
+}
 
 fn validate_engine_contract(bytes: &[u8]) -> HostControlResult<()> {
     #[derive(serde::Deserialize)]
@@ -702,8 +792,8 @@ impl HostExecutor {
     }
 
     /// Research has a distinct CredMan target and never sees the Engine bearer.
-    /// The only input to the verified executable is a fresh secret over stdin;
-    /// the returned SHA is public setup evidence, not the bearer itself.
+    /// Provisioning is a CONTROL-owned OS credential-store transaction: the
+    /// Research EXE is NEVER spawned with a privileged --set-edge-token mode.
     fn provision_research_runtime_token(&mut self) -> HostControlResult<Value> {
         #[cfg(not(windows))]
         {
@@ -711,88 +801,33 @@ impl HostExecutor {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
-            use windows_sys::Win32::System::Threading::WaitForSingleObject;
-
+            // The worker and legacy standalone instances acquire this EXACT
+            // OS-wide namespace. Keep it for the ENTIRE write+readback; an
+            // occupied mutex vetoes credential rotation across sessions.
+            let _lease = ResearchProvisionLease::acquire()?;
             self.research.ensure_stopped_for_provision()?;
             let binary = self.research.verified_installed_image()?;
-            let mut random = [0u8; 32];
-            getrandom::fill(&mut random)
+            let mut random = Zeroizing::new([0u8; 32]);
+            getrandom::fill(random.as_mut())
                 .map_err(|error| HostControlError::Random(error.to_string()))?;
-            let mut bearer = String::with_capacity(64);
-            for byte in random {
-                use std::fmt::Write as _;
-                write!(&mut bearer, "{byte:02x}")
-                    .map_err(|error| HostControlError::Random(error.to_string()))?;
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut bearer = Zeroizing::new(String::with_capacity(64));
+            for byte in random.iter().copied() {
+                bearer.push(HEX[(byte >> 4) as usize] as char);
+                bearer.push(HEX[(byte & 0x0f) as usize] as char);
             }
-            random.zeroize();
             let token_sha256 = format!("{:x}", Sha256::digest(bearer.as_bytes()));
-
-            let mut command = hidden_command(&binary);
-            command
-                .env_clear()
-                .arg("--set-edge-token")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            for key in [
-                "SystemRoot",
-                "WINDIR",
-                "USERPROFILE",
-                "APPDATA",
-                "LOCALAPPDATA",
-                "ProgramData",
-                "TEMP",
-                "TMP",
-                "PATH",
-                "HOMEDRIVE",
-                "HOMEPATH",
-            ] {
-                if let Some(value) = std::env::var_os(key) {
-                    command.env(key, value);
-                }
+            let store = windows_native_keyring_store::Store::new().map_err(|_| {
+                HostControlError::SecretStore("RESEARCH_CREDENTIAL_STORE_UNAVAILABLE".into())
+            })?;
+            let entry = research_credential_entry(store.as_ref())?;
+            write_and_verify_research_credential(&entry, bearer.as_bytes())?;
+            // A pointer or EXE transition racing with credential rollover is
+            // not a valid provisioning success. The verifier rechecks installed
+            // SHA-256; it never reads any Engine installed identity.
+            if self.research.verified_installed_image()? != binary {
+                return Err(HostControlError::ResearchIdentityMismatch);
             }
-            let result = (|| -> HostControlResult<()> {
-                let job = AgentJob::new()?;
-                let mut child = command.spawn()?;
-                job.assign(&mut child)?;
-                let send = (|| -> std::io::Result<()> {
-                    let mut input = child.stdin.take().ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::BrokenPipe,
-                            "research provisioner stdin missing",
-                        )
-                    })?;
-                    input.write_all(bearer.as_bytes())?;
-                    input.write_all(b"\n")?;
-                    input.flush()?;
-                    drop(input);
-                    Ok(())
-                })();
-                if let Err(error) = send {
-                    let _ = job.terminate();
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error.into());
-                }
-                let wait = unsafe { WaitForSingleObject(child.as_raw_handle() as _, 15_000) };
-                if wait != WAIT_OBJECT_0 {
-                    let _ = job.terminate();
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    if wait == WAIT_TIMEOUT {
-                        return Err(HostControlError::NativeStorageOutcomeUnknown);
-                    }
-                    return Err(std::io::Error::last_os_error().into());
-                }
-                if !child.wait()?.success() {
-                    return Err(HostControlError::NativeStorageOutcomeUnknown);
-                }
-                Ok(())
-            })();
-            bearer.zeroize();
-            result?;
             Ok(json!({
                 "stored": true,
                 "destination": "Windows Credential Manager (Research-only target)",
@@ -2078,6 +2113,69 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_provisioning_source_never_spawns_privileged_worker() {
+        let source = include_str!("lifecycle_executor.rs");
+        let body = source
+            .split_once("fn provision_research_runtime_token(&mut self)")
+            .unwrap()
+            .1
+            .split_once("fn start_agent(&mut self)")
+            .unwrap()
+            .0;
+        assert!(body.contains("ResearchProvisionLease::acquire"));
+        assert!(body.contains("write_and_verify_research_credential"));
+        assert!(body.contains("verified_installed_image"));
+        for forbidden in [
+            "--set-edge-token",
+            ".spawn(",
+            "Command::spawn",
+            "hidden_command(",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "privileged Research provisioner regression: {forbidden}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn direct_research_keyring_target_is_separate_and_readback_matches() {
+        let mock = keyring::mock::Store::new().unwrap();
+        let entry = research_credential_entry(mock.as_ref()).unwrap();
+        assert!(
+            format!("{entry:?}")
+                .contains("runtime-token.iamaman11.okx-research-service.cloudflare")
+        );
+        assert!(!format!("{entry:?}").contains("iamaman11.okx-agent.cloudflare"));
+        write_and_verify_research_credential(&entry, b"0123456789abcdef0123456789abcdef").unwrap();
+        let readback = Zeroizing::new(entry.get_secret().unwrap());
+        assert_eq!(&readback[..], b"0123456789abcdef0123456789abcdef");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "execute only on an explicitly disposable Windows runner"]
+    fn occupied_cross_thread_research_mutex_vetoes_rotation() {
+        assert_eq!(
+            std::env::var("OKX_DISPOSABLE_WINDOWS_RUNNER").as_deref(),
+            Ok("1")
+        );
+        let _lease = ResearchProvisionLease::acquire().unwrap();
+        let denied = std::thread::spawn(|| {
+            matches!(
+                ResearchProvisionLease::acquire(),
+                Err(HostControlError::ResearchSandboxDenied(
+                    "research_worker_active"
+                ))
+            )
+        })
+        .join()
+        .unwrap();
+        assert!(denied);
+    }
 
     #[test]
     fn research_release_gate_never_requires_a_valid_engine_desired_state() {

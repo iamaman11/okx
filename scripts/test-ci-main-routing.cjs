@@ -22,7 +22,7 @@ const releaseGates = ['trading-engine-acceptance-windows',
 // GitHub REST currently returns the bare workflow path; some GitHub response
 // forms append @ref. Both are canonical, but another workflow is never one.
 const acceptedWorkflowPath = String.raw`test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")`;
-const windowsIpcSummary = String.raw`test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`;
+const windowsIpcSummary = String.raw`test result: ok\. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`;
 const nativeCacheJobs = [
   ['trading_engine_acceptance_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
@@ -128,11 +128,17 @@ function validate(yaml, fileNames) {
   // Research-only changes must not resurrect the four real-child IPC timeouts
   // previously observed when the Windows processes started in parallel. The
   // dedicated harness retains the original 10s receive deadline. One test is
-  // #[cfg(windows)]; Windows must execute all ten, Linux discovers nine.
+  // One #[cfg(windows)] and one #[cfg(not(windows))] test are mutually
+  // exclusive; two new cross-platform negatives require twelve on Windows.
   assert.match(research, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
-  assert.ok(research.includes(windowsIpcSummary), 'RESEARCH_WINDOWS_IPC_EXACT_TEN_ZERO_IGNORED_REQUIRED');
-  assert.match(research, /RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED/);
-  assert.doesNotMatch(research, /RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED|test result: ok\\\. 9 passed/);
+  assert.ok(research.includes(windowsIpcSummary), 'RESEARCH_WINDOWS_IPC_EXACT_TWELVE_ZERO_IGNORED_REQUIRED');
+  assert.match(research, /RESEARCH_IPC_ALL_TWELVE_TESTS_REQUIRED/);
+  assert.match(research, /RESEARCH_PRIVILEGED_CLI_DENIAL_NOT_RUN_\$witness/);
+  for (const witness of [
+    'research_worker_has_no_privileged_credential_store_api_or_dependency',
+    'privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms',
+  ]) assert.match(research, new RegExp(witness));
+  assert.doesNotMatch(research, /RESEARCH_IPC_ALL_(?:TEN|NINE)_TESTS_REQUIRED|test result: ok\\\. (?:10|9) passed/);
   assert.doesNotMatch(research, /cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis\s/,
     'SCOPED_RESEARCH_MUST_NOT_RUN_UNBOUNDED_WORKER_INTEGRATIONS');
   assert.doesNotMatch(classify, /native_required=false[^\n]*CARGO/);
@@ -226,12 +232,18 @@ function validate(yaml, fileNames) {
   assert.match(regression, /WINDOWS_RESEARCH_SECRET_OWNER_WITNESS_NOT_RUN_\$witness/);
   for (const witness of [
     'research_token_validation_is_bounded_and_ascii_only',
-    'research_native_target_is_distinct_from_engine',
-    'mock_store_never_exposes_research_bearer_to_engine_target',
+    'sandbox_ready_attests_only_disposable_canaries_without_secret_material',
     'research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof',
     'installed_research_bearer_is_pinned_to_control_edge_origin',
   ]) assert.match(regression, new RegExp(witness));
   assert.match(regression, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
+  assert.ok(regression.includes(windowsIpcSummary), 'FULL_WINDOWS_RESEARCH_IPC_EXACT_TWELVE_ZERO_IGNORED_REQUIRED');
+  assert.match(regression, /WORKER_IPC_ALL_TWELVE_TESTS_REQUIRED/);
+  assert.match(regression, /WINDOWS_RESEARCH_PRIVILEGED_CLI_DENIAL_NOT_RUN_\$witness/);
+  for (const witness of [
+    'research_worker_has_no_privileged_credential_store_api_or_dependency',
+    'privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms',
+  ]) assert.match(regression, new RegExp(witness));
   assert.match(regression, /cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton/);
   assert.match(regression, /Resolve-Path 'target\/debug\/okx-research-service-test-isolated\.exe'/);
   assert.match(regression, /'execution' \{ 'okx-trade-execution' \}/);
@@ -428,12 +440,14 @@ function validate(yaml, fileNames) {
 
 validate(source, workflows);
 const ipcDeclaredTests = (ipcProcess.match(/^#\[tokio::test\]$/gm) || []).length;
+const ipcPlainTests = (ipcProcess.match(/^#\[test\]$/gm) || []).length;
 const ipcWindowsOnly = (ipcProcess.match(/^#\[cfg\(windows\)\]\n#\[tokio::test\]$/gm) || []).length;
 const ipcNonWindowsOnly = (ipcProcess.match(/^#\[cfg\(not\(windows\)\)\]\n#\[tokio::test\]$/gm) || []).length;
-assert.equal(ipcDeclaredTests, 11, 'RESEARCH_IPC_SOURCE_MUST_DECLARE_EXACT_ELEVEN_TESTS');
+assert.equal(ipcDeclaredTests, 12, 'RESEARCH_IPC_SOURCE_MUST_DECLARE_EXACT_TWELVE_ASYNC_TESTS');
+assert.equal(ipcPlainTests, 1, 'RESEARCH_IPC_SOURCE_MUST_DECLARE_EXACT_ONE_SYNC_TEST');
 assert.equal(ipcNonWindowsOnly, 1, 'RESEARCH_IPC_MUST_ISOLATE_EXACT_ONE_NON_WINDOWS_TEST');
-assert.equal(ipcDeclaredTests - ipcNonWindowsOnly, 10,
-  'WINDOWS_RESEARCH_IPC_MUST_RUN_EXACT_TEN_TESTS');
+assert.equal(ipcDeclaredTests + ipcPlainTests - ipcNonWindowsOnly, 12,
+  'WINDOWS_RESEARCH_IPC_MUST_RUN_EXACT_TWELVE_TESTS');
 assert.equal(ipcWindowsOnly, 1, 'RESEARCH_IPC_MUST_ISOLATE_EXACT_ONE_WINDOWS_TEST');
 assert.doesNotMatch(ipcProcess, /^#\[ignore\]$/m, 'RESEARCH_IPC_CANNOT_CLAIM_IGNORED_TESTS');
 // Exercise the actual path expression extracted independently from each job.
@@ -645,14 +659,29 @@ assert.throws(() => validate(changeJobInput(source, 'research_service_tests_wind
   windowsIpcSummary, String.raw`test result: ok\. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`), workflows),
   'WINDOWS_RESEARCH_IPC_STALE_NINE_MUST_FAIL');
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
-  windowsIpcSummary, String.raw`test result: ok\. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`), workflows),
-  'WINDOWS_RESEARCH_IPC_INVENTED_ELEVEN_MUST_FAIL');
+  windowsIpcSummary, String.raw`test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`), workflows),
+  'WINDOWS_RESEARCH_IPC_STALE_TEN_MUST_FAIL');
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
-  windowsIpcSummary, String.raw`test result: ok\. 10 passed; 0 failed;`), workflows),
+  windowsIpcSummary, String.raw`test result: ok\. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`), workflows),
+  'WINDOWS_RESEARCH_IPC_UNDERCOUNT_ELEVEN_MUST_FAIL');
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  windowsIpcSummary, String.raw`test result: ok\. 12 passed; 0 failed;`), workflows),
   'WINDOWS_RESEARCH_IPC_IGNORED_OR_FILTERED_NOT_ACCEPTED');
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
-  'RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED', 'RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED'), workflows),
+  'RESEARCH_IPC_ALL_TWELVE_TESTS_REQUIRED', 'RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED'), workflows),
   'WINDOWS_RESEARCH_IPC_FAILURE_CODE_CANNOT_DRIFT');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+  windowsIpcSummary, String.raw`test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`), workflows),
+  'FULL_WINDOWS_RESEARCH_IPC_MUST_EXECUTE_ALL_TWELVE');
+for (const id of ['research_service_tests_windows', 'trading_engine_regressions_windows']) {
+  for (const witness of [
+    'research_worker_has_no_privileged_credential_store_api_or_dependency',
+    'privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms',
+  ]) {
+    assert.throws(() => validate(changeJobInput(source, id, witness, 'REMOVED_PRIVILEGED_CLI_NEGATIVE'), workflows),
+      `RESEARCH_PRIVILEGED_CLI_NEGATIVE_REQUIRED:${id}:${witness}`);
+  }
+}
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
   'cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis',
   'cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis'), workflows));

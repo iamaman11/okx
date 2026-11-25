@@ -1138,8 +1138,7 @@ jobs:
           if ($workerTests -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_ANALYTICS_TESTS_MISSING' }
           foreach ($witness in @(
             'research_token_validation_is_bounded_and_ascii_only',
-            'research_native_target_is_distinct_from_engine',
-            'mock_store_never_exposes_research_bearer_to_engine_target',
+            'sandbox_ready_attests_only_disposable_canaries_without_secret_material',
             'research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof',
             'installed_research_bearer_is_pinned_to_control_edge_origin'
           )) {
@@ -1153,7 +1152,18 @@ jobs:
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_IPC_TESTS_MISSING' }
+          $ipcTests = $output -join "`n"
+          if ($ipcTests -notmatch 'test result: ok\. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+            throw 'WORKER_IPC_ALL_TWELVE_TESTS_REQUIRED'
+          }
+          foreach ($witness in @(
+            'research_worker_has_no_privileged_credential_store_api_or_dependency',
+            'privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms'
+          )) {
+            if ($ipcTests -notmatch ('test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok')) {
+              throw "WINDOWS_RESEARCH_PRIVILEGED_CLI_DENIAL_NOT_RUN_$witness"
+            }
+          }
 
       - name: Agent dispatch to actual research child
         if: matrix.suite == 'engine'
@@ -1254,8 +1264,16 @@ jobs:
           $code = $LASTEXITCODE
           $ipcOutput | Tee-Object -FilePath $ownerLog -Append
           if ($code -ne 0) { exit $code }
-          if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
-            throw 'RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED'
+          if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+            throw 'RESEARCH_IPC_ALL_TWELVE_TESTS_REQUIRED'
+          }
+          foreach ($witness in @(
+            'research_worker_has_no_privileged_credential_store_api_or_dependency',
+            'privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms'
+          )) {
+            if (($ipcOutput -join "`n") -notmatch ('test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok')) {
+              throw "RESEARCH_PRIVILEGED_CLI_DENIAL_NOT_RUN_$witness"
+            }
           }
           cargo test --locked -p okx-research-service --doc 2>&1 |
             Tee-Object -FilePath $ownerLog -Append
@@ -1263,8 +1281,7 @@ jobs:
           $passed = Get-Content -LiteralPath $ownerLog -Raw
           foreach ($witness in @(
             'research_token_validation_is_bounded_and_ascii_only',
-            'research_native_target_is_distinct_from_engine',
-            'mock_store_never_exposes_research_bearer_to_engine_target',
+            'sandbox_ready_attests_only_disposable_canaries_without_secret_material',
             'research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof',
             'installed_research_bearer_is_pinned_to_control_edge_origin'
           )) {

@@ -43,8 +43,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
-keyring = { package = "keyring-core", version = "1" }
-windows-native-keyring-store = "1.1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",

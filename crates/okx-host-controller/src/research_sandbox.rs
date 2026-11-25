@@ -73,7 +73,7 @@ mod native {
     use std::{
         ffi::{OsStr, c_void},
         fs::{self, File},
-        io::{Read, Write},
+        io::Write,
         mem::{size_of, zeroed},
         os::windows::{
             ffi::OsStrExt,
@@ -364,7 +364,7 @@ mod native {
         if count.is_null() || unsafe { *count } == 0 {
             return Err(denied("token_integrity"));
         }
-        let sub = unsafe { GetSidSubAuthority(label.Label.Sid, (unsafe { *count } - 1) as u32) };
+        let sub = unsafe { GetSidSubAuthority(label.Label.Sid, (*count - 1) as u32) };
         if sub.is_null() || unsafe { *sub } > 0x1000 {
             return Err(denied("token_integrity"));
         }
@@ -539,13 +539,12 @@ mod native {
                 {
                     return Err(denied("acl_all_application_packages"));
                 }
-                if let Some(expected) = package_sid {
-                    if unsafe { EqualSid(sid, expected) } != 0
-                        && header.AceFlags & 0x10 == 0
-                        && allow.Mask != 0
-                    {
-                        exact_package_granted = true;
-                    }
+                if let Some(expected) = package_sid
+                    && unsafe { EqualSid(sid, expected) } != 0
+                    && header.AceFlags & 0x10 == 0
+                    && allow.Mask != 0
+                {
+                    exact_package_granted = true;
                 }
             } else if matches!(
                 header.AceType,
@@ -1123,11 +1122,11 @@ mod native {
             }
         }
         let child_handles = [raw(&stdin_read), raw(&stdout_write), raw(&stderr_nul)];
-        let mut policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+        let policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
         let mut attributes = Attributes::new()?;
         attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
         attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &child_handles)?;
-        attributes.set(windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &mut policy)?;
+        attributes.set(windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &policy)?;
 
         let cwd = executable
             .parent()
@@ -1229,7 +1228,11 @@ mod native {
         if can_access(raw(&token), &finance.path, 0x1)? {
             return Err(denied("synthetic_finance_canary_readable"));
         }
-        job.assign_raw_process(raw(&process))?;
+        // The RAII OwnedHandle remains valid and KillOnFailure owns the
+        // suspended process until the Job assignment succeeds.
+        unsafe {
+            job.assign_raw_process(raw(&process))?;
+        }
         if unsafe { ResumeThread(raw(&thread)) } == u32::MAX {
             return Err(denied("resume_research_thread"));
         }

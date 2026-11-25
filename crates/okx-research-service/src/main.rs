@@ -47,20 +47,18 @@ fn exit_code(error: &str) -> i32 {
         | "RESEARCH_STARTUP_BEARER_INVALID"
         | "RESEARCH_SANDBOX_ATTESTATION_INVALID"
         | "RESEARCH_SANDBOX_CREDMAN_EXPOSED"
-        | "RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED" => 76,
+        | "RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED"
+        | "RESEARCH_EDGE_PROVISIONER_DISABLED" => 76,
         _ => 1,
     }
 }
 async fn run() -> Result<(), String> {
     let all_args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if all_args
-        .first()
-        .is_some_and(|arg| arg == "--set-edge-token")
-    {
-        if all_args.len() != 1 {
-            return Err("INVALID_ARGUMENT".into());
-        }
-        return provision_research_edge_token();
+    // Credential ownership belongs exclusively to CONTROL. Reject the old
+    // privileged Worker entry point before touching stdin, a catalog, a Job,
+    // or Credential Manager, including when the flag appears after arguments.
+    if all_args.iter().any(|arg| arg == "--set-edge-token") {
+        return Err("RESEARCH_EDGE_PROVISIONER_DISABLED".into());
     }
     if all_args
         .first()
@@ -103,10 +101,8 @@ async fn run() -> Result<(), String> {
     if existing_catalog && !edge_runtime {
         return Err("INVALID_ARGUMENT".into());
     }
-    if edge_runtime {
-        if independent_source || market_request || root.is_none() || scope.is_none() {
-            return Err("INVALID_ARGUMENT".into());
-        }
+    if edge_runtime && (independent_source || market_request || root.is_none() || scope.is_none()) {
+        return Err("INVALID_ARGUMENT".into());
     }
     // Scoped to this Research process. Do not run the Worker without its OS
     // memory and CPU fences on Windows; Finance/Engine retain their own owners.
@@ -156,30 +152,6 @@ async fn run() -> Result<(), String> {
     } else {
         okx_research_service::ipc::serve(input, output, root, scope).await
     }
-}
-
-/// Single-purpose credential provisioner: no root, scope, inherited Engine
-/// credential, bearer argv value, process ownership or financial state.
-/// CONTROL sends a freshly generated Research bearer through stdin and reads
-/// only the exit status; neither stdout nor logs echo the token or its hash.
-fn provision_research_edge_token() -> Result<(), String> {
-    use std::io::Read as _;
-    let mut token = zeroize::Zeroizing::new(Vec::new());
-    std::io::stdin()
-        .take(1027)
-        .read_to_end(&mut token)
-        .map_err(|_| "RESEARCH_EDGE_TOKEN_STDIN_READ_FAILED")?;
-    if token.ends_with(b"\r\n") {
-        let without_crlf = token.len() - 2;
-        token.truncate(without_crlf);
-    } else if token.ends_with(b"\n") {
-        token.pop();
-    }
-    // CONTROL normally denies rotation while Research is running. The native
-    // provisioner enforces the same rule even when invoked directly, without
-    // requiring the financial Engine or opening the Research catalog.
-    let _exclusive = okx_research_service::process_memory::ResearchInstanceLease::acquire()?;
-    okx_research_service::edge_credentials::store(&token)
 }
 
 /// Read one MarketRequest as JSON from stdin and write the Research result.
@@ -262,6 +234,7 @@ mod tests {
             ("RESEARCH_SANDBOX_ATTESTATION_INVALID", 76),
             ("RESEARCH_SANDBOX_CREDMAN_EXPOSED", 76),
             ("RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED", 76),
+            ("RESEARCH_EDGE_PROVISIONER_DISABLED", 76),
         ] {
             assert_eq!(exit_code(reason), expected, "{reason}");
         }

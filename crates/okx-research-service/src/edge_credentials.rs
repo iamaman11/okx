@@ -1,61 +1,9 @@
-//! Deprecated Research-only Windows Credential Manager provisioner and native
-//! sandbox witness. The `--edge-runtime` worker NEVER reads Credential Manager
-//! for its bearer: CONTROL transmits a one-shot secret after child attestation.
-//! The legacy provisioner remains separate pending an explicit migration.
-#[cfg(windows)]
-use keyring::api::CredentialStoreApi;
-use zeroize::Zeroizing;
-
-pub const RESEARCH_CLOUDFLARE_SERVICE: &str = "iamaman11.okx-research-service.cloudflare";
-pub const RESEARCH_CLOUDFLARE_USER: &str = "runtime-token";
+//! Research bearer syntax and the restricted child's disposable sandbox proof.
+//! Research has no runtime Credential Manager store/read API: CONTROL owns
+//! provisioning and only transmits a one-shot token after child attestation.
 
 pub fn valid_token(token: &[u8]) -> bool {
     (32..=1024).contains(&token.len()) && token.iter().all(u8::is_ascii_graphic)
-}
-
-/// Native one-shot provisioning. The caller supplies bytes through stdin and
-/// zeroizes them after this function returns; nothing is logged or echoed.
-pub fn store(token: &[u8]) -> Result<(), String> {
-    if !valid_token(token) {
-        return Err("RESEARCH_EDGE_TOKEN_INVALID".into());
-    }
-    #[cfg(windows)]
-    {
-        entry()?
-            .set_secret(token)
-            .map_err(|_| "RESEARCH_EDGE_CREDENTIAL_STORE_FAILED".to_owned())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = token;
-        Err("RESEARCH_EDGE_CREDENTIAL_PLATFORM_UNSUPPORTED".into())
-    }
-}
-
-/// Deprecated credential read helper, retained only for provisioning migration.
-/// The Research Edge runtime does NOT call this helper.
-pub fn load() -> Result<Zeroizing<String>, String> {
-    #[cfg(windows)]
-    {
-        let secret = Zeroizing::new(match entry()?.get_secret() {
-            Ok(secret) => secret,
-            Err(keyring::Error::NoEntry) => {
-                return Err("RESEARCH_EDGE_CREDENTIAL_NOT_FOUND".into());
-            }
-            Err(_) => return Err("RESEARCH_EDGE_CREDENTIAL_READ_FAILED".into()),
-        });
-        if !valid_token(&secret) {
-            return Err("RESEARCH_EDGE_TOKEN_INVALID".into());
-        }
-        let token = std::str::from_utf8(&secret)
-            .map_err(|_| "RESEARCH_EDGE_TOKEN_INVALID")?
-            .to_owned();
-        Ok(Zeroizing::new(token))
-    }
-    #[cfg(not(windows))]
-    {
-        Err("RESEARCH_EDGE_CREDENTIAL_PLATFORM_UNSUPPORTED".into())
-    }
 }
 
 #[cfg(any(test, windows))]
@@ -191,20 +139,6 @@ pub fn attest_startup_sandbox() -> Result<(), String> {
         .map_err(|_| "RESEARCH_SANDBOX_ATTESTATION_INVALID".to_owned())
 }
 
-#[cfg(windows)]
-fn entry() -> Result<keyring::Entry, String> {
-    let store = windows_native_keyring_store::Store::new()
-        .map_err(|_| "RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE")?;
-    entry_from_store(store.as_ref())
-}
-
-#[cfg(windows)]
-fn entry_from_store(store: &dyn CredentialStoreApi) -> Result<keyring::Entry, String> {
-    store
-        .build(RESEARCH_CLOUDFLARE_SERVICE, RESEARCH_CLOUDFLARE_USER, None)
-        .map_err(|_| "RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE".into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,10 +163,6 @@ mod tests {
         ] {
             assert!(!valid_token(&invalid));
         }
-        assert_ne!(
-            RESEARCH_CLOUDFLARE_SERVICE,
-            "iamaman11.okx-agent.cloudflare"
-        );
     }
 
     #[test]
@@ -265,36 +195,5 @@ mod tests {
         assert!(value.get("bearer").is_none());
         assert!(value.get("canary").is_none());
         assert!(value.get("path").is_none());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn research_native_target_is_distinct_from_engine() {
-        let native = windows_native_keyring_store::Store::new().unwrap();
-        let entry = entry_from_store(native.as_ref()).unwrap();
-        let target = format!("{entry:?}");
-        assert!(target.contains("runtime-token.iamaman11.okx-research-service.cloudflare"));
-        assert!(!target.contains("runtime-token.iamaman11.okx-agent.cloudflare"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn mock_store_never_exposes_research_bearer_to_engine_target() {
-        let store = keyring::mock::Store::new().unwrap();
-        let research = entry_from_store(store.as_ref()).unwrap();
-        research
-            .set_secret(b"research-only-secret-value-0123456789")
-            .unwrap();
-        assert_eq!(
-            entry_from_store(store.as_ref())
-                .unwrap()
-                .get_secret()
-                .unwrap(),
-            b"research-only-secret-value-0123456789"
-        );
-        let engine = store
-            .build("iamaman11.okx-agent.cloudflare", "runtime-token", None)
-            .unwrap();
-        assert!(matches!(engine.get_secret(), Err(keyring::Error::NoEntry)));
     }
 }

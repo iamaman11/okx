@@ -312,8 +312,11 @@ def _self_test() -> None:
         ),
         "crates/okx-research-service/src/edge_credentials.rs": (
             "research_token_validation_is_bounded_and_ascii_only",
-            "research_native_target_is_distinct_from_engine",
-            "mock_store_never_exposes_research_bearer_to_engine_target",
+            "sandbox_ready_attests_only_disposable_canaries_without_secret_material",
+        ),
+        "crates/okx-research-service/tests/ipc_process.rs": (
+            "research_worker_has_no_privileged_credential_store_api_or_dependency",
+            "privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms",
         ),
         "crates/okx-research-service/src/edge_runtime.rs": (
             "research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof",
@@ -363,12 +366,15 @@ def _self_test() -> None:
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
     for witness in (
         "research_token_validation_is_bounded_and_ascii_only",
-        "research_native_target_is_distinct_from_engine",
-        "mock_store_never_exposes_research_bearer_to_engine_target",
+        "sandbox_ready_attests_only_disposable_canaries_without_secret_material",
         "research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof",
         "installed_research_bearer_is_pinned_to_control_edge_origin",
+        "research_worker_has_no_privileged_credential_store_api_or_dependency",
+        "privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms",
     ):
         assert witness in research, f"RESEARCH_WINDOWS_SECRET_WITNESS_REQUIRED:{witness}"
+    assert "RESEARCH_IPC_ALL_TWELVE_TESTS_REQUIRED" in research
+    assert "test result: ok\\. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;" in research
     assert "cargo fmt --all -- --check" in research, "SCOPED_RESEARCH_MUST_VERIFY_RUST_FORMATTING"
     # Reuse the same established Cargo cache action and one target directory.
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
