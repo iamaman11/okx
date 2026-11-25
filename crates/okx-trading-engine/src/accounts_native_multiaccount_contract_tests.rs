@@ -45,6 +45,48 @@ async fn capture(account: &AccountResources) {
     .expect("original signed account source capture on the installation owner");
 }
 
+// A real source capture may occupy its unchanged 10s admission window, while
+// the original SQL NAV is deliberately valid for only five seconds. Under
+// concurrent Windows financial witnesses one account can become stale before
+// both public CapitalAssign calls reach the writer. The same refusal also
+// covers incomplete/recovering source state; never interpret it as proof of
+// freshness. Retry ONLY that exact pre-mutation code after another real signed
+// capture; the same operation ID/hash must pass all production checks.
+async fn assign_with_bounded_real_recapture(
+    fixture: &NativeFixture,
+    account: &AccountResources,
+    alias: &str,
+    request: &StrategyRequest,
+) -> Result<serde_json::Value, String> {
+    const MAX_SOURCE_RECAPTURES: usize = 2;
+    let recapture_until = Instant::now() + Duration::from_secs(25);
+    for attempt in 0..=MAX_SOURCE_RECAPTURES {
+        match fixture
+            .trade
+            .strategies(alias, request, Some(&fixture.authority))
+            .await
+        {
+            Err(reason)
+                if reason == "ACCOUNT_CAPITAL_SOURCE_INCOMPLETE_OR_STALE"
+                    && attempt < MAX_SOURCE_RECAPTURES =>
+            {
+                if Instant::now() >= recapture_until {
+                    return Err("TEST_SIGNED_NAV_RECAPTURE_WINDOW_EXPIRED".into());
+                }
+                eprintln!(
+                    "TEST_ONLY_SIGNED_NAV_RECAPTURE account={alias} attempt={} cause={reason}",
+                    attempt + 1
+                );
+                tokio::time::timeout_at(recapture_until.into(), capture(account))
+                    .await
+                    .map_err(|_| "TEST_SIGNED_NAV_RECAPTURE_WINDOW_EXPIRED".to_owned())?;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the bounded CapitalAssign retry loop must return")
+}
+
 #[tokio::test]
 async fn risk_book_contract_native_two_accounts_share_budget_and_isolate_public_capital_receipts() {
     let fixture = fixture_for_accounts(&["a", "b"]).await;
@@ -159,12 +201,8 @@ async fn risk_book_contract_native_two_accounts_share_budget_and_isolate_public_
     // Same operation ID, different actual account-backed principal. The
     // production writer conserves each account's own two assignment legs.
     let (assigned_a, assigned_b) = tokio::join!(
-        fixture
-            .trade
-            .strategies("fixture-a", &assign_a, Some(&fixture.authority)),
-        fixture
-            .trade
-            .strategies("fixture-b", &assign_b, Some(&fixture.authority)),
+        assign_with_bounded_real_recapture(&fixture, &a, "fixture-a", &assign_a),
+        assign_with_bounded_real_recapture(&fixture, &b, "fixture-b", &assign_b),
     );
     let assigned_a = assigned_a.expect("public capital assignment A");
     let assigned_b = assigned_b.expect("public capital assignment B");
