@@ -1,8 +1,11 @@
 # Native CI ownership and build boundaries (#537)
 
-The protected checks `classify`, `linux-core` and `windows-native` stay required. They
-aggregate different **executed** jobs; a skipped financial matrix is not
-reported as a successful financial test run.
+The target branch-protection rule requires only `ci`. It fails closed unless
+`classify`, `linux-core` and `windows-native` all succeed. The three legacy
+display names remain in the workflow for installed CONTROL Research-v1
+provenance and publisher checks; GitHub branch protection must be migrated
+after `ci` appears on a successful Ready PR. Skipped financial tests are never
+reported as an executed financial test run.
 
 **One automatic CI for `main`:** `.github/workflows/ci.yml` runs the protected
 checks and, only after their success, the optional Native-base publication job.
@@ -99,7 +102,7 @@ Acceptance controls:
    that job compiles both host owner/consumer crates, never Agent/Execution.
 2. A shared IPC, Cargo manifest, SQL or Engine diff selects full financial CI.
 3. A mixed host and non-host diff cannot inherit the cheap host path.
-4. Existing protected aggregate names remain, and the host-only branch fails
+4. Existing provenance aggregate names remain, and the host-only branch fails
    if its specific Windows job fails or is skipped.
 5. Changes to these classifier/workflow/architecture rules themselves select
    `full`; the first adoption therefore requires existing full acceptance.

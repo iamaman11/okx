@@ -289,7 +289,7 @@ jobs:
               while read -r run attempt; do
                 [[ -n "$run" ]] || continue
                 jobs="$(gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/actions/runs/$run/attempts/$attempt/jobs?per_page=100")"
-                if jq -e '[.[].jobs[] | select(.conclusion == "success") | .name] | index("linux-core") != null and index("windows-native") != null' <<<"$jobs" >/dev/null; then
+                if jq -e '[.[].jobs[] | select(.conclusion == "success") | .name] | index("ci") != null and index("linux-core") != null and index("windows-native") != null' <<<"$jobs" >/dev/null; then
                   successful_pr_ci=1
                   break
                 fi
@@ -1445,7 +1445,8 @@ jobs:
 
 
   required_windows:
-    # This exact name remains the protected main required check. It succeeds
+    # Legacy provenance and branch-protection name during the single-ci rollout.
+    # It succeeds
     # on a real Windows gate or on the narrowly proven identical native tree;
     # it never reports a newly executed 26/26 on the reuse path.
     name: windows-native
@@ -1524,6 +1525,26 @@ jobs:
             echo "WINDOWS_NATIVE_PROOF=FULL_WINDOWS_NATIVE_SUCCESS"
             echo "WINDOWS_NATIVE_EXECUTED_IN_THIS_RUN=true"
           fi
+
+  required_ci:
+    # The only *target* main branch-protection check. Keep the old Linux and
+    # Windows result jobs for the installed CONTROL's versioned Research-v1
+    # artifact verifier and the first-attempt release provenance contract.
+    # GitHub treats a skipped dependency as success in some branch rules, so
+    # the result is explicit and fails closed on missing/cancelled checks.
+    name: ci
+    needs: [component_impact, required_linux, required_windows]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful scoped CI and both provenance gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ needs.component_impact.result }}" = "success"
+          test "${{ needs.required_linux.result }}" = "success"
+          test "${{ needs.required_windows.result }}" = "success"
+          echo "CI=PASS; only scoped owner checks were executed"
 
   # Build the four-component Windows artifact in parallel with acceptance.
   trading_engine_build_windows:
@@ -1795,7 +1816,7 @@ jobs:
   # Successful protected main checks publish the verified PR artifact here.
   publish_accepted_windows_release:
     name: publish-accepted-windows-release
-    needs: [dependency-audit, component_impact, required_linux, required_windows]
+    needs: [dependency-audit, component_impact, required_linux, required_windows, required_ci]
     permissions:
       contents: write
       actions: read
@@ -1817,7 +1838,8 @@ jobs:
         needs['dependency-audit'].result == 'success' &&
         needs.component_impact.result == 'success' &&
         needs.required_linux.result == 'success' &&
-        needs.required_windows.result == 'success'
+        needs.required_windows.result == 'success' &&
+        needs.required_ci.result == 'success'
       }}
     runs-on: ubuntu-latest
     env:
@@ -1868,7 +1890,7 @@ jobs:
                      "trading-engine-acceptance-windows", "trading-engine-regressions-windows (engine)",
                      "trading-engine-regressions-windows (host)", "trading-engine-regressions-windows (execution)",
                      "trading-engine-regressions-windows (research)",
-                     "trading-engine-build-windows", "linux-core", "windows-native"][];
+                     "trading-engine-build-windows", "linux-core", "windows-native", "ci"][];
                     . as $name | $ok | index($name) != null))
             ' <<<"$jobs" >/dev/null; then
               continue
@@ -1988,7 +2010,7 @@ jobs:
   # native-base lookup, or ZIP repack is permitted on main.
   publish_accepted_research_component:
     name: publish-accepted-research-component
-    needs: [dependency-audit, component_impact, required_linux, required_windows]
+    needs: [dependency-audit, component_impact, required_linux, required_windows, required_ci]
     permissions:
       contents: write
       actions: read
@@ -2007,7 +2029,8 @@ jobs:
         needs['dependency-audit'].result == 'success' &&
         needs.component_impact.result == 'success' &&
         needs.required_linux.result == 'success' &&
-        needs.required_windows.result == 'success'
+        needs.required_windows.result == 'success' &&
+        needs.required_ci.result == 'success'
       }}
     runs-on: ubuntu-latest
     env:
@@ -2055,7 +2078,7 @@ jobs:
               ([.jobs[] | select(.conclusion == "success") | .name] as $ok |
                 all(["classify", "dependency-audit", "architecture-contracts",
                      "research-service-tests-windows", "cloudflare-mcp-contracts",
-                     "linux-core", "windows-native"][]; . as $needed | $ok | index($needed) != null))
+                     "linux-core", "windows-native", "ci"][]; . as $needed | $ok | index($needed) != null))
             ' <<<"$jobs" >/dev/null; then
               continue
             fi

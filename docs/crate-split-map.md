@@ -101,8 +101,10 @@ RiskBook, финансовый SQLite/WAL, допуск и исполнение 
 | Только документация или только Cloudflare MCP | Существующий маршрут соответствующего компонента, без запуска Windows-сборки |
 | Общий IPC, Domain Core, Engine/Execution, корневой Cargo, манифест нового Host-протокола, CI или неполный diff | Полный маршрут с финансовыми проверками. Для разрешённых манифестов Research или Host Controller/Launcher есть отдельный допуск по совпадению Windows Cargo closures |
 
-Единый [workflow](../.github/workflows/ci.yml) сохраняет обязательные
-`classify`, `linux-core` и `windows-native`. Узкие Rust-маршруты задают
+Единый [workflow](../.github/workflows/ci.yml) выдаёт один целевой обязательный
+статус `ci`. Внутренние `classify`, `linux-core` и `windows-native`
+сохранены для проверки происхождения артефактов установленным CONTROL.
+Узкие Rust-маршруты задают
 явные пакеты для `cargo test`, `cargo clippy` и `cargo build`.
 [`check_ci_native_scope.py`](../scripts/check_ci_native_scope.py)
 проверяет полный diff. Сомнительный путь, переименование или неполные
