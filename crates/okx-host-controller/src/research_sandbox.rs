@@ -1215,6 +1215,16 @@ mod native {
             75 => "worker_startup_credential_unavailable_before_ready",
             76 => "worker_startup_auth_or_sandbox_denied_before_ready",
             77 => "worker_resource_job_unavailable_before_ready",
+            78 => "worker_sandbox_attestation_invalid_before_ready",
+            79 => "worker_credman_canary_exposed_before_ready",
+            80 => "worker_finance_canary_exposed_before_ready",
+            81 => "worker_image_acl_exposed_before_ready",
+            82 => "worker_catalog_acl_exposed_before_ready",
+            83 => "worker_credman_read_probe_unexpected_before_ready",
+            84 => "worker_credman_enum_probe_unexpected_before_ready",
+            85 => "worker_finance_probe_unexpected_before_ready",
+            86 => "worker_image_probe_unexpected_before_ready",
+            87 => "worker_catalog_probe_unexpected_before_ready",
             _ => "worker_terminated_before_ready",
         }
     }
@@ -1755,6 +1765,20 @@ mod native {
                 readiness_exit_stage(77),
                 "worker_resource_job_unavailable_before_ready"
             );
+            for (code, stage) in [
+                (78, "worker_sandbox_attestation_invalid_before_ready"),
+                (79, "worker_credman_canary_exposed_before_ready"),
+                (80, "worker_finance_canary_exposed_before_ready"),
+                (81, "worker_image_acl_exposed_before_ready"),
+                (82, "worker_catalog_acl_exposed_before_ready"),
+                (83, "worker_credman_read_probe_unexpected_before_ready"),
+                (84, "worker_credman_enum_probe_unexpected_before_ready"),
+                (85, "worker_finance_probe_unexpected_before_ready"),
+                (86, "worker_image_probe_unexpected_before_ready"),
+                (87, "worker_catalog_probe_unexpected_before_ready"),
+            ] {
+                assert_eq!(readiness_exit_stage(code), stage);
+            }
         }
 
         #[test]

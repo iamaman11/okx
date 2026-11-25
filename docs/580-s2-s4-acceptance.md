@@ -76,6 +76,27 @@ Ready/merge security PR или включать отдельный Research toke
 типизированный отказ до переключения; допустимая virgin установка или
 отдельно согласованное контролируемое восстановление.
 
+### Наблюдаемый Windows-прогресс PR #596 (25.11.2026)
+
+Все четыре opt-in запуска `research-lpac-disposable-windows` завершились
+**FAIL**, не S2 PASS. В каждом выполнены **5/5** отдельных ACL-тестов с
+именованными witness lines, но шестой физический suspended-LPAC → Job → READY
+тест не прошёл:
+
+| Windows run / точный PR HEAD | Что реально наблюдалось | Итог |
+| --- | --- | --- |
+| [45700697746](https://github.com/iamaman11/okx/actions/runs/45700697746), `3159f17d` | ACL **5/5**; image preflight отказал `research_installed_image_mutable` | `FAIL`, запуск ребёнка до READY не доказан |
+| [45701532922](https://github.com/iamaman11/okx/actions/runs/45701532922), `1da1c6ff` | ACL **5/5**; диагностика показала `FILE_READ_EA=0x8`, ошибочно считавшийся mutable; настоящий `FILE_WRITE_ATTRIBUTES=0x100` остаётся write right | `FAIL`; после уточнения маски image gate требует повторного прогона |
+| [45702285358](https://github.com/iamaman11/okx/actions/runs/45702285358), `ef151fca` | После исправления read-EA image gate пройден; физический тест остановился на `ResearchSandboxDenied("worker_ready_pipe")`, ACL **5/5** | `FAIL`, READY не доказан |
+| [45703166591](https://github.com/iamaman11/okx/actions/runs/45703166591), `9b87029b` | ACL **5/5**; typed отказ `worker_startup_auth_or_sandbox_denied_before_ready` (код дочернего процесса **76**) | `FAIL`, ребёнок завершился до READY |
+
+В текущем кандидате добавлены отдельные typed child exit **75–87**
+для локализации первой отказавшей стадии. Их новый разбор пока **не проверен
+физическим прогоном**. Наличие ACL witness не доказывает успешный LPAC token/Job,
+READY/bearer, parent-positive/child-negative CredMan/finance canary,
+restart/rollback или установленный CONTROL. `S2 PHYSICAL_DENY=NOT_PROVEN`;
+отдельные 62 финансовых контракта / 107 свидетелей этим smoke не заменяются.
+
 ### Контракт одноразового Windows-свидетельства S2
 
 GitHub-hosted `windows-latest` создаёт отдельную Windows VM для стандартного

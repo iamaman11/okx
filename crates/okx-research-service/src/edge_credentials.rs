@@ -88,6 +88,7 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
         access: u32,
         flags: u32,
         exposed_code: &str,
+        unexpected_code: &str,
     ) -> Result<(), String> {
         let wide = to_wide(path.as_os_str());
         // SAFETY: a NUL-terminated, owned path is kept live for CreateFileW;
@@ -109,7 +110,7 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
         }
         if unsafe { GetLastError() } != ERROR_ACCESS_DENIED {
             // Sharing violations and missing paths are not ACL evidence.
-            return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+            return Err(unexpected_code.into());
         }
         Ok(())
     }
@@ -145,7 +146,7 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
     }
     let read_error = unsafe { GetLastError() };
     if !denied_or_missing(read_error) {
-        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+        return Err("RESEARCH_SANDBOX_CREDMAN_READ_UNEXPECTED".into());
     }
 
     let mut count = 0u32;
@@ -158,7 +159,7 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
     }
     let enumerate_error = unsafe { GetLastError() };
     if !denied_or_missing(enumerate_error) {
-        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+        return Err("RESEARCH_SANDBOX_CREDMAN_ENUM_UNEXPECTED".into());
     }
 
     // Research has no write/delete Credential Manager APIs. The parent owns
@@ -172,6 +173,7 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
             access,
             FILE_ATTRIBUTE_NORMAL,
             "RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED",
+            "RESEARCH_SANDBOX_FINANCE_PROBE_UNEXPECTED",
         )?;
     }
     for access in [WRITE_DAC, WRITE_OWNER] {
@@ -180,12 +182,14 @@ pub fn attest_startup_sandbox(catalog_root: &std::path::Path) -> Result<(), Stri
             access,
             FILE_ATTRIBUTE_NORMAL,
             "RESEARCH_SANDBOX_IMAGE_ACL_EXPOSED",
+            "RESEARCH_SANDBOX_IMAGE_PROBE_UNEXPECTED",
         )?;
         require_access_denied(
             catalog_root,
             access,
             FILE_FLAG_BACKUP_SEMANTICS,
             "RESEARCH_SANDBOX_CATALOG_ACL_EXPOSED",
+            "RESEARCH_SANDBOX_CATALOG_PROBE_UNEXPECTED",
         )?;
     }
 
