@@ -29,7 +29,7 @@ pub(crate) async fn market_microstructure(
     summarize(&bytes, instrument, size_contracts, now)
 }
 
-fn validate_request(instrument: &str, size: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_request(instrument: &str, size: Option<&str>) -> Result<(), String> {
     if instrument.is_empty()
         || instrument.len() > 64
         || !instrument
@@ -129,39 +129,7 @@ fn summarize(
     }
     let asks = side(&book.asks, true)?;
     let bids = side(&book.bids, false)?;
-    let ask = asks[0].0;
-    let bid = bids[0].0;
-    if ask <= bid {
-        return Err("BOOK_SPREAD_INVALID".into());
-    }
-    let spread = ask
-        .checked_sub(bid)
-        .and_then(|v| v.checked_mul(Decimal::from(20_000)))
-        .and_then(|v| bid.checked_add(ask).and_then(|sum| v.checked_div(sum)))
-        .ok_or("BOOK_OVERFLOW")?
-        .normalize()
-        .to_string();
-    let sweep_result = size
-        .map(|size| {
-            let qty = Decimal::from_str_exact(size).map_err(|_| "SIZE_INVALID")?;
-            let buy = sweep(&asks, qty)?;
-            let sell = sweep(&bids, qty)?;
-            let impact = |delta: Decimal, base: Decimal| {
-                delta
-                    .checked_mul(Decimal::from(10_000))
-                    .and_then(|value| value.checked_div(base))
-                    .map(|value| value.normalize().to_string())
-                    .ok_or("BOOK_OVERFLOW")
-            };
-            Ok::<_, String>(json!({
-                "size_contracts": size,
-                "buy_vwap": buy.normalize().to_string(),
-                "sell_vwap": sell.normalize().to_string(),
-                "buy_impact_bps": impact(buy - ask, ask)?,
-                "sell_impact_bps": impact(bid - sell, bid)?,
-            }))
-        })
-        .transpose()?;
+    let (spread, sweep_result) = calculate(&asks, &bids, size)?;
     let levels = |items: &[(Decimal, Decimal, BookLevel)]| {
         items
             .iter()
@@ -186,6 +154,114 @@ fn summarize(
         "index_price": null,
         "funding": null,
         "open_interest": null,
+    }))
+}
+
+fn calculate(
+    asks: &[(Decimal, Decimal, BookLevel)],
+    bids: &[(Decimal, Decimal, BookLevel)],
+    size: Option<&str>,
+) -> Result<(String, Option<Value>), String> {
+    let ask = asks[0].0;
+    let bid = bids[0].0;
+    if ask <= bid {
+        return Err("BOOK_SPREAD_INVALID".into());
+    }
+    let spread = ask
+        .checked_sub(bid)
+        .and_then(|v| v.checked_mul(Decimal::from(20_000)))
+        .and_then(|v| bid.checked_add(ask).and_then(|sum| v.checked_div(sum)))
+        .ok_or("BOOK_OVERFLOW")?
+        .normalize()
+        .to_string();
+    let sweep_result = size
+        .map(|size| {
+            let qty = Decimal::from_str_exact(size).map_err(|_| "SIZE_INVALID")?;
+            let buy = sweep(asks, qty)?;
+            let sell = sweep(bids, qty)?;
+            let impact = |delta: Decimal, base: Decimal| {
+                delta
+                    .checked_mul(Decimal::from(10_000))
+                    .and_then(|value| value.checked_div(base))
+                    .map(|value| value.normalize().to_string())
+                    .ok_or("BOOK_OVERFLOW")
+            };
+            Ok::<_, String>(json!({
+                "size_contracts": size,
+                "buy_vwap": buy.normalize().to_string(),
+                "sell_vwap": sell.normalize().to_string(),
+                "buy_impact_bps": impact(buy - ask, ask)?,
+                "sell_impact_bps": impact(bid - sell, bid)?,
+            }))
+        })
+        .transpose()?;
+    Ok((spread, sweep_result))
+}
+
+fn ws_side(
+    levels: &[BookLevel],
+    ascending: bool,
+) -> Result<Vec<(Decimal, Decimal, BookLevel)>, String> {
+    let mut result = Vec::new();
+    for level in levels.iter().take(10) {
+        let price = level
+            .price
+            .parse::<Decimal>()
+            .map_err(|_| "BOOK_PRICE_INVALID")?;
+        let size = level
+            .size
+            .parse::<Decimal>()
+            .map_err(|_| "BOOK_SIZE_INVALID")?;
+        if price <= Decimal::ZERO
+            || size <= Decimal::ZERO
+            || result.last().is_some_and(|(previous, _, _)| {
+                if ascending {
+                    price <= *previous
+                } else {
+                    price >= *previous
+                }
+            })
+        {
+            return Err("BOOK_LEVEL_INVALID".into());
+        }
+        result.push((price, size, level.clone()));
+    }
+    if result.is_empty() {
+        return Err("BOOK_LEVEL_INVALID".into());
+    }
+    Ok(result)
+}
+
+pub(crate) fn websocket_microstructure(
+    snapshot: &crate::public_ws::Snapshot,
+    size: Option<&str>,
+) -> Result<Value, String> {
+    validate_request(&snapshot.market.instrument_id, size)?;
+    let asks = ws_side(&snapshot.asks, true)?;
+    let bids = ws_side(&snapshot.bids, false)?;
+    let (spread, sweep_result) = calculate(&asks, &bids, size)?;
+    let levels = |items: &[(Decimal, Decimal, BookLevel)]| {
+        items
+            .iter()
+            .map(|(_, _, level)| level.clone())
+            .collect::<Vec<_>>()
+    };
+    Ok(json!({
+        "schema": "okx.market.microstructure/v1",
+        "instrument": snapshot.market.instrument_id,
+        "quality": "complete",
+        "reference_generation": snapshot.market.reference_generation,
+        "generation": snapshot.generation,
+        "book_sequence": snapshot.book_sequence,
+        "book_exchange_timestamp_ms": snapshot.book_exchange_timestamp_ms,
+        "spread_bps": spread,
+        "asks": levels(&asks),
+        "bids": levels(&bids),
+        "sweep": sweep_result,
+        "mark_price": snapshot.market.mark_price,
+        "index_price": snapshot.market.index_price,
+        "funding": snapshot.market.funding,
+        "open_interest": snapshot.market.open_interest,
     }))
 }
 

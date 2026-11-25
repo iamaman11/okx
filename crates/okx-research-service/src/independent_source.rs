@@ -81,6 +81,9 @@ impl PublicGet for BoundedHttpsGet {
 /// independent of `MarketBootstrapper` and the installed trading Agent.
 pub struct IndependentOkxPublicSource {
     get: Arc<dyn PublicGet>,
+    pub(crate) public_market_ws: crate::public_ws::PublicMarketWs,
+    #[cfg(test)]
+    market_ws_test_endpoint: Option<String>,
 }
 
 impl IndependentOkxPublicSource {
@@ -95,6 +98,9 @@ impl IndependentOkxPublicSource {
                 client,
                 permits: tokio::sync::Semaphore::new(4),
             }),
+            public_market_ws: Default::default(),
+            #[cfg(test)]
+            market_ws_test_endpoint: Some(crate::public_ws::PUBLIC_URL.to_owned()),
         })
     }
 
@@ -106,9 +112,34 @@ impl IndependentOkxPublicSource {
         self.get.get(path, query).await
     }
 
+    pub(crate) fn public_get(&self) -> &Arc<dyn PublicGet> {
+        &self.get
+    }
+
+    pub(crate) fn market_ws_endpoint(&self) -> Option<&str> {
+        #[cfg(test)]
+        {
+            self.market_ws_test_endpoint.as_deref()
+        }
+        #[cfg(not(test))]
+        {
+            Some(crate::public_ws::PUBLIC_URL)
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_get(get: Arc<dyn PublicGet>) -> Self {
-        Self { get }
+        Self {
+            get,
+            public_market_ws: Default::default(),
+            market_ws_test_endpoint: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_market_ws_endpoint(mut self, endpoint: String) -> Self {
+        self.market_ws_test_endpoint = Some(endpoint);
+        self
     }
 }
 

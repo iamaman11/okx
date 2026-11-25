@@ -1,10 +1,10 @@
 //! Independently authenticated, Research-owned Edge transport. This module has
 //! no account store, exchange credentials, execution trait or Engine client.
-//! Every source reachable through `AnalyticsService` is a bounded public GET.
+//! Market views use bounded public WS and HTTP observations; analytic jobs use public GETs.
 use crate::{
     analytics::AnalyticsService, independent_source::IndependentOkxPublicSource,
     ipc::portfolio_scenario_wire, producer::Producer, public_catalog, public_microstructure,
-    public_overview, source_api::PublicSourceClient,
+    public_overview, public_ws, source_api::PublicSourceClient,
 };
 use futures_util::{SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use okx_research_protocol::{
@@ -396,18 +396,35 @@ async fn dispatch(
             .await
         }
         ResearchCommand::MarketOverview { instrument } => {
-            public_overview::market_overview(public_data, &instrument).await
+            match public_ws::capture(public_data, &instrument).await {
+                Ok(snapshot) => Ok(public_overview::websocket_overview(&snapshot)),
+                Err(reason) => {
+                    let mut result =
+                        public_overview::market_overview(public_data, &instrument).await?;
+                    result["public_ws_quality"]["reason_code"] = serde_json::json!(reason);
+                    Ok(result)
+                }
+            }
         }
         ResearchCommand::MarketMicrostructure {
             instrument,
             size_contracts,
         } => {
-            public_microstructure::market_microstructure(
-                public_data,
-                &instrument,
-                size_contracts.as_deref(),
-            )
-            .await
+            let size = size_contracts.as_deref();
+            public_microstructure::validate_request(&instrument, size)?;
+            match public_ws::capture(public_data, &instrument).await {
+                Ok(snapshot) => public_microstructure::websocket_microstructure(&snapshot, size),
+                Err(reason) => {
+                    let mut result = public_microstructure::market_microstructure(
+                        public_data,
+                        &instrument,
+                        size,
+                    )
+                    .await?;
+                    result["public_ws_quality"] = serde_json::json!({"reason_code":reason});
+                    Ok(result)
+                }
+            }
         }
     }
 }

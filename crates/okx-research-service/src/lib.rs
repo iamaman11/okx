@@ -9,5 +9,6 @@ pub mod producer;
 mod public_catalog;
 mod public_microstructure;
 mod public_overview;
+mod public_ws;
 pub mod source_api;
 pub(crate) mod source_io;

@@ -183,3 +183,142 @@ async fn public_market_operations_work_from_research_owner_and_cursor_reads_pers
     );
     assert_eq!(venue.0.load(Ordering::Relaxed), requests_before);
 }
+
+#[tokio::test]
+async fn market_views_use_research_websocket_and_downgrade_a_gapped_book() {
+    const INSTRUMENT: &str = "BTC-USDT-SWAP";
+    let root = tempfile::tempdir().unwrap();
+    let scope = ResearchScope::new("research-live-views".to_owned()).unwrap();
+    let venue = Arc::new(Venue::default());
+    let base = Arc::new(IndependentOkxPublicSource::with_get(venue.clone()));
+    let service =
+        AnalyticsService::new_scoped(root.path().into(), PublicSourceClient::new(base), &scope)
+            .unwrap();
+
+    for (operation, fault) in [
+        (
+            json!({"type":"market_overview","instrument":INSTRUMENT}),
+            None,
+        ),
+        (
+            json!({"type":"market_microstructure","instrument":INSTRUMENT,"size_contracts":"1"}),
+            None,
+        ),
+        (
+            json!({"type":"market_microstructure","instrument":INSTRUMENT,"size_contracts":"1"}),
+            Some("gap"),
+        ),
+        (
+            json!({"type":"market_microstructure","instrument":INSTRUMENT,"size_contracts":"1"}),
+            Some("reference_handoff"),
+        ),
+    ] {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let public = IndependentOkxPublicSource::with_get(venue.clone())
+            .with_market_ws_endpoint(format!("ws://{}", listener.local_addr().unwrap()));
+        let before = venue.0.load(Ordering::Relaxed);
+        let mock = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            public_ws::tests::serve_market_fixture(socket, fault).await;
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            request(&service, &public, operation.clone()),
+        )
+        .await
+        .expect("Research is expected to use its own venue socket");
+        drop(public);
+        tokio::time::timeout(Duration::from_secs(1), mock)
+            .await
+            .unwrap()
+            .unwrap();
+        let response = response_for("fixture-market-request", result);
+        let actual = response.result.unwrap();
+        if fault.is_some() {
+            assert_eq!(response.quality, DataQuality::Degraded);
+            assert_eq!(actual["quality"], "degraded");
+            match fault {
+                Some("gap") => {
+                    assert_eq!(
+                        actual["public_ws_quality"]["reason_code"],
+                        "BOOK_SEQUENCE_INVALID"
+                    );
+                    assert_eq!(venue.0.load(Ordering::Relaxed) - before, 3);
+                }
+                Some("reference_handoff") => {
+                    assert_eq!(
+                        actual["public_ws_quality"]["reason_code"],
+                        "RESEARCH_PUBLIC_WS_REFERENCE_CHANGED"
+                    );
+                }
+                _ => panic!("unexpected fixture fault"),
+            }
+            assert!(actual["book_sequence"].is_null());
+        } else {
+            assert_eq!(response.quality, DataQuality::Fresh);
+            assert_eq!(actual["quality"], "complete");
+            assert_eq!(actual["generation"], 1);
+            assert_eq!(actual["book_sequence"], 11);
+            assert_eq!(venue.0.load(Ordering::Relaxed) - before, 2);
+            if operation["type"] == "market_overview" {
+                assert_eq!(actual["source_mode"], "websocket");
+                assert_eq!(actual["market"]["funding"]["rate"], "0.001");
+            } else {
+                assert_eq!(actual["spread_bps"], "200");
+                assert_eq!(actual["asks"][0]["size"], "3");
+                assert_eq!(actual["sweep"]["buy_vwap"], "101");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn warming_venue_session_survives_a_completed_rest_request() {
+    let root = tempfile::tempdir().unwrap();
+    let scope = ResearchScope::new("research-live-views".to_owned()).unwrap();
+    let venue = Arc::new(Venue::default());
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let public = Arc::new(
+        IndependentOkxPublicSource::with_get(venue.clone())
+            .with_market_ws_endpoint(format!("ws://{}", listener.local_addr().unwrap())),
+    );
+    let service = AnalyticsService::new_scoped(
+        root.path().into(),
+        PublicSourceClient::new(public.clone()),
+        &scope,
+    )
+    .unwrap();
+    let (release, allowed) = tokio::sync::oneshot::channel();
+    let mock = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        public_ws::tests::serve_market_fixture_after(socket, None, Some(allowed)).await;
+    });
+    let operation = json!({"type":"market_microstructure","instrument":"BTC-USDT-SWAP"});
+    let fallback = request(&service, &public, operation.clone()).await.unwrap();
+    assert_eq!(fallback["quality"], "degraded");
+    assert_eq!(
+        fallback["public_ws_quality"]["reason_code"],
+        "RESEARCH_PUBLIC_WS_WARMING"
+    );
+    assert_eq!(venue.0.load(Ordering::Relaxed), 3);
+
+    release.send(()).unwrap();
+    let warm = request(&service, &public, operation).await.unwrap();
+    assert_eq!(warm["quality"], "complete");
+    assert_eq!(warm["generation"], 1);
+    assert_eq!(warm["book_sequence"], 11);
+    assert_eq!(venue.0.load(Ordering::Relaxed), 3);
+
+    drop(service);
+    drop(public);
+    tokio::time::timeout(Duration::from_secs(1), mock)
+        .await
+        .unwrap()
+        .unwrap();
+}

@@ -1,4 +1,4 @@
-use crate::independent_source::IndependentOkxPublicSource;
+use crate::independent_source::{IndependentOkxPublicSource, PublicGet};
 use okx_domain_core::observation_model::{
     FundingRequirement, InstrumentSpec, InstrumentType, UpcomingRuleChange,
 };
@@ -198,16 +198,20 @@ fn parse_catalog(swap: &[u8], futures: &[u8]) -> Result<(Vec<InstrumentSpec>, St
     .map_err(|_| "REFERENCE_SOURCE_INVALID")?;
     Ok((instruments, format!("sha256:{:x}", Sha256::digest(encoded))))
 }
-async fn catalog(
-    source: &IndependentOkxPublicSource,
-) -> Result<(Vec<InstrumentSpec>, String, String), String> {
+pub(crate) struct Catalog {
+    pub(crate) instruments: Vec<InstrumentSpec>,
+    pub(crate) generation: String,
+    pub(crate) observed_at: jiff::Timestamp,
+}
+
+pub(crate) async fn catalog(source: &dyn PublicGet) -> Result<Catalog, String> {
     let observed_at = jiff::Timestamp::now();
     let (swap, futures) = tokio::try_join!(
-        source.get_bytes(
+        source.get(
             "/api/v5/public/instruments",
             vec![("instType", "SWAP".into())]
         ),
-        source.get_bytes(
+        source.get(
             "/api/v5/public/instruments",
             vec![("instType", "FUTURES".into())]
         ),
@@ -219,7 +223,11 @@ async fn catalog(
     ) {
         return Err("REFERENCE_SOURCE_STALE".into());
     }
-    Ok((rows, generation, format!("{observed_at:.3}")))
+    Ok(Catalog {
+        instruments: rows,
+        generation,
+        observed_at,
+    })
 }
 pub(crate) async fn find_instruments(
     source: &IndependentOkxPublicSource,
@@ -227,12 +235,16 @@ pub(crate) async fn find_instruments(
     settle_currency: Option<&str>,
     instrument_type: Option<InstrumentTypeFilter>,
 ) -> Result<Value, String> {
-    let (rows, generation, _) = catalog(source).await?;
+    let Catalog {
+        instruments,
+        generation,
+        ..
+    } = catalog(source.public_get().as_ref()).await?;
     let kind = instrument_type.map(|t| match t {
         InstrumentTypeFilter::Swap => InstrumentType::Swap,
         InstrumentTypeFilter::Futures => InstrumentType::Futures,
     });
-    let instruments: Vec<InstrumentSpec> = rows
+    let instruments: Vec<InstrumentSpec> = instruments
         .into_iter()
         .filter(|v| {
             (v.base_currency.as_deref() == Some(asset)
@@ -248,8 +260,17 @@ pub(crate) async fn resolve_universe(
     source: &IndependentOkxPublicSource,
     request: &MarketRequest,
 ) -> Result<(Value, Vec<String>), String> {
-    let (rows, generation, received) = catalog(source).await?;
-    resolve(&rows, &generation, &received, request)
+    let Catalog {
+        instruments,
+        generation,
+        observed_at,
+    } = catalog(source.public_get().as_ref()).await?;
+    resolve(
+        &instruments,
+        &generation,
+        &format!("{observed_at:.3}"),
+        request,
+    )
 }
 fn resolve(
     rows: &[InstrumentSpec],

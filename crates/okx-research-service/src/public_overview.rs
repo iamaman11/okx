@@ -268,6 +268,18 @@ pub(crate) async fn market_overview(
     }))
 }
 
+pub(crate) fn websocket_overview(snapshot: &crate::public_ws::Snapshot) -> Value {
+    json!({
+        "schema": "okx.market.overview/v1",
+        "source_mode": "websocket",
+        "quality": "complete",
+        "market": snapshot.market,
+        "generation": snapshot.generation,
+        "book_sequence": snapshot.book_sequence,
+        "book_exchange_timestamp_ms": snapshot.book_exchange_timestamp_ms,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
