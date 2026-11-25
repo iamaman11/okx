@@ -334,9 +334,9 @@ async fn risk_book_contract_native_os_kill_pending_fill_projects_once() {
         let mut fixture = fixture().await;
         let (_market_stop, _market_task, _socket, _public) = opened_market(&mut fixture).await;
         let now = jiff::Timestamp::now().as_millisecond().to_string();
-        fixture
-            .feed
-            .expect_public_clock(envelope(json!([{"ts":now}])));
+        // This witness controls the crash boundary. Sample venue time when
+        // the public GET is served, after the entry preflight has run.
+        fixture.feed.expect_current_public_clock();
         record_fee(&fixture.feed, &now);
         record_leverage(&fixture.feed);
         record_leverage(&fixture.feed);
@@ -360,6 +360,7 @@ async fn risk_book_contract_native_os_kill_pending_fill_projects_once() {
             .await
             .unwrap();
         assert_eq!(result["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN");
+        assert_eq!(fixture.feed.unconsumed_public_clock(), 0);
         assert_eq!(fixture.feed.outbound_posts.lock().unwrap().len(), 1);
         let _gate = fixture._account.recorded_capture_gate.write().await;
         *fixture.market_boundary.market.lock().unwrap() = None;
