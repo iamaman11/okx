@@ -29,6 +29,20 @@ async fn main() {
 /// sharing Research credentials. A live WSS authentication failure does not
 /// exit this process and must not be misreported as a local credential error.
 fn exit_code(error: &str) -> i32 {
+    // Preserve the resource-fence failure stage across CONTROL's deliberately
+    // closed child stderr; never include OS error text or a secret in READY.
+    if [
+        "RESEARCH_SINGLE_WORKER_MUTEX_CREATE: ",
+        "RESEARCH_MEMORY_JOB_CREATE: ",
+        "RESEARCH_MEMORY_JOB_CONFIGURE: ",
+        "RESEARCH_MEMORY_JOB_ASSIGN: ",
+        "RESEARCH_CPU_JOB_CONFIGURE: ",
+    ]
+    .iter()
+    .any(|prefix| error.starts_with(prefix))
+    {
+        return 77;
+    }
     match error {
         "RESEARCH_CATALOG_MISSING" => 70,
         "RESEARCH_SCOPE_MISMATCH" => 71,
@@ -48,7 +62,13 @@ fn exit_code(error: &str) -> i32 {
         | "RESEARCH_SANDBOX_ATTESTATION_INVALID"
         | "RESEARCH_SANDBOX_CREDMAN_EXPOSED"
         | "RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED"
+        | "RESEARCH_SANDBOX_IMAGE_ACL_EXPOSED"
+        | "RESEARCH_SANDBOX_CATALOG_ACL_EXPOSED"
         | "RESEARCH_EDGE_PROVISIONER_DISABLED" => 76,
+        "RESEARCH_MEMORY_LIMIT_UNSUPPORTED_ARCH"
+        | "RESEARCH_MEMORY_JOB_VERIFY_FAILED"
+        | "RESEARCH_CPU_JOB_VERIFY_FAILED"
+        | "INVALID_RESEARCH_TEST_SINGLETON_NAMESPACE" => 77,
         _ => 1,
     }
 }
@@ -238,7 +258,12 @@ mod tests {
             ("RESEARCH_SANDBOX_ATTESTATION_INVALID", 76),
             ("RESEARCH_SANDBOX_CREDMAN_EXPOSED", 76),
             ("RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED", 76),
+            ("RESEARCH_SANDBOX_IMAGE_ACL_EXPOSED", 76),
+            ("RESEARCH_SANDBOX_CATALOG_ACL_EXPOSED", 76),
             ("RESEARCH_EDGE_PROVISIONER_DISABLED", 76),
+            ("RESEARCH_MEMORY_JOB_ASSIGN: Access is denied", 77),
+            ("RESEARCH_CPU_JOB_CONFIGURE: Access is denied", 77),
+            ("RESEARCH_MEMORY_JOB_VERIFY_FAILED", 77),
         ] {
             assert_eq!(exit_code(reason), expected, "{reason}");
         }

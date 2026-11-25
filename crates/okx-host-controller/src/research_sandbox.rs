@@ -1214,6 +1214,7 @@ mod native {
         match code {
             75 => "worker_startup_credential_unavailable_before_ready",
             76 => "worker_startup_auth_or_sandbox_denied_before_ready",
+            77 => "worker_resource_job_unavailable_before_ready",
             _ => "worker_terminated_before_ready",
         }
     }
@@ -1245,6 +1246,22 @@ mod native {
                 )
             } == 0
             {
+                // The child can exit between the preceding zero-time wait
+                // and this pipe query. Preserve its typed exit instead of
+                // misreporting a closed writer as a pipe setup failure.
+                #[cfg(test)]
+                let pipe_error = unsafe { GetLastError() };
+                #[cfg(test)]
+                eprintln!("OKX_S2_WIN32_READY_PIPE_ERROR={pipe_error}");
+                if unsafe { WaitForSingleObject(child, 250) } == WAIT_OBJECT_0 {
+                    let mut code = 0u32;
+                    if unsafe { GetExitCodeProcess(child, &mut code) } == 0 {
+                        return Err(denied("worker_exit_code_unavailable"));
+                    }
+                    #[cfg(test)]
+                    eprintln!("OKX_S2_CHILD_PRE_READY_EXIT_CODE={code}");
+                    return Err(denied(readiness_exit_stage(code)));
+                }
                 return Err(denied("worker_ready_pipe"));
             }
             if available as usize > MAX_READY_BYTES.saturating_sub(data.len()) {
@@ -1545,7 +1562,11 @@ mod native {
             assert!(IMAGE_MUTATION_RIGHTS.contains(&0x100), "WRITE_ATTRIBUTES");
             assert!(IMAGE_MUTATION_RIGHTS.contains(&0x40000), "WRITE_DAC");
             assert!(IMAGE_MUTATION_RIGHTS.contains(&0x80000), "WRITE_OWNER");
-            assert!(IMAGE_MUTATION_RIGHTS.iter().all(|right| IMAGE_PACKAGE_RX & right == 0));
+            assert!(
+                IMAGE_MUTATION_RIGHTS
+                    .iter()
+                    .all(|right| IMAGE_PACKAGE_RX & right == 0)
+            );
         }
 
         struct DisposableResearchDirectory(PathBuf);
@@ -1730,6 +1751,10 @@ mod native {
                 "worker_startup_auth_or_sandbox_denied_before_ready"
             );
             assert_eq!(readiness_exit_stage(1), "worker_terminated_before_ready");
+            assert_eq!(
+                readiness_exit_stage(77),
+                "worker_resource_job_unavailable_before_ready"
+            );
         }
 
         #[test]
