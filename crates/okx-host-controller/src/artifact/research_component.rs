@@ -84,6 +84,9 @@ const ROLLBACK_RESEARCH_POINTER: &str = "rollback-research.json";
 #[cfg(windows)]
 struct ResearchPointerGuard {
     handle: windows_sys::Win32::Foundation::HANDLE,
+    // Win32 mutex ownership belongs to the acquiring *thread*, not merely
+    // the HANDLE or task. Reject accidental transfer to another thread.
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 #[cfg(windows)]
@@ -119,7 +122,10 @@ impl ResearchPointerGuard {
             unsafe { CloseHandle(handle) };
             return Err(HostControlError::ResearchPointerLockUnavailable);
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            _not_send: std::marker::PhantomData,
+        })
     }
 }
 
@@ -382,18 +388,7 @@ pub async fn deploy_research(
         storage_version: c.storage_version,
     };
     let verified = Instant::now();
-    let root = Path::new(okx_host_launcher::RUNTIME_ROOT);
-    let _pointer_guard = ResearchPointerGuard::acquire(root)?;
-    let staged = prepare_research_transition(root, &record, &worker)?;
-    let expected_generation = supervisor.process_generation();
-    let status = supervisor.transition_image(
-        staged.previous_sha(),
-        expected_generation,
-        &record.worker_sha256,
-        || commit_research_transition(root, &staged),
-        || restore_research_transition(root, &staged),
-    )?;
-    let staged = Instant::now();
+    let (status, staged) = activate_verified_research_image(supervisor, &record, &worker)?;
     Ok(json!({
         "installed": true,
         "provenance": record,
@@ -407,6 +402,29 @@ pub async fn deploy_research(
             "control_total": (staged - started).as_millis()
         }
     }))
+}
+
+/// Important: the Win32 mutex is thread-affine. Keep this complete critical
+/// section inside a synchronous function, including all compensating writes;
+/// no Tokio `.await` may be introduced while the guard exists. The async
+/// caller finishes all GitHub verification before entering this function.
+fn activate_verified_research_image(
+    supervisor: &mut ResearchSupervisor,
+    record: &InstalledResearch,
+    worker: &[u8],
+) -> HostControlResult<(Value, Instant)> {
+    let root = Path::new(okx_host_launcher::RUNTIME_ROOT);
+    let _pointer_guard = ResearchPointerGuard::acquire(root)?;
+    let staged = prepare_research_transition(root, record, worker)?;
+    let expected_generation = supervisor.process_generation();
+    let status = supervisor.transition_image(
+        staged.previous_sha(),
+        expected_generation,
+        &record.worker_sha256,
+        || commit_research_transition(root, &staged),
+        || restore_research_transition(root, &staged),
+    )?;
+    Ok((status, Instant::now()))
 }
 
 /// Restore only the preceding image that CONTROL itself saved while deploying
@@ -994,8 +1012,16 @@ mod tests {
                 .as_nanos()
         ));
         let first = ResearchPointerGuard::acquire(&root).unwrap();
+        let competitor_root = root.clone();
         assert_eq!(
-            ResearchPointerGuard::acquire(&root).err().unwrap().code(),
+            std::thread::spawn(move || {
+                ResearchPointerGuard::acquire(&competitor_root)
+                    .err()
+                    .unwrap()
+                    .code()
+            })
+            .join()
+            .unwrap(),
             "RESEARCH_POINTER_LOCK_UNAVAILABLE"
         );
         drop(first);
