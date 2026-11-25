@@ -389,6 +389,8 @@ impl ResearchSupervisor {
         {
             return Err(HostControlError::ResearchIdentityMismatch);
         }
+        #[cfg(windows)]
+        crate::research_acl::verify_version_image(&image.binary, &image.sha256)?;
         let on_disk = self.catalog_on_disk()?;
         let binding = self
             .desired
@@ -406,6 +408,10 @@ impl ResearchSupervisor {
                 (catalog::existing_root(&self.runtime_root), scope_sha256)
             }
         };
+        #[cfg(windows)]
+        if matches!(binding, CatalogBinding::HostScoped) {
+            crate::research_acl::ensure_independent_catalog(&catalog_root)?;
+        }
         let generation = self
             .desired
             .process_generation
