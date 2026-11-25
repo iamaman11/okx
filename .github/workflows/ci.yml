@@ -438,8 +438,16 @@ jobs:
       - name: Verify exact T09/T10 required-case manifest
         run: node scripts/run-trade-integration.mjs --list
 
-      - name: Reject incomplete or fabricated T09/T10 runner evidence
-        run: node scripts/run-trade-integration.mjs --self-test
+      - name: Reject fabricated evidence and retired remote case execution
+        run: |
+          node scripts/run-trade-integration.mjs --self-test
+          # Historical JS case adapters are retired. No Windows runner or
+          # artifact directory may be created by a misleading --case request.
+          if node scripts/run-trade-integration.mjs --case T09.0 --artifacts "$RUNNER_TEMP/retired-finance-case"; then
+            echo 'RETIRED_REMOTE_FINANCE_HARNESS_EXECUTED' >&2
+            exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/retired-finance-case"
 
       - name: Preserve bounded primary and secondary Native failures
         run: node --test scripts/trade-integration/native-failure.test.mjs
@@ -505,22 +513,12 @@ jobs:
           cargo test --locked -p okx-trading-engine --lib research_dispatch_tests:: -- --test-threads 2 | tee "$RUNNER_TEMP/research-dispatch.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-dispatch.log"
 
-      - name: Accept one million native SQLite terminal intents
-        timeout-minutes: 30
-        run: cargo test --locked -p okx-trade-execution --lib sqlite_million_history_bounded_rss -- --ignored --nocapture
-
-      - name: Measure two-account 100-parallel native SQL (not WSS)
-        run: cargo test --locked -p okx-trade-execution --lib two_account_100_parallel_sql_readonly_isolation -- --nocapture
-
-      # #510: finances now commit inside the Native SQLite owner. Old Worker
-      # monetary CAS traces are retired; they cannot witness the current owner.
-      - name: Native policy and original financial invariants
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --locked -p okx-trade-execution --lib risk_book_contract_native_campaign_policy_ -- --nocapture | tee "$RUNNER_TEMP/native-policy.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-policy.log"
-          cargo test --locked -p okx-trade-execution --lib e1_e2_native_real_fee_sources_baseline_and_second_admission_under_ten -- --nocapture
+      # Keep the complete portable test suite above. The old Linux-only,
+      # ignored 1M-row AccountStore performance benchmark is opt-in, not a
+      # current Native financial witness; it also writes into the checkout.
+      # A removed 100-parallel filter previously reported green with 0 tests.
+      # Campaign-policy and legacy E1/E2 tests already run in the portable
+      # suite; current financial authority is the exact Windows 62/107 gate.
 
   cloudflare_mcp_contracts:
     name: cloudflare-mcp-contracts

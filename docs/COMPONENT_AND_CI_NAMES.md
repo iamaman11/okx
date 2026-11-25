@@ -206,24 +206,45 @@ The accepted **Windows binary baseline** (formerly called “Native base”)
 means proven reusable binary bytes, not a runtime library. Existing
 `native-base-<sha>` release tags remain immutable compatibility identifiers.
 
-## CI job names
+## CI job names and exact ownership
 
-| Job | Purpose |
+One `.github/workflows/ci.yml` contains **16 job definitions**. GitHub renders
+all of their names even when the selected component route correctly skips a
+job. Five Windows regression matrix cells and the optional two cache profiles
+can add displayed rows; they are **not extra application components**. The
+`on: push` trigger applies only to `main` (in addition to PR and manual runs).
+
+| Job displayed by GitHub | When it runs / what it verifies |
 | --- | --- |
-| `classify` | Protected fail-closed changed-file boundary plus before/after Windows Cargo closure proof for narrow Research/Host manifest candidates |
-| `draft-component-tests` | Scoped feedback for Draft pull requests |
-| `trading-engine-acceptance-windows` | Mandatory complete financial collector/resource-budget acceptance and isolated Engine, SQLite, clock/process recovery tests |
-| `trading-engine-regressions-windows (suite)` | Five parallel Windows suites for Engine, Host, Execution, Research and Clippy. Research includes K9 |
-| `trading-engine-build-windows` | Parallel fresh four-component Windows release build and artifact on full Ready PRs |
-| `trusted-main-windows-cache-prime (profile)` | Compile-only test and release cache seeds from accepted `main`, automatic after full merges or manual |
-| `research-service-tests-windows` | Research Service tests and build against the accepted unchanged Trading Engine |
-| `host-controller-launcher-checks` | Host Controller and Host Launcher tests/build without the Trading Engine |
-| `rust-tests-linux` | Rust library, Research Service IPC and financial SQLite tests executed on Linux (not a Linux trading service) |
-| `architecture-contracts` | Dependency, architecture, product and acceptance contract guards |
-| `dependency-audit` | Dependency security, licence and origin checks |
-| `cloudflare-mcp-contracts` | MCP transport and public contract checks |
-| `research-package-proof` | Draft proof of a composed accepted Research candidate, not a deploy |
-| `publish-accepted-windows-release` | After successful protected main CI, publish only the exact verified Windows artifact; no installation |
+| `classify` | Every event, Ubuntu: immutable change scope, fail-closed owner routing and Windows Cargo closure |
+| `draft-component-tests` | Draft PR, Ubuntu: selected owner/consumer feedback; does **not** compile Windows-only code |
+| `dependency-audit` | Ready/main for Rust owners: locked dependency graph, advisories, licences and sources |
+| `architecture-contracts` | Fresh non-Edge Rust changes: ownership, schema, product contracts and negative CI/release checks |
+| `rust-tests-linux` | Full/Engine route only: portable Rust Clippy, tests, Research IPC and dev-isolated dispatch; **not** a Windows runtime test |
+| `cloudflare-mcp-contracts` | Edge affected: TypeScript/MCP/DO/public-contract checks on Ubuntu |
+| `linux-core` | Non-Draft, Ubuntu: protected result aggregator, **not** another Rust build |
+| `host-controller-launcher-checks` | Ready Host/CONTROL or mixed Host+Research, Windows: Clippy, tests and two Host EXE builds, no Engine build |
+| `trading-engine-acceptance-windows` | Fresh Full/Engine route, Windows: exact 62 financial contracts / 107 witnesses, recovery and resource proof |
+| `trading-engine-regressions-windows (suite)` | Fresh Full/Engine route: five parallel Windows suites for Engine, Host, Execution, Research and Clippy |
+| `research-service-tests-windows` | Fresh Research-only or mixed Host+Research PR, Windows: Research owner/IPC/WSS tests and scoped Research release evidence; no Engine build on Research-only |
+| `windows-native` | Non-Draft, Ubuntu: protected aggregator of the **actual** required Windows jobs, not a Windows runner itself |
+| `trading-engine-build-windows` | Fresh Full/Engine route, Windows: Engine-only or full four-EXE release artifact with exact SHA/tree |
+| `trusted-main-windows-cache-prime (profile)` | **Manual** accepted-main cache seed, two Windows profiles; compilation only, never acceptance/publish |
+| `publish-accepted-windows-release` | Accepted Full main tree, isolated write permission: publish immutable verified four-EXE PR artifact without rebuilding or installing |
+| `publish-accepted-research-component` | Accepted Research-only main tree, isolated write permission: publish exact three-file Research artifact and origin/readback without rebuilding |
+
+The old `all26-slice-targeted.yml` workflow and Native/Worker JS case adapters
+were retired: their `--case` invocation was already guaranteed to fail after
+the Native finance cutover. The exact 26-ID archive manifest and offline
+negative evidence verifier remain. Their removal does **not** delete any
+current Rust financial witness.
+
+The Linux-only, ignored million-terminal-intent `AccountStore` benchmark is
+still runnable manually from source but **no longer runs on every Full PR**.
+Its historical RSS/latency/index performance threshold is **not PR-gated**;
+this is distinct from the Windows 62/107 financial acceptance and is not a
+Windows performance measurement. A missing 100-parallel SQL test filter that
+previously reported `0 passed` was also removed (no real test was skipped).
 
 The required check **display names** `classify`, `windows-native` and `linux-core`
 are retained for branch protection and accepted-CI reuse. `classify` is the
@@ -239,8 +260,9 @@ changes use the protected classification and aggregate checks. Edge changes
 also run the Worker contract job. Both routes skip Rust setup, Cargo audit,
 Windows jobs and Native release publication. Research and Host changes run
 their owner jobs. A Host and Edge change runs their two component jobs without
-rebuilding the Engine. A Research release verifies and fetches the accepted Native
-base once, in the job that assembles the artifact.
+rebuilding the Engine. A Research-only PR builds its own three-file component;
+the accepted main publisher reuses those exact bytes without fetching or
+repackaging an Engine/Native base for the Research release.
 
 On the Windows production dependency graph, `okx-analysis` and
 `okx-strategy-core` are outside Trading Engine, and Research builds
