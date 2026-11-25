@@ -619,7 +619,7 @@ pub(super) async fn cancel_and_durable_decision_replay_are_research_only() {
             .await
             .is_err()
     );
-    assert_eq!(worker.source_reads >= before, true);
+    assert!(worker.source_reads >= before);
     worker = worker.restart().await;
     let reopened = worker
         .research(ResearchRequest::Decision {
