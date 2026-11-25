@@ -622,7 +622,10 @@ fn transport_quality(value: &serde_json::Value) -> DataQuality {
         None => DataQuality::Fresh,
         Some(serde_json::Value::String(label)) => match label.as_str() {
             "stale" => DataQuality::Stale,
-            "fresh" | "complete" | "verified" | "verified_reexecution"
+            "fresh"
+            | "complete"
+            | "verified"
+            | "verified_reexecution"
             | "verified_normalized_capture" => DataQuality::Fresh,
             _ => DataQuality::Degraded,
         },

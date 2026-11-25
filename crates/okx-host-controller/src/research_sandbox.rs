@@ -143,8 +143,7 @@ mod native {
     // execute and security-control right. Keep individual AccessCheck results:
     // a combined mask could incorrectly deny when only one right is granted.
     const FINANCE_DENIED_RIGHTS: [u32; 13] = [
-        0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x10000, 0x20000, 0x40000, 0x80000,
-        0x100000,
+        0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000,
     ];
 
     fn denied(stage: &'static str) -> HostControlError {
@@ -774,9 +773,8 @@ mod native {
     impl FinanceCanary {
         fn file_id(file: &File) -> HostControlResult<(u32, u32, u32)> {
             let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
-            if unsafe {
-                GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information)
-            } == 0
+            if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) }
+                == 0
                 || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
                 || information.nNumberOfLinks != 1
             {
@@ -824,7 +822,9 @@ mod native {
             // Read through the same verified handle, never path-read after an
             // identity check that could be raced by a renamed/replaced file.
             let mut options = OpenOptions::new();
-            options.read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+            options
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
             let mut file = options
                 .open(&self.path)
                 .map_err(|_| denied("finance_canary_parent_read"))?;
@@ -841,7 +841,11 @@ mod native {
             // No delayed extra bytes may turn a valid 32-byte prefix into a
             // misleading parent-positive witness.
             let mut extra = [0u8; 1];
-            if file.read(&mut extra).map_err(|_| denied("finance_canary_parent_read"))? != 0 {
+            if file
+                .read(&mut extra)
+                .map_err(|_| denied("finance_canary_parent_read"))?
+                != 0
+            {
                 return Err(denied("finance_canary_parent_mismatch"));
             }
             Ok(())
@@ -1395,8 +1399,8 @@ mod native {
             assert_eq!(
                 FINANCE_DENIED_RIGHTS,
                 [
-                    0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x10000, 0x20000,
-                    0x40000, 0x80000, 0x100000,
+                    0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x10000, 0x20000, 0x40000, 0x80000,
+                    0x100000,
                 ]
             );
         }

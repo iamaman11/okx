@@ -221,7 +221,11 @@ fn research_response_transport_quality_preserves_provenance_and_staleness() {
         assert_eq!(response.status, AgentResponseStatus::Completed);
         assert_eq!(response.result, Some(body));
     }
-    for unexpected in [serde_json::Value::Null, json!(42), json!({"status":"ambiguous"})] {
+    for unexpected in [
+        serde_json::Value::Null,
+        json!(42),
+        json!({"status":"ambiguous"}),
+    ] {
         let body = json!({"quality":unexpected});
         let response = response_for("quality-check", Ok(body.clone()));
         assert_eq!(response.quality, DataQuality::Degraded);
