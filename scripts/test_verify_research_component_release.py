@@ -53,6 +53,39 @@ class ResearchComponentReleaseTests(unittest.TestCase):
         self.assertEqual(result["worker_sha256"], digest(WORKER))
         self.assertTrue(result["no_native_engine_or_control_bytes"])
 
+    def test_named_v2_v3_policy_is_typed_and_not_appended_to_v1(self):
+        for version in (2, 3):
+            named = manifest()
+            named["schema"] = f"okx.windows.research-component/v{version}"
+            named["ci_status_policy"] = f"okx.github.actions.research-ready/v{version}"
+            self.assertEqual(verify(archive(entries(named)))["ci_status_policy"],
+                             named["ci_status_policy"])
+            for value in (None, "okx.github.actions.research-ready/v1",
+                          f"okx.github.actions.research-ready/v{5 - version}"):
+                wrong = named.copy()
+                wrong["ci_status_policy"] = value
+                with self.assertRaisesRegex(ValueError, "READY_POLICY_MISMATCH"):
+                    verify(archive(entries(wrong)))
+            missing = named.copy()
+            missing.pop("ci_status_policy")
+            with self.assertRaisesRegex(ValueError, "UNKNOWN_OR_MISSING_FIELDS"):
+                verify(archive(entries(missing)))
+            swapped = named.copy()
+            swapped["schema"] = "okx.windows.research-component/v1"
+            with self.assertRaisesRegex(ValueError, "UNKNOWN_OR_MISSING_FIELDS"):
+                verify(archive(entries(swapped)))
+            unknown = named.copy()
+            unknown["engine_component"] = "forbidden"
+            with self.assertRaisesRegex(ValueError, "UNKNOWN_OR_MISSING_FIELDS"):
+                verify(archive(entries(unknown)))
+            raw = json.dumps(named).removesuffix("}") + ',"ci_status_policy":"forged"}'
+            with self.assertRaisesRegex(ValueError, "DUPLICATE_JSON_FIELD"):
+                verify(archive(entries(raw=raw.encode())))
+        legacy = manifest()
+        legacy["ci_status_policy"] = "okx.github.actions.research-ready/v3"
+        with self.assertRaisesRegex(ValueError, "UNKNOWN_OR_MISSING_FIELDS"):
+            verify(archive(entries(legacy)))
+
     def test_zip_digest_and_source_are_bound(self):
         blob = archive(entries())
         with self.assertRaisesRegex(ValueError, "ZIP_DIGEST_MISMATCH"):

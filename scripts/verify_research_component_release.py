@@ -22,6 +22,11 @@ BOUNDS = {"Cargo.lock": 4 * 1024 * 1024,
           "okx-research-service.exe": 128 * 1024 * 1024}
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 SHA64 = re.compile(r"[0-9a-f]{64}\Z")
+READY_POLICIES = {
+    "okx.windows.research-component/v1": None,
+    "okx.windows.research-component/v2": "okx.github.actions.research-ready/v2",
+    "okx.windows.research-component/v3": "okx.github.actions.research-ready/v3",
+}
 
 
 def fail(code):
@@ -73,18 +78,25 @@ def verify_bytes(archive_bytes, expected_digest, head, tree):
     except (zipfile.BadZipFile, RuntimeError) as exc:
         raise ValueError("RESEARCH_ARCHIVE_ZIP_UNVERIFIED") from exc
     manifest = parse_manifest(contents["manifest.json"])
-    if type(manifest) is not dict or set(manifest) != {
+    if type(manifest) is not dict or manifest.get("schema") not in READY_POLICIES:
+        fail("RESEARCH_MANIFEST_SCHEMA_UNSUPPORTED")
+    policy = READY_POLICIES[manifest["schema"]]
+    required = {
         "schema", "repository_id", "source_head_sha", "source_tree",
         "rust_version", "cargo_lock_sha256", "worker"
-    }:
+    }
+    if policy is not None:
+        required.add("ci_status_policy")
+    if set(manifest) != required:
         fail("RESEARCH_MANIFEST_UNKNOWN_OR_MISSING_FIELDS")
+    if policy is not None and manifest["ci_status_policy"] != policy:
+        fail("RESEARCH_MANIFEST_READY_POLICY_MISMATCH")
     worker = manifest["worker"]
     if type(worker) is not dict or set(worker) != {
         "sha256", "size", "protocol_version", "storage_version"
     }:
         fail("RESEARCH_WORKER_UNKNOWN_OR_MISSING_FIELDS")
-    if (manifest["schema"] != "okx.windows.research-component/v1" or
-            type(manifest["repository_id"]) is not int or
+    if (type(manifest["repository_id"]) is not int or
             manifest["repository_id"] != 1388071566 or
             manifest["source_head_sha"] != head or manifest["source_tree"] != tree or
             type(manifest["rust_version"]) is not str or
@@ -103,6 +115,8 @@ def verify_bytes(archive_bytes, expected_digest, head, tree):
         fail("RESEARCH_MANIFEST_WORKER_BYTES_OR_VERSION_MISMATCH")
     return {
         "schema": "okx.windows.research-release-validation/v1",
+        "component_schema": manifest["schema"],
+        "ci_status_policy": policy,
         "repository_id": 1388071566,
         "source_head_sha": head,
         "source_tree": tree,

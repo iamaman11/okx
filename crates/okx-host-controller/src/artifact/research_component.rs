@@ -60,10 +60,31 @@ struct ResearchComponentManifestV2 {
     worker: ResearchComponentWorkerV1,
 }
 
+/// The renamed owner-scoped CI uses a distinct immutable status policy. A
+/// running v1/v2 CONTROL keeps its original seven-job evidence contract.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResearchComponentManifestV3 {
+    schema: String,
+    repository_id: u64,
+    source_head_sha: String,
+    source_tree: String,
+    rust_version: String,
+    cargo_lock_sha256: String,
+    ci_status_policy: NamedResearchReadyPolicyV3,
+    worker: ResearchComponentWorkerV1,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 enum NamedResearchReadyPolicyV2 {
     #[serde(rename = "okx.github.actions.research-ready/v2")]
     ReadyV2,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+enum NamedResearchReadyPolicyV3 {
+    #[serde(rename = "okx.github.actions.research-ready/v3")]
+    ReadyV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,34 +93,44 @@ enum ReadyEvidencePolicy {
     LegacyV1,
     /// Only the explicit v2 manifest and typed policy string can select this.
     NamedV2,
+    /// Only a typed v3 manifest may select the new owner-scoped status roster.
+    NamedV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResearchReadyGate {
     Classify,
+    SelectChecks,
     Architecture,
     DependencyAudit,
     CloudflareContracts,
+    CloudflareMcp,
     ResearchWindows,
+    ResearchWindowsV3,
     LinuxCore,
     WindowsNative,
+    Ci,
 }
 
 impl ResearchReadyGate {
     const fn name(self) -> &'static str {
         match self {
             Self::Classify => "classify",
+            Self::SelectChecks => "select-checks",
             Self::Architecture => "architecture-contracts",
             Self::DependencyAudit => "dependency-audit",
             Self::CloudflareContracts => "cloudflare-mcp-contracts",
+            Self::CloudflareMcp => "cloudflare-mcp",
             Self::ResearchWindows => "research-service-tests-windows",
+            Self::ResearchWindowsV3 => "research-windows",
             Self::LinuxCore => "linux-core",
             Self::WindowsNative => "windows-native",
+            Self::Ci => "ci",
         }
     }
 }
 
-const RESEARCH_READY_GATES: [ResearchReadyGate; 7] = [
+const LEGACY_RESEARCH_READY_GATES: [ResearchReadyGate; 7] = [
     ResearchReadyGate::Classify,
     ResearchReadyGate::Architecture,
     ResearchReadyGate::DependencyAudit,
@@ -109,13 +140,21 @@ const RESEARCH_READY_GATES: [ResearchReadyGate; 7] = [
     ResearchReadyGate::WindowsNative,
 ];
 
+const OWNER_SCOPED_RESEARCH_READY_GATES: [ResearchReadyGate; 6] = [
+    ResearchReadyGate::SelectChecks,
+    ResearchReadyGate::Architecture,
+    ResearchReadyGate::DependencyAudit,
+    ResearchReadyGate::CloudflareMcp,
+    ResearchReadyGate::ResearchWindowsV3,
+    ResearchReadyGate::Ci,
+];
+
 impl ReadyEvidencePolicy {
     const fn gates(self) -> &'static [ResearchReadyGate] {
-        // There is no status rename in the current CI. Preserve the v1
-        // seven-job acceptance verbatim; a future migration must define a
-        // third version rather than silently adding names or aliases here.
+        // Never silently grant a v1/v2 artifact the new v3 status semantics.
         match self {
-            Self::LegacyV1 | Self::NamedV2 => &RESEARCH_READY_GATES,
+            Self::LegacyV1 | Self::NamedV2 => &LEGACY_RESEARCH_READY_GATES,
+            Self::NamedV3 => &OWNER_SCOPED_RESEARCH_READY_GATES,
         }
     }
 }
@@ -179,6 +218,7 @@ const CURRENT_RESEARCH_POINTER: &str = "installed-research.json";
 const ROLLBACK_RESEARCH_POINTER: &str = "rollback-research.json";
 const RESEARCH_COMPONENT_SCHEMA_V1: &str = "okx.windows.research-component/v1";
 const RESEARCH_COMPONENT_SCHEMA_V2: &str = "okx.windows.research-component/v2";
+const RESEARCH_COMPONENT_SCHEMA_V3: &str = "okx.windows.research-component/v3";
 
 /// The parent CONTROL singleton is scoped to the interactive Windows session.
 /// Independent sessions therefore need an installation-scoped kernel guard
@@ -314,6 +354,26 @@ fn decode_research_manifest(
                 },
             ))
         }
+        Some(RESEARCH_COMPONENT_SCHEMA_V3) => {
+            let v3: ResearchComponentManifestV3 = serde_json::from_slice(bytes)?;
+            if v3.ci_status_policy != NamedResearchReadyPolicyV3::ReadyV3 {
+                return Err(HostControlError::ArtifactVerification(
+                    "unknown research Ready-evidence policy",
+                ));
+            }
+            Ok((
+                ReadyEvidencePolicy::NamedV3,
+                ResearchComponentManifestV1 {
+                    schema: v3.schema,
+                    repository_id: v3.repository_id,
+                    source_head_sha: v3.source_head_sha,
+                    source_tree: v3.source_tree,
+                    rust_version: v3.rust_version,
+                    cargo_lock_sha256: v3.cargo_lock_sha256,
+                    worker: v3.worker,
+                },
+            ))
+        }
         _ => Err(HostControlError::ArtifactVerification(
             "unknown research release schema or Ready-evidence version",
         )),
@@ -379,6 +439,7 @@ fn parse_research_component_archive(
         (policy, manifest.schema.as_str()),
         (ReadyEvidencePolicy::LegacyV1, RESEARCH_COMPONENT_SCHEMA_V1)
             | (ReadyEvidencePolicy::NamedV2, RESEARCH_COMPONENT_SCHEMA_V2)
+            | (ReadyEvidencePolicy::NamedV3, RESEARCH_COMPONENT_SCHEMA_V3)
     ) || manifest.repository_id != REPOSITORY_ID
         || manifest.source_head_sha != expected_head
         || manifest.source_tree != expected_tree
@@ -1341,6 +1402,14 @@ mod tests {
         (manifest, zip)
     }
 
+    fn standalone_v3_fixture() -> (Value, Vec<u8>) {
+        let (mut manifest, _) = standalone_fixture();
+        manifest["schema"] = json!(RESEARCH_COMPONENT_SCHEMA_V3);
+        manifest["ci_status_policy"] = json!("okx.github.actions.research-ready/v3");
+        let zip = standalone_fixture_zip(manifest.clone(), &[], None);
+        (manifest, zip)
+    }
+
     fn standalone_raw_manifest_zip(manifest: &[u8]) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let options = zip::write::SimpleFileOptions::default();
@@ -1431,6 +1500,22 @@ mod tests {
             head_sha: run.head_sha.clone(),
         })
         .collect();
+        (run, artifact, jobs)
+    }
+
+    fn ready_jobs_v3() -> (WorkflowRun, WorkflowArtifact, Vec<WorkflowJob>) {
+        let (run, artifact, _) = ready_jobs();
+        let jobs = ReadyEvidencePolicy::NamedV3
+            .gates()
+            .iter()
+            .map(|gate| WorkflowJob {
+                run_id: run.id,
+                name: gate.name().into(),
+                status: "completed".into(),
+                conclusion: Some("success".into()),
+                head_sha: run.head_sha.clone(),
+            })
+            .collect();
         (run, artifact, jobs)
     }
 
@@ -1570,6 +1655,101 @@ mod tests {
             original.replacen(&schema_field, &format!("{schema_field},{schema_field}"), 1);
         assert!(
             parse_standalone(&standalone_raw_manifest_zip(duplicate_schema.as_bytes())).is_err()
+        );
+    }
+
+    #[test]
+    fn research_ready_policy_v3_accepts_only_owner_scoped_first_attempt_evidence() {
+        let (manifest, zip) = standalone_v3_fixture();
+        let (record, worker, policy) = parse_standalone(&zip).unwrap();
+        assert_eq!(policy, ReadyEvidencePolicy::NamedV3);
+        assert_eq!(record.worker_sha256, sha256_hex(&worker));
+
+        let (run, artifact, jobs) = ready_jobs_v3();
+        assert_eq!(policy.gates().len(), 6);
+        validate_research_ready_jobs_for_policy(policy, &run, &artifact, &jobs).unwrap();
+        for gate in policy.gates() {
+            let missing: Vec<_> = jobs
+                .iter()
+                .filter(|job| job.name != gate.name())
+                .cloned()
+                .collect();
+            assert!(
+                validate_research_ready_jobs_for_policy(policy, &run, &artifact, &missing).is_err(),
+                "v3 accepted missing {}",
+                gate.name()
+            );
+        }
+        let (_, _, old_jobs) = ready_jobs();
+        assert!(
+            validate_research_ready_jobs_for_policy(policy, &run, &artifact, &old_jobs).is_err()
+        );
+        for old in [ReadyEvidencePolicy::LegacyV1, ReadyEvidencePolicy::NamedV2] {
+            assert!(
+                validate_research_ready_jobs_for_policy(old, &run, &artifact, &jobs).is_err()
+            );
+        }
+        for changed in [
+            {
+                let mut j = jobs.clone();
+                j[0].name = "select-checks-v2".into();
+                j
+            },
+            {
+                let mut j = jobs.clone();
+                j[1].conclusion = Some("skipped".into());
+                j
+            },
+            {
+                let mut j = jobs.clone();
+                j[2].status = "queued".into();
+                j
+            },
+            {
+                let mut j = jobs.clone();
+                let duplicate = j[0].clone();
+                j.push(duplicate);
+                j
+            },
+            {
+                let mut j = jobs.clone();
+                j[0].head_sha = "b".repeat(40);
+                j
+            },
+        ] {
+            assert!(
+                validate_research_ready_jobs_for_policy(policy, &run, &artifact, &changed).is_err()
+            );
+        }
+        let mut retried = run.clone();
+        retried.run_attempt = 2;
+        assert!(
+            validate_research_ready_jobs_for_policy(policy, &retried, &artifact, &jobs).is_err()
+        );
+
+        for (schema, name) in [
+            (RESEARCH_COMPONENT_SCHEMA_V2, "okx.github.actions.research-ready/v3"),
+            (RESEARCH_COMPONENT_SCHEMA_V3, "okx.github.actions.research-ready/v2"),
+            (RESEARCH_COMPONENT_SCHEMA_V3, "okx.github.actions.research-ready/v1"),
+        ] {
+            let mut wrong = manifest.clone();
+            wrong["schema"] = json!(schema);
+            wrong["ci_status_policy"] = json!(name);
+            assert!(parse_standalone(&standalone_fixture_zip(wrong, &[], None)).is_err());
+        }
+        let mut missing = manifest.clone();
+        missing.as_object_mut().unwrap().remove("ci_status_policy");
+        assert!(parse_standalone(&standalone_fixture_zip(missing, &[], None)).is_err());
+        let mut unknown = manifest.clone();
+        unknown["engine_source"] = json!("forbidden");
+        assert!(parse_standalone(&standalone_fixture_zip(unknown, &[], None)).is_err());
+
+        let original = serde_json::to_string(&manifest).unwrap();
+        let field = "\"ci_status_policy\":\"okx.github.actions.research-ready/v3\"";
+        assert!(original.contains(field));
+        let duplicate_policy = original.replacen(field, &format!("{field},{field}"), 1);
+        assert!(
+            parse_standalone(&standalone_raw_manifest_zip(duplicate_policy.as_bytes())).is_err()
         );
     }
 

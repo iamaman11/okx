@@ -11,6 +11,11 @@ const path = require('node:path');
 const FILES = Object.freeze(['Cargo.lock', 'manifest.json', 'okx-research-service.exe']);
 const SHA40 = /^[0-9a-f]{40}$/;
 const SHA64 = /^[0-9a-f]{64}$/;
+const READY_POLICY = Object.freeze({
+  'okx.windows.research-component/v1': null,
+  'okx.windows.research-component/v2': 'okx.github.actions.research-ready/v2',
+  'okx.windows.research-component/v3': 'okx.github.actions.research-ready/v3',
+});
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
 function exactKeys(value, keys, cause) {
@@ -21,12 +26,18 @@ function exactKeys(value, keys, cause) {
 }
 
 function validateManifest(manifest, lockBytes, workerBytes, expectedHead, expectedTree) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) ||
+      !Object.hasOwn(READY_POLICY, manifest.schema))
+    throw Error('RESEARCH_COMPONENT_SCHEMA_UNSUPPORTED');
+  const policy = READY_POLICY[manifest.schema];
   exactKeys(manifest, ['schema', 'repository_id', 'source_head_sha', 'source_tree',
-    'rust_version', 'cargo_lock_sha256', 'worker'], 'RESEARCH_COMPONENT_MANIFEST_FIELDS');
+    'rust_version', 'cargo_lock_sha256', 'worker',
+    ...(policy === null ? [] : ['ci_status_policy'])], 'RESEARCH_COMPONENT_MANIFEST_FIELDS');
+  if (policy !== null && manifest.ci_status_policy !== policy)
+    throw Error('RESEARCH_COMPONENT_READY_POLICY_MISMATCH');
   exactKeys(manifest.worker, ['sha256', 'size', 'protocol_version', 'storage_version'],
     'RESEARCH_COMPONENT_WORKER_FIELDS');
-  if (manifest.schema !== 'okx.windows.research-component/v1' ||
-      manifest.repository_id !== 1388071566 ||
+  if (manifest.repository_id !== 1388071566 ||
       !SHA40.test(manifest.source_head_sha) || !SHA40.test(manifest.source_tree) ||
       !SHA40.test(expectedHead) || !SHA40.test(expectedTree) ||
       manifest.source_head_sha !== expectedHead || manifest.source_tree !== expectedTree ||
@@ -42,7 +53,8 @@ function validateManifest(manifest, lockBytes, workerBytes, expectedHead, expect
       c.sha256 !== sha256(workerBytes) || c.protocol_version !== 1 ||
       c.storage_version !== 1)
     throw Error('RESEARCH_COMPONENT_BYTES_OR_COMPATIBILITY_INVALID');
-  return {schema: manifest.schema, source_head_sha: expectedHead,
+  return {schema: manifest.schema, ci_status_policy: policy,
+    source_head_sha: expectedHead,
     source_tree: expectedTree, research_component_sha256: c.sha256,
     cargo_lock_sha256: manifest.cargo_lock_sha256,
     release_is_complete: false, no_engine_binary_or_dependency_base: true};
