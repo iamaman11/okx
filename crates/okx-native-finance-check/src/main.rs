@@ -34,7 +34,14 @@ const PACKAGES: [&str; 4] = [
 // keep those witnesses in a separate child with bounded concurrency.
 const FINANCIAL_WITNESS_TEST_THREADS: u64 = 4;
 const CLOCK_SENSITIVE_TEST_THREADS: u64 = 2;
-const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 7] = [
+const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 10] = [
+    // All three remain mandatory original-finance witnesses. Their live
+    // source readiness, exchange-clock evidence and SQL queue deadlines
+    // depend on real monotonic time; unrelated heavy fixtures at four-way
+    // concurrency can trigger early fail-closed admission under contention.
+    "accounts::native_trade_contracts::native_add::risk_book_contract_native_public_add_preserves_original_lot_and_protects_increment",
+    "accounts::native_trade_contracts::native_changed_source::risk_book_contract_native_changed_post_held_fee_releases_unsent_and_replans",
+    "accounts::native_trade_contracts::native_diagnostics::risk_book_contract_native_unknown_intent_diagnostic_reads_sql_without_network_or_resend",
     "accounts::native_trade_contracts::native_fee_correction::risk_book_contract_native_late_fee_rebate_and_bound_breach_use_immutable_revisions",
     "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_failed_stop_emergency_close_and_verified_remediation",
     "accounts::native_trade_contracts::native_filled_close::risk_book_contract_native_filled_close_settlement_release_and_cold_reopen",
@@ -523,10 +530,13 @@ mod timing_tests {
     }
     #[test]
     fn clock_sensitive_partition_is_exact_and_never_drops_a_witness() {
+        assert_eq!(FINANCIAL_WITNESS_TEST_THREADS, 4);
+        assert_eq!(CLOCK_SENSITIVE_TEST_THREADS, 2);
         let mut names: BTreeSet<String> = CLOCK_SENSITIVE_AGENT_WITNESSES
             .iter()
             .map(|name| (*name).to_owned())
             .collect();
+        assert_eq!(names.len(), CLOCK_SENSITIVE_AGENT_WITNESSES.len());
         names.insert("another-financial-witness".into());
         let groups = libtest_groups("okx-trading-engine", &names).unwrap();
         assert_eq!(groups.len(), 2);
@@ -544,11 +554,16 @@ mod timing_tests {
                 .collect::<BTreeSet<_>>(),
             names
         );
-        names.remove(CLOCK_SENSITIVE_AGENT_WITNESSES[0]);
-        assert!(matches!(
-            libtest_groups("okx-trading-engine", &names),
-            Err("CLOCK_SENSITIVE_WITNESS_MISSING")
-        ));
+        // Every individual missing protected clock witness fails closed;
+        // neither a partial group nor a duplicate can be accepted as full.
+        for omitted in CLOCK_SENSITIVE_AGENT_WITNESSES {
+            let mut missing = names.clone();
+            assert!(missing.remove(omitted));
+            assert!(matches!(
+                libtest_groups("okx-trading-engine", &missing),
+                Err("CLOCK_SENSITIVE_WITNESS_MISSING")
+            ));
+        }
         let agent_names: BTreeSet<String> = selected()
             .unwrap()
             .into_iter()
@@ -560,6 +575,38 @@ mod timing_tests {
             actual[0].names.len() + actual[1].names.len(),
             agent_names.len()
         );
+        assert!(actual[0].names.is_disjoint(&actual[1].names));
+        assert_eq!(
+            actual[0]
+                .names
+                .union(&actual[1].names)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            agent_names
+        );
         assert_eq!(actual[1].names.len(), CLOCK_SENSITIVE_AGENT_WITNESSES.len());
+        for name in CLOCK_SENSITIVE_AGENT_WITNESSES {
+            assert!(actual[1].names.contains(name));
+            assert!(!actual[0].names.contains(name));
+        }
+        // The Add fixture uses a real signed exchange-clock GET and an exact
+        // transcript. It remains mandatory within the bounded clock group.
+        let public_add = "accounts::native_trade_contracts::native_add::risk_book_contract_native_public_add_preserves_original_lot_and_protects_increment";
+        assert!(!actual[0].names.contains(public_add));
+        assert!(actual[1].names.contains(public_add));
+        assert_eq!(actual[0].names.len(), 56);
+        assert_eq!(actual[1].names.len(), 10);
+        // No other package may silently acquire a relaxed schedule.
+        for package in [
+            "okx-trade-execution",
+            "okx-ipc-contracts",
+            "okx-market-runtime",
+        ] {
+            let original = BTreeSet::from(["mandatory-witness".to_owned()]);
+            let groups = libtest_groups(package, &original).unwrap();
+            assert_eq!(groups.len(), 1);
+            assert_eq!((groups[0].label, groups[0].threads), ("all", 4));
+            assert_eq!(groups[0].names, original);
+        }
     }
 }

@@ -193,8 +193,18 @@ async fn public_add(external_increment: bool) {
     if !external_increment {
         // Windows scheduling can exceed the 5s exchange-clock offset budget
         // between fixture setup and delivery of the one-shot public time GET.
+        // The production clock client fetches a new sample for each mutation;
+        // there is no cached clock TTL to wait out before this request.
         fixture.feed.expect_current_public_clock();
     }
+    let clock_gets_before_add = fixture
+        .feed
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.as_str() == "public:/api/v5/public/time")
+        .count();
     record_fee(&fixture.feed, &now); // plan
     record_leverage(&fixture.feed); // plan
     record_leverage(&fixture.feed); // immutable quote
@@ -223,7 +233,6 @@ async fn public_add(external_increment: bool) {
         fixture.market_boundary.updates.load(Ordering::SeqCst),
         if external_increment { 4 } else { 5 }
     );
-    assert_consumed(&fixture);
 
     if external_increment {
         assert_eq!(add["data"]["state"], "REJECTED", "{add}");
@@ -233,6 +242,19 @@ async fn public_add(external_increment: bool) {
             "{add}"
         );
         assert_eq!(add["data"]["risk_release_state"], "NOT_RESERVED", "{add}");
+        assert_eq!(
+            fixture
+                .feed
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.as_str() == "public:/api/v5/public/time")
+                .count(),
+            clock_gets_before_add,
+            "a rejected external Add cannot fetch a mutation clock"
+        );
+        assert_consumed(&fixture);
         assert_eq!(fixture.feed.outbound_posts.lock().unwrap().len(), 1);
         assert_eq!(
             fixture
@@ -266,7 +288,26 @@ async fn public_add(external_increment: bool) {
         );
         assert_finance(&fixture, Decimal::new(5, 4), 1).await;
     } else {
-        assert_eq!(add["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN", "{add}");
+        // Diagnose the actual safe early-rejection reason *before* checking
+        // leftover one-shot transcript pages or the expected Create POST.
+        assert_eq!(
+            add["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
+            "positive Add did not reach its original Create; reason_code={} primary_reason={}",
+            add["reason_code"], add["data"]["primary_reason"]
+        );
+        assert_eq!(
+            fixture
+                .feed
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.as_str() == "public:/api/v5/public/time")
+                .count(),
+            clock_gets_before_add + 1,
+            "positive Add must fetch exactly one fresh production public clock"
+        );
+        assert_consumed(&fixture);
         let increment = add["intent_id"].as_str().unwrap().to_owned();
         assert_ne!(increment, entry);
         let added = lookup(&fixture, &increment).await;
