@@ -112,6 +112,9 @@ pub enum HostControlError {
     #[error("Research image transition could not prove restoration of the previous image")]
     ResearchRollbackUnconfirmed,
 
+    #[error("Research image pointer global Windows lock is unavailable or abandoned")]
+    ResearchPointerLockUnavailable,
+
     #[error("the verified Engine image must expose the independent Engine runtime contract")]
     IndependentEngineRequired,
 
@@ -218,6 +221,7 @@ impl HostControlError {
             Self::ResearchGenerationExhausted => "RESEARCH_GENERATION_EXHAUSTED",
             Self::ResearchActivationRolledBack => "RESEARCH_ACTIVATION_ROLLED_BACK",
             Self::ResearchRollbackUnconfirmed => "RESEARCH_ROLLBACK_UNCONFIRMED",
+            Self::ResearchPointerLockUnavailable => "RESEARCH_POINTER_LOCK_UNAVAILABLE",
             Self::IndependentEngineRequired => "INDEPENDENT_ENGINE_REQUIRED",
             Self::ResearchCatalogScopeRequired => "RESEARCH_CATALOG_SCOPE_REQUIRED",
             Self::ResearchCatalogMissing => "RESEARCH_CATALOG_MISSING",

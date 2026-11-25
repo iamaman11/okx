@@ -77,6 +77,75 @@ const MAX_RESEARCH_POINTER_BYTES: u64 = 64 * 1024;
 const CURRENT_RESEARCH_POINTER: &str = "installed-research.json";
 const ROLLBACK_RESEARCH_POINTER: &str = "rollback-research.json";
 
+/// The parent CONTROL singleton is scoped to the interactive Windows session.
+/// Independent sessions therefore need an installation-scoped kernel guard
+/// over the entire pointer transition (including failed-activation rollback).
+/// The name contains a path fingerprint, never the installation path itself.
+#[cfg(windows)]
+struct ResearchPointerGuard {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl ResearchPointerGuard {
+    fn acquire(root: &Path) -> HostControlResult<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0},
+            System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
+        };
+
+        let fingerprint = sha256_hex(root.to_string_lossy().to_lowercase().as_bytes());
+        let name = format!(
+            r"Global\iamaman11-okx-research-pointer-{}",
+            &fingerprint[..32]
+        );
+        let wide: Vec<u16> = std::ffi::OsStr::new(&name)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // The current Windows token's default DACL owns the mutex. Reusing a
+        // cross-session object requires the same rights; access denied, held
+        // and abandoned states all fail closed without touching the pointer.
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+        if handle.is_null() {
+            return Err(HostControlError::ResearchPointerLockUnavailable);
+        }
+        let wait = unsafe { WaitForSingleObject(handle, 0) };
+        if wait != WAIT_OBJECT_0 {
+            if wait == WAIT_ABANDONED {
+                unsafe { ReleaseMutex(handle) };
+            }
+            unsafe { CloseHandle(handle) };
+            return Err(HostControlError::ResearchPointerLockUnavailable);
+        }
+        Ok(Self { handle })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ResearchPointerGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::{Foundation::CloseHandle, System::Threading::ReleaseMutex};
+        unsafe {
+            ReleaseMutex(self.handle);
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct ResearchPointerGuard;
+
+#[cfg(not(windows))]
+impl ResearchPointerGuard {
+    fn acquire(_root: &Path) -> HostControlResult<Self> {
+        // Production Research supervision is Windows-only; this fallback only
+        // allows cross-platform unit tests to exercise pointer compensation.
+        Ok(Self)
+    }
+}
+
 fn valid_hex(value: &str, len: usize) -> bool {
     value.len() == len
         && value
@@ -314,6 +383,7 @@ pub async fn deploy_research(
     };
     let verified = Instant::now();
     let root = Path::new(okx_host_launcher::RUNTIME_ROOT);
+    let _pointer_guard = ResearchPointerGuard::acquire(root)?;
     let staged = prepare_research_transition(root, &record, &worker)?;
     let expected_generation = supervisor.process_generation();
     let status = supervisor.transition_image(
@@ -362,6 +432,7 @@ fn rollback_research_with_supervisor(
     expected_rollback_worker_sha256: &str,
 ) -> HostControlResult<Value> {
     let started = Instant::now();
+    let _pointer_guard = ResearchPointerGuard::acquire(root)?;
     validate_existing_ancestors(root)?;
     existing_plain_directory(root)?;
     let current = read_research_pointer(root, CURRENT_RESEARCH_POINTER)?.ok_or(
@@ -390,7 +461,7 @@ fn rollback_research_with_supervisor(
             }
             write_research_pointer(root, CURRENT_RESEARCH_POINTER, &previous)
         },
-        || write_research_pointer(root, CURRENT_RESEARCH_POINTER, &current),
+        || restore_rollback_pointer_if_expected(root, &previous, &current),
     )?;
     let restored = Instant::now();
     Ok(json!({
@@ -405,6 +476,23 @@ fn rollback_research_with_supervisor(
             "control_total": (restored - started).as_millis()
         }
     }))
+}
+
+/// A failed process activation may only undo its *own* pointer publication.
+/// Another CONTROL session may have advanced the installed image meanwhile;
+/// an unqualified write here would silently roll that third image back.
+fn restore_rollback_pointer_if_expected(
+    root: &Path,
+    attempted: &InstalledResearch,
+    original: &InstalledResearch,
+) -> HostControlResult<()> {
+    match read_research_pointer(root, CURRENT_RESEARCH_POINTER)? {
+        Some(observed) if observed == *attempted => {
+            write_research_pointer(root, CURRENT_RESEARCH_POINTER, original)
+        }
+        Some(observed) if observed == *original => Ok(()),
+        _ => Err(HostControlError::ResearchRollbackUnconfirmed),
+    }
 }
 
 #[cfg(test)]
@@ -894,6 +982,26 @@ mod tests {
 
     use crate::research_supervisor::ResearchSupervisor;
 
+    #[cfg(windows)]
+    #[test]
+    fn research_pointer_global_mutex_serializes_two_control_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "research-global-mutex-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = ResearchPointerGuard::acquire(&root).unwrap();
+        assert_eq!(
+            ResearchPointerGuard::acquire(&root).err().unwrap().code(),
+            "RESEARCH_POINTER_LOCK_UNAVAILABLE"
+        );
+        drop(first);
+        assert!(ResearchPointerGuard::acquire(&root).is_ok());
+    }
+
     fn fixture_record(bytes: &[u8], marker: char) -> InstalledResearch {
         InstalledResearch {
             schema: "okx.host-control.installed-research/v1".into(),
@@ -1061,6 +1169,49 @@ mod tests {
             .unwrap_err()
             .code(),
             "RESEARCH_IDENTITY_MISMATCH"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_rollback_compensation_never_overwrites_a_third_image() {
+        let root = std::env::temp_dir().join(format!(
+            "research-rollback-cas-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let old = fixture_record(b"old", 'a');
+        let current = fixture_record(b"current", 'c');
+        let third = fixture_record(b"third", 'd');
+        stage_research(&root, &old, b"old").unwrap();
+        stage_research(&root, &current, b"current").unwrap();
+
+        // The failed rollback published the old image. Reverting that exact
+        // write is permitted and restores the original current image.
+        write_research_pointer(&root, CURRENT_RESEARCH_POINTER, &old).unwrap();
+        restore_rollback_pointer_if_expected(&root, &old, &current).unwrap();
+        assert_eq!(
+            read_research_pointer(&root, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(current.clone())
+        );
+
+        // Another owner has advanced the pointer after the first session's
+        // rollback commit. Its candidate must never be overwritten by the
+        // first session's failure compensation.
+        stage_research(&root, &third, b"third").unwrap();
+        assert_eq!(
+            restore_rollback_pointer_if_expected(&root, &old, &current)
+                .unwrap_err()
+                .code(),
+            "RESEARCH_ROLLBACK_UNCONFIRMED"
+        );
+        assert_eq!(
+            read_research_pointer(&root, CURRENT_RESEARCH_POINTER).unwrap(),
+            Some(third)
         );
         fs::remove_dir_all(root).unwrap();
     }

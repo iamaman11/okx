@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 import re
+import sys
 
 from check_ci_native_scope import classify as ready_classify, github_plan, select_draft
 from check_p0 import (check_counts, local_component, measured_mcp_native_under_research,
@@ -116,11 +117,25 @@ class FeedbackTests(unittest.TestCase):
                   patch("check_p0.measured_native_under_research", return_value={}),
                   patch("check_p0.report_native_under_research"),
                   patch("check_p0.subprocess.check_output", return_value='{"target_directory":"/tmp/no-exec"}'),
+                  patch("check_p0.subprocess.run") as build_worker,
+                  patch("check_p0.shutil.copy2") as copy_worker,
                   patch.dict("check_p0.os.environ")):
                 execute(select_draft("modified", path) - {"mcp"})
+            self.assertIn("test-isolated-singleton", build_worker.call_args.args[0])
+            self.assertIn("test-isolated", str(copy_worker.call_args.args[1]))
             packages = [call.args[0] for call in run_tests.call_args_list]
             self.assertIn("okx-research-service", packages)
             self.assertIn("okx-trading-engine", packages)
+
+    def test_edge_only_fast_feedback_checks_public_product_contract_first(self):
+        with patch("check_p0.subprocess.run") as subprocess_run:
+            execute({"mcp"})
+        calls = [call.args[0] for call in subprocess_run.call_args_list]
+        self.assertEqual(calls[:2], [
+            [sys.executable, "scripts/check_product_contract.py", "--self-test"],
+            [sys.executable, "scripts/check_product_contract.py"],
+        ])
+        self.assertTrue(any(command[:3] == ["npm", "run", "check"] for command in calls))
 
     def test_one_plan_routes_research_transport_without_engine(self):
         pages = [[{"filename": "crates/okx-research-service/src/ipc/correlation_tests.rs",

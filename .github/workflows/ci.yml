@@ -540,6 +540,12 @@ jobs:
           cargo test --locked -p okx-research-service --test ipc_process -- --nocapture | tee "$RUNNER_TEMP/research-worker-ipc.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-worker-ipc.log"
           cargo test --locked -p okx-research-service --doc
+          # Keep the standalone Research process tests on the production
+          # singleton above. Engine's legacy T06–T10 child fixtures require a
+          # separate, opt-in debug worker, never a shipping binary.
+          cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
+          cp target/debug/okx-research-service target/debug/okx-research-service-test-isolated
+          export OKX_RESEARCH_SERVICE_TEST_EXE="$PWD/target/debug/okx-research-service-test-isolated"
           cargo test --locked -p okx-trading-engine --lib research_dispatch_tests:: -- --test-threads 2 | tee "$RUNNER_TEMP/research-dispatch.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/research-dispatch.log"
 
@@ -588,6 +594,10 @@ jobs:
 
       - name: Typecheck
         run: npm run check
+      - name: Enforce public Engine and MCP product contract for Edge-only changes
+        # architecture-contracts is intentionally skipped on an Edge-only
+        # scope. Its public tool/risk/schema guard must not be skipped too.
+        run: python3 ../../scripts/check_product_contract.py
       - name: Accept authenticated RuntimeSession transport without financial authority
         run: node scripts/test-native-finance-retirement-do.mjs
 
@@ -893,8 +903,12 @@ jobs:
       - name: Build research worker for isolated process contracts
         shell: pwsh
         run: |
-          cargo build --locked -p okx-research-service --bin okx-research-service
+          # The process-level production singleton remains strict. Legacy
+          # Engine child tests get an opt-in debug binary with per-root mutex
+          # namespace injected by the #[cfg(test)] ResearchClient only.
+          cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'target/debug/okx-research-service.exe' -Destination 'target/debug/okx-research-service-test-isolated.exe'
 
       - name: Isolated Native pending-fill crash recovery
         shell: pwsh
@@ -920,7 +934,7 @@ jobs:
         id: engine-autonomy
         shell: pwsh
         run: |
-          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
           $output = & cargo test --locked -p okx-trading-engine --lib accounts::native_trade_contracts::native_engine_research::engine_maintenance_and_stop_remain_independent_of_heavy_research_and_disconnect -- --exact --nocapture 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\b-process-tree.log" | Out-Host
@@ -953,7 +967,7 @@ jobs:
         env:
           OKX_CONTROL_AGENT_INCAR: ctl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         run: |
-          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
           $output = & cargo test --locked -p okx-trading-engine --lib accounts::native_trade_contracts::native_engine_research::mcp_http_durable_object_wss_native_finance_stays_readable_under_heavy_research -- --exact --nocapture --test-threads 1 2>&1
           $code = $LASTEXITCODE
           $output | Tee-Object -FilePath "$env:RUNNER_TEMP\mcp-native-load.log" | Out-Host
@@ -1029,8 +1043,9 @@ jobs:
         if: matrix.suite == 'engine'
         shell: pwsh
         run: |
-          cargo build --locked -p okx-research-service --bin okx-research-service
+          cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'target/debug/okx-research-service.exe' -Destination 'target/debug/okx-research-service-test-isolated.exe'
 
       - name: Remaining native regression tests for this suite
         if: matrix.suite == 'engine' || matrix.suite == 'host' || matrix.suite == 'execution'
@@ -1040,7 +1055,7 @@ jobs:
         run: |
           $packages = switch ($env:NATIVE_REGRESSION_SUITE) {
             'engine' {
-              $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+              $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
               'okx-trading-engine'
             }
             'host' { 'okx-host-controller'; 'okx-host-launcher'; 'okx-host-protocol'; 'okx-bridge-mcp' }
@@ -1184,7 +1199,7 @@ jobs:
         if: matrix.suite == 'engine'
         shell: pwsh
         run: |
-          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service.exe').Path
+          $env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path 'target/debug/okx-research-service-test-isolated.exe').Path
           $output = & cargo test --locked -p okx-trading-engine --lib research_dispatch_tests:: -- --test-threads 2 2>&1
           $code = $LASTEXITCODE
           $output | Out-Host

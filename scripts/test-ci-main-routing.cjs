@@ -152,7 +152,11 @@ function validate(yaml, fileNames) {
   assert.match(edge, /npm ci --ignore-scripts --no-audit --no-fund/);
   assert.match(edge, /needs\.component_impact\.outputs\.edge_required == 'true'/);
   assert.match(edge, /npm run check/);
+  assert.match(edge, /python3 \.\.\/\.\.\/scripts\/check_product_contract\.py/,
+    'EDGE_ONLY_CHANGES_MUST_KEEP_PUBLIC_PRODUCT_CONTRACT');
   assert.match(edge, /node scripts\/test-native-finance-retirement-do\.mjs/);
+  assert.match(linux, /cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton/);
+  assert.match(linux, /okx-research-service-test-isolated/);
   const engine = job('trading_engine_acceptance_windows');
   assert.doesNotMatch(engine, /cargo run[^\n]*-- --list/, 'REDUNDANT_CARGO_FINANCIAL_LIST');
   assert.doesNotMatch(engine, /id: native-properties\s+if:/, 'FULL_MAIN_FALLBACK_MUST_RUN_FINANCE');
@@ -165,6 +169,8 @@ function validate(yaml, fileNames) {
   assert.match(engine, /MCP DO WSS Native finance under isolated Research load/);
   assert.match(engine, /standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture/);
   assert.match(engine, /STANDALONE_RESEARCH_MCP_WITNESS_NOT_RUN/);
+  assert.match(engine, /cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton/);
+  assert.match(engine, /Resolve-Path 'target\/debug\/okx-research-service-test-isolated\.exe'/);
   assert.doesNotMatch(engine, /K9 worker two-heavy cancellation latency evidence/);
   const regression = job('trading_engine_regressions_windows');
   assert.match(regression, /needs: component_impact/);
@@ -204,6 +210,8 @@ function validate(yaml, fileNames) {
     'installed_research_bearer_is_pinned_to_control_edge_origin',
   ]) assert.match(regression, new RegExp(witness));
   assert.match(regression, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
+  assert.match(regression, /cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton/);
+  assert.match(regression, /Resolve-Path 'target\/debug\/okx-research-service-test-isolated\.exe'/);
   assert.match(regression, /'execution' \{ 'okx-trade-execution' \}/);
   // The six 3s SQLite-writer/catalog fixtures are still mandatory, just not
   // contending with the remaining 300 Engine libtests for the test-harness clock.
@@ -234,6 +242,8 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(build, /shared-key: trading-engine-tests-windows/);
   assert.match(build, /cache-on-failure: false/);
   assert.match(build, /cargo build --locked --release/);
+  assert.doesNotMatch(build, /--features test-isolated-singleton/,
+    'SHIPPING_ENGINE_BUNDLE_MUST_NOT_USE_TEST_SINGLETON');
   assert.match(build, /PACKAGED_ENGINE_RUNTIME_CONTRACT_INVALID/);
   assert.match(build, /name: okx-windows-bundle-\$\{\{ github.event.pull_request.head.sha \}\}/);
   assert.match(build, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope != 'engine'\n        uses: actions\/upload-artifact/);

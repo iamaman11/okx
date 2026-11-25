@@ -92,7 +92,7 @@ for(const schema of ACTION_SCHEMAS.trade){if(['preview','execute'].includes(sche
 ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['reference']}]}];
 // The MCP tool is the permission/approval boundary. Do not mix preview
 // with real order submission under a single model-callable descriptor.
-const TOOL_NOTES:Record<string,{description?:string;readOnlyHint:boolean;destructiveHint:boolean}>={
+const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  accounts:{description:'Accounts.',readOnlyHint:false,destructiveHint:true},
  strategies:{description:'Strategies; may trade.',readOnlyHint:false,destructiveHint:true},
  market:{description:'Market: graphs via screen + composition.',readOnlyHint:true,destructiveHint:false},
@@ -100,14 +100,14 @@ const TOOL_NOTES:Record<string,{description?:string;readOnlyHint:boolean;destruc
  portfolio:{description:'Portfolio.',readOnlyHint:true,destructiveHint:false},
  diagnostics:{description:'Diagnostics.',readOnlyHint:true,destructiveHint:false},
 };
-const TRADE_NOTES:Record<string,{description?:string;readOnlyHint:boolean;destructiveHint:boolean}>={
+const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  preview:{description:'Preview; no order.',readOnlyHint:true,destructiveHint:false},
  execute:{description:'Real order; loss possible. Approval, limits, STOP required.',readOnlyHint:false,destructiveHint:true},
- status:{readOnlyHint:true,destructiveHint:false},
+ status:{description:'Status.',readOnlyHint:true,destructiveHint:false},
  cancel:{description:'Cancel order.',readOnlyHint:false,destructiveHint:true},
  close:{description:'Real close order.',readOnlyHint:false,destructiveHint:true},
- capabilities:{readOnlyHint:true,destructiveHint:false},
- preflight:{readOnlyHint:true,destructiveHint:false},
+ capabilities:{description:'Rights.',readOnlyHint:true,destructiveHint:false},
+ preflight:{description:'Readiness.',readOnlyHint:true,destructiveHint:false},
 };
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
@@ -177,21 +177,10 @@ function publicStrategiesSchema():Schema {
    oneOf:[...reads,{properties:{...mutation,...instance},required:['idempotency_key','instance_id'],oneOf:writes}],
  });
 }
-// The action discriminator selects exactly one branch. Closing evaluated
-// properties once at the union boundary is equivalent to repeating the same
-// additionalProperties:false in every branch, and is already used for the
-// Strategies public schema. The runtime validator retains its strict source.
-function publicActionUnion(schemas:Schema[]):Schema {
- return publicSchema({oneOf:schemas.map(({additionalProperties:_strict,...branch})=>branch),
-   unevaluatedProperties:false});
-}
-function optionalDescription(note:{description?:string}):Schema {
- return note.description===undefined?{}:{description:note.description};
-}
 export const PUBLIC_TOOLS:Json[]=[
  ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')
-   .map(([name,schemas])=>({name,...optionalDescription(TOOL_NOTES[name]),
-     inputSchema:name==='accounts'?publicAccountsSchema():name==='strategies'?publicStrategiesSchema():publicActionUnion(schemas),
+   .map(([name,schemas])=>({name,description:TOOL_NOTES[name].description,
+     inputSchema:name==='accounts'?publicAccountsSchema():name==='strategies'?publicStrategiesSchema():publicSchema({oneOf:schemas}),
      annotations:annotation(TOOL_NOTES[name])})),
  ...ACTION_SCHEMAS.trade.map(schema=>{
    const scopedAction=String(schema.properties.action.const);
@@ -200,7 +189,7 @@ export const PUBLIC_TOOLS:Json[]=[
    // override it through a second caller-controlled action field.
    const inputSchema={...schema,type:'object',properties,
      required:(schema.required as string[]).filter(k=>k!=='action')};
-   return {name:'trade.'+scopedAction,...optionalDescription(TRADE_NOTES[scopedAction]),
+   return {name:'trade.'+scopedAction,description:TRADE_NOTES[scopedAction].description,
      inputSchema:publicSchema(inputSchema),annotations:annotation(TRADE_NOTES[scopedAction])};
  })
 ];

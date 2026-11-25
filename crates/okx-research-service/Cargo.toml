@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Only for CI's non-shipping debug Research EXE. Engine test clients use
+# isolated fixtures while accepted Release binaries enforce one global Worker.
+test-isolated-singleton = []
+
 [[bin]]
 name = "okx-research-service"
 path = "src/main.rs"

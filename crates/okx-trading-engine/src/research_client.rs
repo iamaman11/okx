@@ -10,6 +10,7 @@ use okx_ipc_contracts::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     future::Future,
@@ -135,6 +136,34 @@ fn unique() -> String {
             .as_nanos(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+// This entire ResearchClient module is compiled only into the historical
+// Engine test harness. A test-feature Research executable uses this isolated
+// singleton namespace; shipping binaries ignore the environment variable and
+// enforce the one installation-wide Research Worker mutex instead.
+fn test_singleton_namespace(root: &std::path::Path) -> String {
+    let test_root = root.to_string_lossy();
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{}:{test_root}", std::process::id()).as_bytes())
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn independent_test_research_roots_have_distinct_valid_mutex_namespaces() {
+    let first = test_singleton_namespace(std::path::Path::new("test/research-a"));
+    let same = test_singleton_namespace(std::path::Path::new("test/research-a"));
+    let second = test_singleton_namespace(std::path::Path::new("test/research-b"));
+    assert_eq!(first.len(), 64);
+    assert!(
+        first
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    );
+    assert_eq!(first, same, "same test catalog must share one singleton");
+    assert_ne!(first, second, "independent tests must not contend");
 }
 fn stop_if_dispatched(c: Option<&Arc<Connection>>, dispatched: bool) {
     if dispatched && let Some(c) = c {
@@ -331,6 +360,10 @@ impl ResearchClient {
             .arg(&self.config.root)
             .arg("--scope")
             .arg(self.config.scope.as_str())
+            .env(
+                "OKX_RESEARCH_TEST_SINGLETON_NAMESPACE",
+                test_singleton_namespace(&self.config.root),
+            )
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())

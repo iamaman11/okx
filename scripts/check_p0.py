@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import statistics
 import subprocess
 import sys
@@ -337,6 +338,12 @@ def report_mcp_native_under_research(value):
 
 
 def execute(scopes):
+    if scopes & {"expanded", "mcp"}:
+        # Fast, dependency-free public product contract guard. Run before
+        # Cargo/Node setup so an unsafe Edge or Engine tool/schema change
+        # fails immediately even in a narrowly selected Draft check.
+        subprocess.run([sys.executable, "scripts/check_product_contract.py", "--self-test"], cwd=ROOT, check=True)
+        subprocess.run([sys.executable, "scripts/check_product_contract.py"], cwd=ROOT, check=True)
     if "expanded" in scopes:
         # Check the local platform and changed build inputs. Ready covers Windows and the release.
         subprocess.run(["cargo", "check", "--locked", "--workspace", "--all-targets"], cwd=ROOT, check=True)
@@ -394,7 +401,15 @@ def execute(scopes):
                                            cwd=ROOT, text=True)
         suffix = ".exe" if os.name == "nt" else ""
         worker = Path(json.loads(metadata)["target_directory"]) / "debug" / ("okx-research-service" + suffix)
-        os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(worker)
+        # Shipping and standalone Research checks use the production host-wide
+        # singleton. Only Engine's legacy child tests can spawn this opt-in
+        # debug binary; #[cfg(test)] ResearchClient injects a per-root token.
+        subprocess.run(["cargo", "build", "--locked", "-p", "okx-research-service",
+                        "--bin", "okx-research-service", "--features", "test-isolated-singleton"],
+                       cwd=ROOT, check=True)
+        isolated_worker = worker.with_name("okx-research-service-test-isolated" + suffix)
+        shutil.copy2(worker, isolated_worker)
+        os.environ["OKX_RESEARCH_SERVICE_TEST_EXE"] = str(isolated_worker)
         tests("okx-trading-engine", required=("research_dispatch_tests::real_worker_decision_replay_and_scope_are_durable_without_source_reads",), exact=True)
         tests("okx-trading-engine", required=("research_dispatch_tests::t06_t09_real_worker_causality_and_economics_are_isolated",), exact=True)
         tests("okx-trading-engine", required=("research_dispatch_tests::t06_real_worker_cross_instrument_oi_alignment_is_strict_and_isolated",), exact=True)
