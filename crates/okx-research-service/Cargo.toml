@@ -10,10 +10,19 @@ license.workspace = true
 # Only for CI's non-shipping debug Research EXE. Engine test clients use
 # isolated fixtures while accepted Release binaries enforce one global Worker.
 test-isolated-singleton = []
+# A separate, non-shipping executable drives real Research child IPC for the
+# legacy Finance-vs-Research load acceptance. Its JSONL control surface has no
+# authority in the installed Research Worker and cannot build in release.
+test-fixture = []
 
 [[bin]]
 name = "okx-research-service"
 path = "src/main.rs"
+
+[[bin]]
+name = "okx-research-load-fixture"
+path = "src/bin/research_load_fixture.rs"
+required-features = ["test-fixture"]
 
 [dependencies]
 base64 = "0.23"

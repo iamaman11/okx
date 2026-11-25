@@ -89,6 +89,96 @@ impl PublicGet for OfflineVenue {
     }
 }
 
+#[derive(Default)]
+struct ExpandedReferenceVenue(AtomicUsize);
+
+impl PublicGet for ExpandedReferenceVenue {
+    fn get(&self, path: &'static str, query: Vec<(&'static str, String)>) -> GetFuture<'_> {
+        Box::pin(async move {
+            assert_eq!(path, "/api/v5/public/instruments");
+            let kind = query
+                .iter()
+                .find(|(name, _)| *name == "instType")
+                .map(|(_, value)| value.as_str())
+                .expect("required instType");
+            let (prefix, count) = match kind {
+                "SWAP" => ("A-SWAP", 60),
+                "FUTURES" => ("Z-FUTURE", 55),
+                other => panic!("unexpected reference type: {other}"),
+            };
+            self.0.fetch_add(1, Ordering::Relaxed);
+            let data = (0..count)
+                .map(|index| {
+                    json!({
+                        "instId":format!("{prefix}-{index:02}"), "instType":kind,
+                        "state":"live", "baseCcy":"BTC", "ctValCcy":"BTC", "settleCcy":"USDT",
+                        "tickSz":"0.1", "lotSz":"1", "minSz":"1", "ruleType":"normal"
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(serde_json::to_vec(&json!({"code":"0","msg":"","data":data})).unwrap())
+        })
+    }
+}
+
+#[tokio::test]
+async fn research_owner_instrument_type_filter_precedes_public_fifty_row_limit() {
+    // A real standalone Research dispatch owns its two public reference GETs.
+    // If limit=50 is applied before the FUTURES predicate, the 60 alphabetically
+    // earlier SWAPs hide all 55 future instruments: a causal query regression.
+    let root = tempfile::tempdir().unwrap();
+    let venue = Arc::new(ExpandedReferenceVenue::default());
+    let public = Arc::new(IndependentOkxPublicSource::with_get(venue.clone()));
+    let scope = ResearchScope::new("futures-before-limit".into()).unwrap();
+    let service = AnalyticsService::new_scoped(
+        root.path().into(),
+        PublicSourceClient::new(public.clone()),
+        &scope,
+    )
+    .unwrap();
+    let found = request(
+        &service,
+        &public,
+        json!({
+            "type":"find_instruments", "asset":"BTC", "settle_currency":"USDT",
+            "instrument_type":"FUTURES"
+        }),
+    )
+    .await
+    .unwrap();
+    let rows = found["instruments"].as_array().unwrap();
+    assert_eq!(rows.len(), 50);
+    assert!(rows.iter().all(|row| {
+        row["instrument_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("Z-FUTURE-")
+    }));
+    assert_eq!(
+        venue.0.load(Ordering::Relaxed),
+        2,
+        "one SWAP and one FUTURES public GET"
+    );
+    assert_eq!(
+        request(
+            &service,
+            &public,
+            json!({
+                "type":"find_instruments", "asset":"", "settle_currency":null,
+                "instrument_type":null
+            })
+        )
+        .await
+        .unwrap_err(),
+        "INVALID_COMMAND"
+    );
+    assert_eq!(
+        venue.0.load(Ordering::Relaxed),
+        2,
+        "invalid search cannot touch source"
+    );
+}
+
 async fn request(
     service: &AnalyticsService,
     public: &IndependentOkxPublicSource,

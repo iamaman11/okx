@@ -22,7 +22,10 @@ const HOST = new Set([
   'crates/okx-host-launcher/Cargo.toml',
 ]);
 const PROTECTED = Object.freeze({
-  research: ['okx-trading-engine', 'okx-host-controller', 'okx-host-launcher'],
+  // Bridge is a live MCP consumer of shared IPC contracts. A future dev-only
+  // Research protocol edge in Bridge must block a scoped wire/domain edit just
+  // as an Engine test dependency does, even though Bridge ships separately.
+  research: ['okx-trading-engine', 'okx-host-controller', 'okx-host-launcher', 'okx-bridge-mcp'],
   'host-controller': ['okx-trading-engine', 'okx-research-service'],
   'host-launcher': ['okx-trading-engine', 'okx-research-service'],
 });
@@ -43,15 +46,21 @@ const host = p => ['crates/okx-host-controller/src/', 'crates/okx-host-launcher/
 
 function candidateFiles(input, scope) {
   if (!Object.hasOwn(PROTECTED, scope)) throw Error('UNSUPPORTED_CARGO_SCOPE');
-  const files = Array.isArray(input) && input.every(item => typeof item === 'string')
-    ? input : changedFiles(input).files;
+  // Keep the GitHub diff's status and previous_filename evidence all the way
+  // to this authorization boundary. A bare filename list cannot prove that
+  // a path wasn't renamed across owners or deleted in the checked commit.
+  const files = changedFiles(input).files;
   if (!files || !files.length || files.length > 500 || new Set(files).size !== files.length ||
       !files.every(safePath)) throw Error('CARGO_DIFF_NOT_VERIFIED');
   const manifests = scope === 'research' ? RESEARCH : HOST;
-  // The two newly split Research crates can still be reachable from Engine
-  // through dev-only legacy fixtures. Their source changes need the same
-  // *resolved* protected-closure proof as a manifest change. Ordinary owner
-  // source files remain on the established architecture-guarded fast route.
+  const statuses = new Map(input.flat().map(entry => [entry.filename, entry.status]));
+  if (files.some(file => (file === 'Cargo.lock' || manifests.has(file) ||
+      (scope === 'research' && protectedResearchSource(file))) && statuses.get(file) !== 'modified'))
+    throw Error('CARGO_PROOF_REQUIRES_EXISTING_MODIFIED_OWNER_INPUT');
+  // Research wire/domain crates may enter a protected owner via future
+  // dev/test edges, even if the current Engine build is decoupled. Their
+  // source changes need the same *resolved* protected-closure proof as a
+  // manifest change. Ordinary owner source files retain their fast route.
   if (!files.some(file => manifests.has(file) || (scope === 'research' && protectedResearchSource(file))))
     throw Error('CARGO_PROOF_CANDIDATE_MISSING');
   if (!files.every(file => {
@@ -127,9 +136,18 @@ function normalizedCargo(metadata) {
           !Array.isArray(target.crate_types)) throw Error('UNVERIFIED_CARGO_TARGET');
       const required = target['required-features'] ?? target.required_features ?? [];
       if (!Array.isArray(required)) throw Error('UNVERIFIED_REQUIRED_CARGO_FEATURES');
+      // Cargo target source paths are part of the protected build graph. A
+      // manifest may redirect a bin/lib/test to an unrelated owner's source
+      // without changing package IDs, features or dependency edges. Normalize
+      // against each package root so detached base/head worktrees compare.
+      if (typeof target.src_path !== 'string' || !path.isAbsolute(target.src_path))
+        throw Error('UNVERIFIED_CARGO_TARGET_SOURCE');
+      const source = path.relative(path.dirname(pkg.manifest_path), target.src_path)
+        .split(path.sep).join('/');
+      if (!safePath(source)) throw Error('TARGET_SOURCE_OUTSIDE_CARGO_PACKAGE');
       return `${target.name}:${[...target.kind].sort().join(',')}:` +
         `${[...target.crate_types].sort().join(',')}:${target.edition ?? ''}:` +
-        `${[...required].sort().join(',')}`;
+        `${[...required].sort().join(',')}:${source}`;
     }).sort();
     identities.set(keys.get(id), JSON.stringify({
       features: [...node.features].sort(), dependencies, declared_features: features, targets,

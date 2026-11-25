@@ -222,11 +222,11 @@ protection and accepted-artifact verification use the **displayed names**.
 | `draft-owner-feedback` | Draft PR, Ubuntu: selected owner/consumer feedback (`draft-component-tests` YAML ID); does **not** compile Windows-only code |
 | `dependency-audit` | Ready/main for Rust owners: locked dependency graph, advisories, licences and sources; an applicable failure makes protected `linux-core` fail |
 | `architecture-contracts` | Fresh non-Edge Rust changes: ownership, schema, product contracts and negative CI/release checks |
-| `rust-tests-linux` | Full/Engine route only: portable Rust Clippy, tests, Research IPC and dev-isolated dispatch; **not** a Windows runtime test |
+| `rust-tests-linux` | Full/Engine route only: portable Rust Clippy, tests and Research-owned real IPC/process contracts; **not** an Engine dev-only Research client or Windows runtime test |
 | `cloudflare-mcp-contracts` | Edge affected: TypeScript/MCP/DO/public-contract checks on Ubuntu |
 | `linux-core` | Non-Draft, Ubuntu: protected result aggregator, **not** another Rust build; requires `dependency-audit` success for applicable Rust scopes, exact skipped status for docs/Edge-only |
 | `host-controller-launcher-checks` | Ready Host/CONTROL or mixed Host+Research, Windows: Clippy, tests and two Host EXE builds, no Engine build |
-| `trading-engine-acceptance-windows` | Fresh Full/Engine route, Windows: exact 62 financial contracts / 107 witnesses, recovery and resource proof |
+| `trading-engine-acceptance-windows` | Fresh Full/Engine route, Windows: exact 62 financial contracts / 107 witnesses, recovery/resource proof and two independent T10 heavy-Research process/WSS tests using a non-shipping Research-owned fixture |
 | `trading-engine-regressions-windows (suite)` | Fresh Full/Engine route: four parallel Windows suites for Engine, Host, Execution and Research; Host also runs the unchanged native `--all-targets` Clippy with `-D warnings` after its tests |
 | `research-service-tests-windows` | Fresh Research-only or mixed Host+Research PR, Windows: Research owner/IPC/WSS tests and scoped Research release evidence; no Engine build on Research-only |
 | `windows-native` | Non-Draft, Ubuntu: protected aggregator of the **actual** required Windows jobs, not a Windows runner itself |
@@ -277,6 +277,22 @@ negative controls and migration of the **installed** CONTROL verifier first.
 Adding synthetic green alias checks or accepting only a workflow conclusion
 would not be equivalent evidence.
 
+Research provenance policy is deliberately versioned separately from the
+human-facing CI description:
+
+| Research component manifest | Ready status policy | Publication state |
+| --- | --- | --- |
+| `okx.windows.research-component/v1` | Existing exact seven displayed names (implicit legacy v1 contract) | **Active** producer, publisher and installed CONTROL verifier; no unknown manifest fields |
+| `okx.windows.research-component/v2` | Explicit `ci_status_policy: okx.github.actions.research-ready/v2`, with the same seven names initially | **Reserved**, not emitted by this CI; requires compatible producer, artifact validator, publisher, installed CONTROL and negative tests before activation |
+
+The v1 ZIP has exactly `manifest.json`, `Cargo.lock` and
+`okx-research-service.exe`. A future v2 keeps this three-file structure, but
+its explicit policy field must never be appended to a v1 manifest: v1 rejects
+unknown fields. A later change to any displayed Ready name needs another
+explicit policy version and coordinated branch-protection/CONTROL rollout.
+Neither a second successful alias job nor a successful workflow conclusion
+substitutes for the seven independently verified first-attempt statuses.
+
 CI classifies the diff for the exact commits in the GitHub event. Docs-only
 changes use the protected classification and aggregate checks. Edge changes
 also run the Worker contract job. Both routes skip Rust setup, Cargo audit,
@@ -303,13 +319,26 @@ neither a financial test nor release evidence.
 
 On the Windows production dependency graph, `okx-analysis` and
 `okx-strategy-core` are outside Trading Engine, and Research builds
-independently of `okx-engine-domain` and the venue execution adapters. The
-remaining shared Engine IPC import of `okx-research-protocol` is explicitly
-**not** accepted for production S1: the architecture guard must reject Research
-protocol/domain in Engine's normal/build Cargo closure and record
-`legacy-research-test` as open dev debt. The full CI route
-also covers changes to CI policy or inputs whose impact the classifier cannot
-verify.
+independently of `okx-engine-domain` and the venue execution adapters. Engine's
+**normal/build/dev/test** Cargo closure now excludes Research protocol/domain;
+the old Engine `legacy-research-test` dev edges and Engine-child IPC client
+tests were removed after their Research-owned process witnesses were migrated.
+The exact locked Windows resolver check also finds no Research protocol/domain
+in CONTROL, Launcher or MCP Bridge protected closures. The strict architecture
+test-boundary guard reports `ARCHITECTURE_TEST_BOUNDARY=PASS`, not an earlier
+partial S1 claim. This dependency separation does **not** remove the 62/107
+financial matrix or the two real T10 Engine-under-Research-load witnesses;
+those now start a separately compiled, non-shipping Research test fixture.
+The full CI route also covers changes to CI policy or inputs whose impact the
+classifier cannot verify.
+
+In particular, modifying `okx-research-protocol` or `okx-research-domain`
+does **not** become Research-only merely because a source-path classifier says
+"Research". Until an exact Windows Cargo proof excludes those packages from
+the protected Engine, CONTROL, Launcher and MCP Bridge normal, build **and
+dev/test** closures, the conservative
+Full acceptance and financial witness route remains mandatory. Any missing,
+truncated or disputed diff or resolver output likewise falls back to Full.
 
 The financial collector runs the seven wall-clock scenarios in an isolated
 two-thread test group. Each test that expects a fresh public-time response
@@ -333,5 +362,6 @@ that name a different release tree.
 4. A later Windows-identity migration needs a typed, rollback-capable
    controller transition and explicit approval. Never manually replace the
    installed Engine, restart trading or repack mixed provenance.
-5. After branch protection is migrated to new aggregate display names, remove
-   the old CI aliases in their own independently checked change.
+5. If aggregate display names ever change, first coordinate branch protection,
+   installed CONTROL provenance and a new explicit Ready policy version. Do not
+   mint synthetic green aliases or silently accept the renamed statuses.

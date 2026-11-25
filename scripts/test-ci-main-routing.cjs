@@ -124,6 +124,10 @@ function validate(yaml, fileNames) {
   assert.match(research, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true'/,
     'MAIN_MUST_NOT_BUILD_UNREVIEWED_RESEARCH_ORIGIN');
   assert.match(research, /research_component_sha256: \$\{\{ steps\.package\.outputs\.research_component_sha256 \}\}/);
+  assert.match(research, /RESEARCH_READY_STATUS_POLICY=okx\.github\.actions\.research-ready\/v1/,
+    'ACTIVE_RESEARCH_READY_POLICY_MUST_RETAIN_ACCEPTED_V1_NAMES');
+  assert.doesNotMatch(research, /RESEARCH_READY_STATUS_POLICY=okx\.github\.actions\.research-ready\/v2/,
+    'UNACCEPTED_RESEARCH_V2_STATUS_POLICY_CANNOT_REPLACE_V1');
   assert.doesNotMatch(research, /prepare-research-release\.ps1 -Dist/,
     'RESEARCH_ONLY_MUST_NOT_DOWNLOAD_NATIVE_BASE_OR_COPY_ENGINE_BYTES');
   assert.match(research, /Build self-contained Research-only Windows component/);
@@ -214,8 +218,10 @@ function validate(yaml, fileNames) {
   assert.match(edge, /python3 \.\.\/\.\.\/scripts\/check_product_contract\.py/,
     'EDGE_ONLY_CHANGES_MUST_KEEP_PUBLIC_PRODUCT_CONTRACT');
   assert.match(edge, /node scripts\/test-native-finance-retirement-do\.mjs/);
-  assert.match(linux, /cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton/);
-  assert.match(linux, /okx-research-service-test-isolated/);
+  assert.match(linux, /cargo build --locked -p okx-research-service --bin okx-research-service/);
+  assert.match(linux, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture/);
+  assert.doesNotMatch(linux, /research_dispatch_tests::|test-isolated-singleton|okx-research-service-test-isolated/,
+    'LINUX_MUST_NOT_RESURRECT_ENGINE_TO_RESEARCH_DEV_TEST_COUPLING');
   const engine = job('trading_engine_acceptance_windows');
   assert.doesNotMatch(engine, /cargo run[^\n]*-- --list/, 'REDUNDANT_CARGO_FINANCIAL_LIST');
   assert.doesNotMatch(engine, /id: native-properties\s+if:/, 'FULL_MAIN_FALLBACK_MUST_RUN_FINANCE');
@@ -230,6 +236,19 @@ function validate(yaml, fileNames) {
   assert.match(engine, /STANDALONE_RESEARCH_MCP_WITNESS_NOT_RUN/);
   assert.match(engine, /cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton/);
   assert.match(engine, /Resolve-Path 'target\/debug\/okx-research-service-test-isolated\.exe'/);
+  assert.match(engine, /cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture/);
+  assert.match(engine, /RESEARCH_TEST_LOAD_FIXTURE_BINARY_MISSING/);
+  const fixtureEnvironment = /OKX_RESEARCH_LOAD_FIXTURE_EXE = \(Resolve-Path 'target\/debug\/okx-research-load-fixture\.exe'\)\.Path/;
+  for (const [start, end] of [
+    ['Engine autonomy under heavy research process tree', 'Upload Engine research process-tree observation'],
+    ['MCP DO WSS Native finance under isolated Research load', 'Upload isolated MCP DO WSS Native load observation'],
+  ]) {
+    const first = engine.indexOf(`      - name: ${start}`);
+    const last = engine.indexOf(`      - name: ${end}`);
+    assert.ok(first >= 0 && last > first, `ISOLATED_ENGINE_T10_STEP_MISSING:${start}`);
+    assert.match(engine.slice(first, last), fixtureEnvironment,
+      `ENGINE_T10_STEP_REQUIRES_OWN_LOAD_FIXTURE:${start}`);
+  }
   assert.doesNotMatch(engine, /K9 worker two-heavy cancellation latency evidence/);
   const regression = job('trading_engine_regressions_windows');
   assert.match(regression, /needs: component_impact/);
@@ -243,7 +262,7 @@ function validate(yaml, fileNames) {
     ['Remaining native regression tests for this suite', "matrix.suite == 'engine' || matrix.suite == 'host' || matrix.suite == 'execution'"],
     ['Serial native account catalog and writer-termination regressions', "matrix.suite == 'engine'"],
     ['Serial terminal release source-frontier regression', "matrix.suite == 'engine'"],
-    ['Agent dispatch to actual research child', "matrix.suite == 'engine'"],
+    ['Engine rejects Research owner attempts to mutate Native finance', "matrix.suite == 'engine'"],
     ['Worker library regression and actual IPC child', "matrix.suite == 'research'"],
     ['K9 worker two-heavy cancellation latency evidence', "matrix.suite == 'research'"],
     ['Upload K9 native latency evidence', "matrix.suite == 'research'"],
@@ -276,6 +295,25 @@ function validate(yaml, fileNames) {
   assert.match(regression, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
   assert.match(regression, /cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton/);
   assert.match(regression, /Resolve-Path 'target\/debug\/okx-research-service-test-isolated\.exe'/);
+  assert.match(regression, /cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture/);
+  assert.match(regression, /RESEARCH_TEST_LOAD_FIXTURE_BINARY_MISSING/);
+  assert.match(regression, /OKX_RESEARCH_LOAD_FIXTURE_EXE = \(Resolve-Path 'target\/debug\/okx-research-load-fixture\.exe'\)\.Path/);
+  assert.doesNotMatch(regression, /research_dispatch_tests::|Agent dispatch to actual research child/,
+    'WINDOWS_MUST_NOT_RESTART_LEGACY_ENGINE_RESEARCH_PROTOCOL_DISPATCH_TESTS');
+  const financeDenialName = 'Engine rejects Research owner attempts to mutate Native finance';
+  const financeDenialStart = regression.indexOf(`      - name: ${financeDenialName}\n`);
+  assert.ok(financeDenialStart >= 0, 'ENGINE_RESEARCH_FINANCE_DENIAL_STEP_REQUIRED');
+  const financeDenialNext = regression.indexOf('\n      - name:', financeDenialStart + 1);
+  const financeDenial = regression.slice(financeDenialStart,
+    financeDenialNext < 0 ? regression.length : financeDenialNext);
+  assert.ok(financeDenial.includes('cargo test --locked -p okx-trading-engine --lib query::public_dispatch_tests::research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes -- --exact --test-threads 1'),
+    'ENGINE_MUST_RUN_EXACT_RESEARCH_FINANCE_DENIAL_TEST');
+  assert.ok(financeDenial.includes('if ($code -ne 0) { exit $code }'),
+    'ENGINE_FINANCE_DENIAL_MUST_FAIL_ON_PROCESS_ERROR');
+  assert.ok(financeDenial.includes('test result: ok\\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;'),
+    'ENGINE_FINANCE_DENIAL_MUST_REJECT_ZERO_OR_FILTERED_TESTS');
+  assert.ok(financeDenial.includes("throw 'ENGINE_RESEARCH_OWNER_FINANCE_DENIAL_EXACT_TEST_REQUIRED'"),
+    'ENGINE_FINANCE_DENIAL_MUST_FAIL_CLOSED_ON_MISSING_TEST');
   assert.match(regression, /'execution' \{ 'okx-trade-execution' \}/);
   // The six 3s SQLite-writer/catalog fixtures are still mandatory, just not
   // contending with the remaining 300 Engine libtests for the test-harness clock.
@@ -308,6 +346,8 @@ function validate(yaml, fileNames) {
   assert.match(build, /cargo build --locked --release/);
   assert.doesNotMatch(build, /--features test-isolated-singleton/,
     'SHIPPING_ENGINE_BUNDLE_MUST_NOT_USE_TEST_SINGLETON');
+  assert.doesNotMatch(build, /--features test-fixture|okx-research-load-fixture/,
+    'SHIPPING_WINDOWS_BUNDLE_MUST_NOT_PACKAGE_RESEARCH_LOAD_FIXTURE');
   assert.match(build, /PACKAGED_ENGINE_RUNTIME_CONTRACT_INVALID/);
   assert.match(build, /name: okx-windows-bundle-\$\{\{ github.event.pull_request.head.sha \}\}/);
   assert.match(build, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope != 'engine'\n        uses: actions\/upload-artifact/);
@@ -425,7 +465,8 @@ function validate(yaml, fileNames) {
   assert.match(researchPublish, /runs\/\$candidate\/attempts\/\$attempt\/jobs\?per_page=100/);
   assert.match(researchPublish, /"\$attempt" == 1/);
   assert.match(researchPublish, /\.head_sha == \$head and \.run_attempt == 1 and/);
-  assert.match(researchPublish, /all\(\.jobs\[\]; \.run_id == \$run and \.head_sha == \$head\)/);
+  assert.match(researchPublish, /all\(\.jobs\[\]; \.run_id == \$run and \.head_sha == \$head and \.run_attempt == 1\)/,
+    'RESEARCH_READY_JOBS_MUST_ALL_BE_FROM_FIRST_ATTEMPT');
   assert.ok(researchPublish.includes(acceptedWorkflowPath), 'RESEARCH_PUBLISH_MUST_MATCH_EXACT_CI_WORKFLOW_PATH');
   assert.match(researchPublish, /\.head_repository\.id == 1388071566/);
   assert.match(researchPublish, /\.workflow_run\.id == \$run and \.workflow_run\.repository_id == 1388071566/);
@@ -560,6 +601,11 @@ function scopeFor(filename) {
 assert.equal(scopeFor('crates/okx-research-service/src/process_memory.rs'), 'full');
 assert.equal(scopeFor('crates/okx-research-service/src/main.rs'), 'full');
 assert.equal(scopeFor('crates/okx-research-service/src/analytics/jobs.rs'), 'research');
+// Research protocol/domain may be test/dev dependencies of Engine. The
+// category itself must remain FULL until pinned Windows Cargo closure proof
+// promotes a specific Ready PR after independent Engine decoupling.
+assert.equal(scopeFor('crates/okx-research-protocol/src/analytics.rs'), 'full');
+assert.equal(scopeFor('crates/okx-research-domain/src/numeric.rs'), 'full');
 assert.equal(scopeFor('crates/okx-host-controller/src/job.rs'), 'full');
 assert.equal(scopeFor('crates/okx-host-controller/src/lifecycle_executor.rs'), 'full');
 assert.equal(scopeFor('crates/okx-host-controller/src/research_supervisor.rs'), 'host-controller');
@@ -575,6 +621,9 @@ assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.
 assert.throws(() => validate(source.replace('git fetch --no-tags --depth=1 origin "$BASE_SHA"',
   'git fetch --no-tags --depth=1 origin main'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
+assert.throws(() => validate(source.replace('name: research-service-tests-windows',
+  'name: research-owner-v2-windows'), workflows),
+  'RESEARCH_READY_V2_DISPLAY_RENAME_CANNOT_REPLACE_ACCEPTED_V1_JOB');
 assert.throws(() => validate(changeJobInput(source, 'required_linux',
   'needs: [component_impact, dependency-audit,', 'needs: [component_impact,'), workflows),
   'DEPENDENCY_AUDIT_CANNOT_BE_DROPPED_FROM_PROTECTED_LINUX_NEEDS');
@@ -593,6 +642,14 @@ assert.throws(() => validate(changeJobInput(source, 'required_linux',
 assert.throws(() => validate(source.replace('      - name: Format\n        run: cargo fmt --all -- --check',
   '      - name: Format\n        run: echo skipped-format'), workflows));
 assert.throws(() => validate(source.replace('cargo test --locked --workspace --exclude okx-trading-engine --exclude okx-host-controller --exclude okx-research-service', 'echo skipped-portable-tests'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'rust_tests_linux',
+  'cargo test --locked -p okx-research-service --test ipc_process -- --nocapture',
+  'echo skipped-research-ipc'), workflows),
+  'STANDALONE_RESEARCH_IPC_WITNESS_MUST_RUN_ON_LINUX');
+assert.throws(() => validate(changeJobInput(source, 'rust_tests_linux',
+  '# Former Engine T06–T10 IPC/causality witnesses now live in the',
+  'cargo test --locked -p okx-trading-engine --lib research_dispatch_tests::\n          # Former Engine T06–T10 IPC/causality witnesses now live in the'), workflows),
+  'LEGACY_ENGINE_RESEARCH_DEV_DISPATCH_MUST_NOT_RETURN_TO_LINUX');
 assert.throws(() => validate(source.replace('      - name: Test portable crates',
   '      - run: cargo test -p okx-trade-execution --lib two_account_100_parallel_sql_readonly_isolation\n      - name: Test portable crates'), workflows));
 assert.throws(() => validate(source.replace('      - name: Test portable crates',
@@ -664,6 +721,17 @@ assert.throws(() => validate(source.replace('.run_attempt == 1) | [.id, .run_att
 assert.throws(() => validate(source.replace('all(.jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1)',
   'all(.jobs[]; .run_id == $run)'), workflows),
   'NATIVE_PUBLISHER_REQUIRES_SAME_HEAD_AND_ATTEMPT_JOBS');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  'all(.jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1)',
+  'all(.jobs[]; .run_id == $run and .head_sha == $head)'), workflows),
+  'RESEARCH_PUBLISHER_REJECTS_MIXED_FIRST_AND_RERUN_JOB_EVIDENCE');
+assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component',
+  '"research-service-tests-windows"', '"research-owner-v2-windows"'), workflows),
+  'RESEARCH_PUBLISHER_CANNOT_ACCEPT_UNPROVEN_V2_JOB_ALIAS');
+assert.throws(() => validate(source.replace(
+  'RESEARCH_READY_STATUS_POLICY=okx.github.actions.research-ready/v1',
+  'RESEARCH_READY_STATUS_POLICY=okx.github.actions.research-ready/v2'), workflows),
+  'UNACCEPTED_RESEARCH_V2_READY_POLICY_CANNOT_HIDE_V1_PROTECTED_NAMES');
 assert.throws(() => validate(source.replace('"$attempt" == 1', '"$attempt" =~ ^[1-9]'), workflows),
   'NATIVE_PUBLISHER_MUST_REJECT_SECOND_ATTEMPT');
 assert.throws(() => validate(source.replace('runs/$candidate/attempts/$attempt/jobs?per_page=100',
@@ -778,6 +846,38 @@ assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_c
 assert.throws(() => validate(source.replace('.commits[-1].sha == $head', 'true'), workflows));
 assert.throws(() => validate(source.replace('test "${{ needs.component_impact.outputs.native_proof }}" = "RESEARCH_OWNER_ONLY"', 'true'), workflows));
 assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-manifest.cjs --verify-report', 'echo skipped'), workflows));
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_acceptance_windows',
+  'cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture',
+  'echo fake-research-load-fixture'), workflows),
+  'REAL_ENGINE_RESEARCH_T10_FIXTURE_MUST_BE_COMPILED');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_acceptance_windows',
+  "$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = (Resolve-Path 'target/debug/okx-research-load-fixture.exe').Path",
+  '$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = $null'), workflows),
+  'ENGINE_RESEARCH_T10_TESTS_MUST_HAVE_TWO_REAL_FIXTURE_PATHS');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+  'cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture',
+  'echo fake-research-load-fixture'), workflows),
+  'ENGINE_REGRESSION_FIXTURE_BUILD_MUST_NOT_DISAPPEAR');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+  "$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = (Resolve-Path 'target/debug/okx-research-load-fixture.exe').Path",
+  '$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = $null'), workflows),
+  'ENGINE_REGRESSION_TESTS_MUST_USE_REAL_FIXTURE_PATH');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+  '      - name: Engine rejects Research owner attempts to mutate Native finance',
+  '      - name: Engine finance denial skipped'), workflows),
+  'ENGINE_RESEARCH_FINANCE_DENIAL_STEP_CANNOT_DISAPPEAR');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+  'query::public_dispatch_tests::research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes',
+  'query::public_dispatch_tests::irrelevant_readonly_test'), workflows),
+  'ENGINE_RESEARCH_FINANCE_DENIAL_MUST_RUN_EXACT_TEST_NAME');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+  'research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes -- --exact --test-threads 1',
+  'research_owner_handoff_cannot_change_native_finance_files_or_enqueue_writes -- --test-threads 1'), workflows),
+  'ENGINE_RESEARCH_FINANCE_DENIAL_MUST_RETAIN_EXACT_MATCH');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
+  'test result: ok\\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;',
+  'test result: ok\\. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out;'), workflows),
+  'ENGINE_RESEARCH_FINANCE_DENIAL_MUST_FAIL_ON_ZERO_MATCHED_TESTS');
 assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-native-finance-check -- --list'), workflows));
 assert.throws(() => validate(source.replace('needs: [component_impact, trading_engine_acceptance_windows, trading_engine_regressions_windows,', 'needs: [component_impact, trading_engine_acceptance_windows,'), workflows));
 assert.throws(() => validate(source.replace('"trading-engine-regressions-windows (engine)",', ''), workflows));

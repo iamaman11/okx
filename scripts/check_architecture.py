@@ -41,12 +41,6 @@ ALLOWED = {
     },
 }
 
-# Temporary S1 debt: native Engine T06–T10 child-process witnesses have not
-# all been migrated to an owner-independent harness. Never confuse this
-# test-only exception with a permitted normal/build dependency or S1 PASS.
-TEMPORARY_ENGINE_TEST_DEBT = {"okx-trading-engine": {"okx-research-protocol"}}
-
-
 # Scoped supplemental source guard: the Cargo DAG cannot see std::fs/network/
 # wall-clock use. This does not replace Rust visibility/compile-fail checks.
 RISK_PURE_FORBIDDEN = re.compile(
@@ -91,8 +85,7 @@ def validate(graph: dict[str, set[str]], dev_graph: dict[str, set[str]] | None =
     if dev_graph is not None:
         for crate in sorted(expected & set(dev_graph)):
             for dep in sorted(dev_graph[crate] - ALLOWED[crate]):
-                if dep not in TEMPORARY_ENGINE_TEST_DEBT.get(crate, set()):
-                    errors.append(f"forbidden test dependency: {crate} -> {dep}")
+                errors.append(f"forbidden test dependency: {crate} -> {dep}")
     return errors
 
 
@@ -116,26 +109,11 @@ def load_graph(metadata: dict) -> tuple[dict[str, set[str]], dict[str, set[str]]
     }
     workspace_names = {package["name"] for package in packages.values()}
 
-    def exceptional_optional_test_edge(package: dict, dependency: dict) -> bool:
-        # One narrowly identified migration fixture. Do not silently ignore
-        # arbitrary optional dependencies in an accepted Cargo graph.
-        return (
-            package["name"] == "okx-ipc-contracts"
-            and dependency["name"] == "okx-research-protocol"
-            and dependency.get("optional", False)
-            and "dep:okx-research-protocol" in package.get("features", {}).get("legacy-research-test", [])
-            and "legacy-research-test" not in package.get("features", {}).get("default", [])
-        )
-
     def edges(dev: bool) -> dict[str, set[str]]:
         return {
             package["name"]: {
                 dependency["name"] for dependency in package["dependencies"]
                 if dependency["name"] in workspace_names
-                # The exact migration feature must not be mistaken for an
-                # unconditional dependency. All other optional edges retain
-                # normal direct-graph admission rules.
-                and not exceptional_optional_test_edge(package, dependency)
                 and (dependency["kind"] == "dev") == dev
             }
             for package in packages.values()
@@ -511,8 +489,8 @@ def self_test() -> int:
         return 1
     temporary_test_wire = {name: set() for name in ALLOWED}
     temporary_test_wire["okx-trading-engine"].add("okx-research-protocol")
-    if validate(accepted, temporary_test_wire):
-        print("self-test failed: test-only Engine Research witness debt rejected before migration", file=sys.stderr)
+    if "forbidden test dependency: okx-trading-engine -> okx-research-protocol" not in validate(accepted, temporary_test_wire):
+        print("self-test failed: Engine test-only Research dependency was accepted", file=sys.stderr)
         return 1
     clean_tree = "0okx-trading-engine v0.1.0\n1okx-ipc-contracts v0.1.0\n2okx-engine-domain v0.1.0 (*)\n"
     if cargo_tree_scope_violations(clean_tree, "okx-trading-engine", BOUNDARY_FORBIDDEN["okx-trading-engine"]):

@@ -132,10 +132,16 @@ impl Session {
 fn research_request() -> AgentRequest {
     AgentRequest {
         schema: AGENT_REQUEST_SCHEMA_V1.into(),
-        request_id: "research_session_capabilities_001".into(),
+        request_id: "research_session_diagnostics_001".into(),
         account: None,
-        operation: AgentOperation::Research {
-            request: okx_ipc_contracts::analytics::ResearchRequest::Capabilities {},
+        operation: AgentOperation::Diagnostics {
+            request: okx_ipc_contracts::trading::DiagnosticsRequest {
+                view: Some(okx_ipc_contracts::trading::DiagnosticsView::Research),
+                reference: Some("deployment".into()),
+                account: None,
+                cycle_id: None,
+                limit: None,
+            },
         },
     }
 }
@@ -146,9 +152,16 @@ async fn engine_session_routes_research_to_its_owner_and_preserves_stopped_obser
         let mut s = Session::with_stopped_finance(stopped).await;
         let request = research_request();
         let research_id = request.request_id.clone();
+        let market_id = "research_session_market_capabilities_001";
         let telemetry_id = "engine_session_mailbox_001";
         for request in [
             request,
+            AgentRequest {
+                schema: AGENT_REQUEST_SCHEMA_V1.into(),
+                request_id: market_id.into(),
+                account: None,
+                operation: AgentOperation::MarketCapabilities,
+            },
             AgentRequest {
                 schema: AGENT_REQUEST_SCHEMA_V1.into(),
                 request_id: telemetry_id.into(),
@@ -166,13 +179,13 @@ async fn engine_session_routes_research_to_its_owner_and_preserves_stopped_obser
         }
         let mut acked = HashSet::new();
         let mut completed = HashSet::new();
-        while completed.len() < 2 {
+        while completed.len() < 3 {
             match s.next().await {
                 F::DeliveryAck { request_id, .. } => assert!(acked.insert(request_id)),
                 F::Response { response, .. } => {
                     assert!(acked.contains(&response.request_id));
                     assert!(completed.insert(response.request_id.clone()));
-                    if response.request_id == research_id {
+                    if response.request_id == research_id || response.request_id == market_id {
                         assert_eq!(
                             response.status,
                             okx_ipc_contracts::AgentResponseStatus::Rejected
