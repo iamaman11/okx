@@ -110,11 +110,20 @@ async fn request(
 
 #[tokio::test]
 async fn standalone_market_only_runtime_fails_closed_without_engine_or_public_source() {
-    // Disposable Research catalog and a recorded failing GET are the complete
-    // environment: no Engine process, account DB, credentials or network.
+    // Disposable Research catalog, a recorded failing GET, and a closed
+    // loopback-only public WSS endpoint are the complete environment: no
+    // Engine process, account DB, credentials or external network.
     let root = tempfile::tempdir().unwrap();
     let venue = Arc::new(OfflineVenue::default());
-    let public = Arc::new(IndependentOkxPublicSource::with_get(venue.clone()));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let disconnected = listener.local_addr().unwrap();
+    drop(listener);
+    let public = Arc::new(
+        IndependentOkxPublicSource::with_get(venue.clone())
+            .with_market_ws_endpoint(format!("ws://{disconnected}")),
+    );
     let scope = ResearchScope::new("market-offline-standalone".into()).unwrap();
     let service = AnalyticsService::new_scoped(
         root.path().into(),
@@ -144,18 +153,51 @@ async fn standalone_market_only_runtime_fails_closed_without_engine_or_public_so
     }
     assert_eq!(venue.0.load(Ordering::Relaxed), 0);
 
-    // An allowed read may use only the independently owned public GET. If it
-    // is unavailable, failure stays local; no financial path or empty result
-    // is fabricated, and no research job is persisted for the failed lookup.
-    let lookup = json!({
-        "type":"find_instruments", "asset":"BTC", "settle_currency":"USDT",
-        "instrument_type":"SWAP"
-    });
+    // All three source-backed public routes must fail closed with their own
+    // transport error, even if the independently owned WSS is unavailable.
+    // Neither a cached empty view nor Engine fallback can replace evidence.
+    for (name, operation) in [
+        (
+            "instruments",
+            json!({"type":"find_instruments", "asset":"BTC",
+                "settle_currency":"USDT", "instrument_type":"SWAP"}),
+        ),
+        (
+            "snapshot",
+            json!({"type":"market_overview", "instrument":"BTC-USDT-SWAP"}),
+        ),
+        (
+            "microstructure",
+            json!({"type":"market_microstructure", "instrument":"BTC-USDT-SWAP",
+                "size_contracts":"1"}),
+        ),
+    ] {
+        let reads_before = venue.0.load(Ordering::Relaxed);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            request(&service, &public, operation),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name}: offline Research read hung"));
+        assert_eq!(
+            result.unwrap_err(),
+            "RESEARCH_PUBLIC_TRANSPORT_FAILED",
+            "{name}"
+        );
+        assert!(
+            venue.0.load(Ordering::Relaxed) > reads_before,
+            "{name}: failed Research read did not use its own public GET"
+        );
+    }
+    // A source failure does not poison the purely local operator catalogue.
+    let reads_after_failure = venue.0.load(Ordering::Relaxed);
     assert_eq!(
-        request(&service, &public, lookup).await.unwrap_err(),
-        "RESEARCH_PUBLIC_TRANSPORT_FAILED"
+        request(&service, &public, json!({"type":"market_capabilities"}))
+            .await
+            .unwrap(),
+        capabilities
     );
-    assert!(venue.0.load(Ordering::Relaxed) > 0);
+    assert_eq!(venue.0.load(Ordering::Relaxed), reads_after_failure);
 
     drop(service);
     let conn = rusqlite::Connection::open(root.path().join("research-catalog.sqlite")).unwrap();
