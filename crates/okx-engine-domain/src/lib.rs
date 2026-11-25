@@ -1,4 +1,4 @@
-//! Stable facts and wire contracts for native execution and research.
+//! Stable facts and wire contracts for native execution.
 //! No venue API, transport, database, filesystem adapter or async runtime.
 #![forbid(unsafe_code)]
 

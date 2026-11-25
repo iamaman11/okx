@@ -10,7 +10,7 @@ use crate::{
     public_catalog,
 };
 use futures_util::{SinkExt, StreamExt};
-use okx_domain_core::observation_model::{
+use okx_research_domain::observation_model::{
     BookLevel, FundingRequirement, InstrumentType, MarketSnapshot,
 };
 use serde::{Deserialize, Serialize};

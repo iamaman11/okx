@@ -1,6 +1,6 @@
 //! Bounded, standalone REST projection of the public market overview.
 use crate::independent_source::{IndependentOkxPublicSource, one};
-use okx_domain_core::observation_model::{
+use okx_research_domain::observation_model::{
     FundingState, IndexPriceState, InstrumentType, MarkPriceState, MarketSnapshot,
     OpenInterestState, TickerState,
 };

@@ -1,6 +1,6 @@
 //! Standalone public REST book. This is observational evidence, not a WS trading book.
 use crate::independent_source::{IndependentOkxPublicSource, one};
-use okx_domain_core::observation_model::BookLevel;
+use okx_research_domain::observation_model::BookLevel;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{Value, json};

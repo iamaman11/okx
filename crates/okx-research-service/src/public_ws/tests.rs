@@ -132,7 +132,7 @@ pub(crate) async fn serve_market_fixture_after<S: AsyncRead + AsyncWrite + Unpin
 fn reference() -> Reference {
     Reference {
         instrument: "BTC-USDT-SWAP".into(),
-        kind: okx_domain_core::observation_model::InstrumentType::Swap,
+        kind: okx_research_domain::observation_model::InstrumentType::Swap,
         underlying: "BTC-USDT".into(),
         generation: "ref".into(),
         funding_required: true,

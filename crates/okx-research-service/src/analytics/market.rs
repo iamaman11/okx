@@ -527,7 +527,7 @@ impl AnalyticsService {
             {"op":"forward_return_label","input_unit":"price","output_unit":"outcome_ratio","requires":"prior_event_step_in_when","period_min":1,"period_max":1000,"causal_feature":false}
         ]);
         let mut capabilities = json!({"schema":"okx.market.capabilities/v1",
-            "route_owner":"okx-research-service","compute_owner":"okx-domain-core",
+            "route_owner":"okx-research-service","compute_owner":"okx-strategy-core",
             "portfolio_scenario":true,
             "strategy_signal_outbox":true,
             "availability_policy":"actual_data_and_rights_checked_per_request",

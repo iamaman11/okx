@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-okx-domain-core = { path = "../okx-domain-core" }
+okx-engine-domain = { path = "../okx-engine-domain" }
 futures-util = "0.3"
 base64 = "0.23"
 jiff = "1.0"

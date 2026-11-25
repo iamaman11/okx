@@ -92,7 +92,7 @@ pub use validation::{
 
 use std::str::FromStr;
 
-use okx_domain_core::observation_model::{
+use okx_research_domain::observation_model::{
     FeeScheduleSnapshot, FundingRequirement, InstrumentRulesSnapshot, MarketSnapshot,
 };
 use rust_decimal::Decimal;

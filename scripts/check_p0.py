@@ -66,8 +66,6 @@ def select(status, path):
     # Cargo manifests, installer changes and mixed diffs still expand tests.
     if category(path) in {"host-controller", "host-launcher"}:
         return {"host"}
-    if path in {"crates/okx-domain-core/src/" + f for f in ("operators.rs", "query_plan.rs")}:
-        return {"kernel"}
     if path.startswith("crates/okx-analysis/src/") and path.endswith(".rs"):
         return {"analysis", "kernel"}
     if path.startswith("crates/okx-research/src/") and path.endswith(".rs"):
@@ -381,7 +379,7 @@ def execute(scopes):
         tests("okx-host-controller", ())
         tests("okx-bridge-mcp", ())
     if "kernel" in scopes:
-        tests("okx-domain-core")
+        tests("okx-research-domain")
     if "strategy" in scopes or "analysis" in scopes or "research" in scopes or "kernel" in scopes:
         tests("okx-strategy-core", required=(PLAN_TEST, GAP_TEST))
     if "analysis" in scopes:

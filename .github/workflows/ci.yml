@@ -1521,7 +1521,7 @@ jobs:
           cargo test --locked --no-run --all-targets -p okx-trading-engine -p okx-trade-execution -p okx-host-controller -p okx-host-launcher -p okx-strategy-core -p okx-research -p okx-research-service
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_TEST_BUILD_FAILED' }
           # Match the single Cargo selection in the financial collector.
-          cargo test --locked --no-run --lib -p okx-domain-core -p okx-trade-execution -p okx-trading-engine -p okx-ipc-contracts -p okx-market-runtime
+          cargo test --locked --no-run --lib -p okx-engine-domain -p okx-trade-execution -p okx-trading-engine -p okx-ipc-contracts -p okx-market-runtime
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_FINANCIAL_LIBTEST_BUILD_FAILED' }
           cargo build --locked -p okx-native-finance-check
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_COLLECTOR_BUILD_FAILED' }

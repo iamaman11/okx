@@ -1247,7 +1247,7 @@ dependencies = [
 name = "okx-analysis"
 version = "0.1.0"
 dependencies = [
- "okx-domain-core",
+ "okx-research-domain",
  "okx-strategy-core",
  "rust_decimal",
  "serde",
@@ -1262,7 +1262,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "jiff",
- "okx-domain-core",
+ "okx-engine-domain",
  "reqwest",
  "rust_decimal",
  "serde",
@@ -1305,7 +1305,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "okx-domain-core"
+name = "okx-engine-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1377,7 +1377,7 @@ dependencies = [
  "base64",
  "chacha20poly1305",
  "hkdf",
- "okx-domain-core",
+ "okx-engine-domain",
  "okx-research-protocol",
  "proptest",
  "prost",
@@ -1419,7 +1419,7 @@ name = "okx-observation"
 version = "0.1.0"
 dependencies = [
  "okx-api",
- "okx-domain-core",
+ "okx-engine-domain",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -1440,10 +1440,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "okx-research-domain"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "okx-research-protocol"
 version = "0.1.0"
 dependencies = [
- "okx-domain-core",
+ "okx-research-domain",
  "serde",
  "serde_json",
 ]
@@ -1458,8 +1465,8 @@ dependencies = [
  "getrandom 0.4.3",
  "jiff",
  "okx-analysis",
- "okx-domain-core",
  "okx-research",
+ "okx-research-domain",
  "okx-research-protocol",
  "okx-strategy-core",
  "reqwest",

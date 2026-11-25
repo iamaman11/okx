@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use okx_domain_core::observation_model::BookLevel;
+use okx_research_domain::observation_model::BookLevel;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::Value;

@@ -1,4 +1,4 @@
-use okx_domain_core::observation_model::{
+use okx_research_domain::observation_model::{
     FeeScheduleSnapshot, InstrumentRulesSnapshot, MarketHistorySnapshot,
 };
 use rust_decimal::Decimal;
@@ -453,7 +453,7 @@ fn decimal_sqrt(value: Decimal) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use okx_domain_core::observation_model::{HistoryCandle, MarketHistorySnapshot};
+    use okx_research_domain::observation_model::{HistoryCandle, MarketHistorySnapshot};
 
     use super::*;
 

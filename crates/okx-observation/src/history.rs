@@ -1,4 +1,4 @@
-pub use okx_domain_core::observation_model::{
+pub use okx_engine_domain::observation_model::{
     FundingHistoryEvent, FundingHistorySnapshot, HistoryCandle, MarketHistorySnapshot, MarketTrade,
     MarketTradeSide, MarketTradesSnapshot, OpenInterestHistoryPoint, OpenInterestHistorySnapshot,
 };

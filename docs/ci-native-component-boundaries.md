@@ -104,10 +104,10 @@ test jobs remain open acceptance work, not completed by this routing change.
 The existing `dependency-audit` job already runs `cargo metadata --locked`. The
 same resolved graph is now reused by `scripts/ci-component-impact.cjs` to record
 which deployable Windows binaries consume each changed workspace crate via
-normal/build dependencies. This includes *transitive* consumers; for example,
-changing `okx-domain-core` impacts both the Engine/finance and Research release
-roots. A Launcher implementation change reaches the Host Controller but not
-the financial Engine. Dev-only dependencies are excluded from **release** impact,
+normal/build dependencies. The Research release closure excludes
+`okx-engine-domain`. Changes to `okx-research-domain` still reach the Engine
+through the existing Research route in `okx-ipc-contracts`. A Launcher
+implementation change reaches the Host Controller. Dev-only dependencies are excluded from **release** impact,
 not from the tests that may need to run.
 
 The report lists actual dependency paths, affected binary names and separate

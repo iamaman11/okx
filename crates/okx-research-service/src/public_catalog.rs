@@ -1,5 +1,5 @@
 use crate::independent_source::{IndependentOkxPublicSource, PublicGet};
-use okx_domain_core::observation_model::{
+use okx_research_domain::observation_model::{
     FundingRequirement, InstrumentSpec, InstrumentType, UpcomingRuleChange,
 };
 use okx_research_protocol::{analytics::MarketRequest, edge::InstrumentTypeFilter};

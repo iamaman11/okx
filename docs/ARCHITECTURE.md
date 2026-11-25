@@ -132,7 +132,7 @@ limited to256 revisions; expiry/pinning follows the job and reachable graph.
 An interrupted or losing publication can leave an unreachable metadata file;
 the current reachable-root retention does not collect those orphan files.
 
-For a calculation extension, start at `okx-domain-core::operators`: ordinary Rust
+For a calculation extension, start at `okx-strategy-core::operators`: ordinary Rust
 types/functions own the rule, while `StrategyKernel::from_id` selects a named
 composition. `ema_momentum_confirm_v1` reuses the EMA and momentum kernels;
 `okx-research::strategy_registry` keeps the same closed-bar/next-open replay.

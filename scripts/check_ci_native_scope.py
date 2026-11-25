@@ -217,7 +217,7 @@ def _self_test() -> None:
     assert not edge_changed(files("crates/okx-host-controller/src/main.rs", "README.md"))
     unsafe = [
         [], [[]], [[{}]],
-        files("crates/okx-domain-core/src/query_plan.rs"),
+        files("crates/okx-research-domain/src/lib.rs"),
         files("crates/okx-ipc-contracts/src/lib.rs"),
         files("crates/okx-trading-engine/src/trade_service/execute.rs"),
         files("crates/okx-trade-execution/src/lib.rs"),
@@ -245,7 +245,7 @@ def _self_test() -> None:
         files("docs/a.yml"), files("crates/okx-trading-engine/src/readme.md"),
         files("docs/../crates/okx-trading-engine/README.md"), files("docs//a.md"),
         files("cloudflare/okx-mcp/../okx-trading-engine/src/a.ts"),
-        files("docs/a.md", "crates/okx-domain-core/src/query_plan.rs"),
+        files("docs/a.md", "crates/okx-research-domain/src/lib.rs"),
         files("cloudflare/okx-mcp/src/mcp.ts", ".github/workflows/ci.yml"),
         [[{"filename": "docs/a.md", "status": "renamed", "previous_filename": "crates/okx-trading-engine/a.md"}]],
         [[{"filename": "docs/a.md", "status": "modified"}] * 2],

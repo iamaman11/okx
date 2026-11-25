@@ -9,17 +9,18 @@ import subprocess
 import sys
 
 ALLOWED = {
-    "okx-api": {"okx-domain-core"},
+    "okx-api": {"okx-engine-domain"},
     "okx-ws": {"okx-api"},
-    "okx-observation": {"okx-api", "okx-domain-core"},
+    "okx-observation": {"okx-api", "okx-engine-domain"},
     "okx-market-runtime": {"okx-api", "okx-observation", "okx-ipc-contracts", "okx-ws"},
-    "okx-domain-core": set(),
+    "okx-engine-domain": set(),
+    "okx-research-domain": set(),
     "okx-strategy-core": {"okx-research-protocol"},
-    "okx-analysis": {"okx-domain-core", "okx-strategy-core"},
+    "okx-analysis": {"okx-research-domain", "okx-strategy-core"},
     "okx-research": {"okx-analysis"},
     "okx-trade-execution": set(),
-    "okx-ipc-contracts": {"okx-domain-core", "okx-research-protocol"},
-    "okx-research-protocol": {"okx-domain-core"},
+    "okx-ipc-contracts": {"okx-engine-domain", "okx-research-protocol"},
+    "okx-research-protocol": {"okx-research-domain"},
     "okx-github": set(),
     "okx-native-finance-check": set(),
     "okx-cli": {"okx-api"},
@@ -27,7 +28,7 @@ ALLOWED = {
     "okx-host-protocol": {"okx-ipc-contracts"},
     "okx-host-controller": {"okx-github", "okx-host-launcher", "okx-host-protocol", "okx-ipc-contracts"},
     "okx-bridge-mcp": {"okx-github", "okx-host-protocol", "okx-ipc-contracts"},
-    "okx-research-service": {"okx-analysis", "okx-domain-core", "okx-research-protocol", "okx-research", "okx-strategy-core"},
+    "okx-research-service": {"okx-analysis", "okx-research-domain", "okx-research-protocol", "okx-research", "okx-strategy-core"},
     "okx-trading-engine": {
         "okx-api",
         "okx-trade-execution",
@@ -122,7 +123,7 @@ def load_graph(metadata: dict) -> tuple[dict[str, set[str]], dict[str, set[str]]
 
 # K10 pure crates must be free of network/storage/runtime dependencies through
 # the complete resolved production graph, including external package edges.
-K10_TARGET_PURE = ("okx-domain-core", "okx-research-protocol", "okx-strategy-core", "okx-analysis", "okx-research")
+K10_TARGET_PURE = ("okx-engine-domain", "okx-research-domain", "okx-research-protocol", "okx-strategy-core", "okx-analysis", "okx-research")
 K10_ENFORCED_PURE = K10_TARGET_PURE
 K10_FORBIDDEN = {
     "okx-api", "okx-ws", "okx-market-runtime", "okx-github",
@@ -163,7 +164,7 @@ def pure_dependency_violations(
 
 BOUNDARY_FORBIDDEN = {
     "okx-trading-engine": {"okx-research", "okx-research-service", "okx-strategy-core", "okx-analysis"},
-    "okx-research-service": {"okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-host-controller", "okx-bridge-mcp", "okx-ipc-contracts"},
+    "okx-research-service": {"okx-engine-domain", "okx-trading-engine", "okx-trade-execution", "okx-api", "okx-market-runtime", "okx-host-controller", "okx-bridge-mcp", "okx-ipc-contracts"},
     # Host lifecycle processes cannot acquire financial/market capabilities
     # through a direct or transitive production dependency. CONTROL may use
     # the Launcher and versioned protocol; neither may import Engine/SQL.
@@ -303,14 +304,16 @@ def self_test() -> int:
         {"id": "api-id", "deps": []},
     ])
 
-    metadata["workspace_members"].extend(["worker-id", "research-protocol-id"])
+    metadata["workspace_members"].extend(["worker-id", "research-protocol-id", "domain-id"])
     metadata["packages"].extend([
         {"id": "worker-id", "name": "okx-research-service"},
         {"id": "research-protocol-id", "name": "okx-research-protocol"},
+        {"id": "domain-id", "name": "okx-engine-domain"},
     ])
     metadata["resolve"]["nodes"].extend([
         {"id": "worker-id", "deps": [{"pkg": "research-protocol-id", "dep_kinds": [{"kind": None}]}]},
         {"id": "research-protocol-id", "deps": []},
+        {"id": "domain-id", "deps": []},
     ])
 
     if component_scope_dependency_violations(metadata):
@@ -324,7 +327,7 @@ def self_test() -> int:
         if not any("okx-trading-engine -> okx-research" in error for error in component_scope_dependency_violations(dirty_scope)):
             print(f"self-test failed: Engine {kind} Research dependency accepted", file=sys.stderr)
             return 1
-        for forbidden_id, forbidden_name in (("api-id", "okx-api"), ("ipc-id", "okx-ipc-contracts")):
+        for forbidden_id, forbidden_name in (("api-id", "okx-api"), ("ipc-id", "okx-ipc-contracts"), ("domain-id", "okx-engine-domain")):
             reverse_scope = json.loads(json.dumps(metadata))
             next(node for node in reverse_scope["resolve"]["nodes"] if node["id"] == "research-protocol-id")["deps"].append({
                 "pkg": forbidden_id, "dep_kinds": [{"kind": kind}],
@@ -369,8 +372,8 @@ def self_test() -> int:
         return 1
 
     reverse = {name: set(dependencies) for name, dependencies in ALLOWED.items()}
-    reverse["okx-domain-core"].add("okx-trade-execution")
-    if "forbidden local dependency: okx-domain-core -> okx-trade-execution" not in validate(reverse):
+    reverse["okx-engine-domain"].add("okx-trade-execution")
+    if "forbidden local dependency: okx-engine-domain -> okx-trade-execution" not in validate(reverse):
         print("self-test failed: reverse risk domain dependency passed", file=sys.stderr)
         return 1
 
@@ -463,21 +466,21 @@ def self_test() -> int:
     if must_find not in violations:
         print("self-test failed: K10 transitive adapter leak passed", file=sys.stderr)
         return 1
-    clean = {"okx-domain-core": {"serde"}, "okx-research-protocol": {"okx-domain-core"}, "okx-strategy-core": {"okx-research-protocol"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
+    clean = {"okx-engine-domain": {"serde"}, "okx-research-domain": set(), "okx-research-protocol": {"okx-research-domain"}, "okx-strategy-core": {"okx-research-protocol"}, "okx-analysis": {"rust_decimal"}, "okx-research": {"okx-analysis"}}
     if pure_dependency_violations(clean):
         print("self-test failed: clean K10 pure graph rejected", file=sys.stderr)
         return 1
 
-    dirty_kernel = {"okx-domain-core": {"okx-api"}, "okx-api": {"reqwest"}}
-    if not pure_dependency_violations(dirty_kernel, ("okx-domain-core",)):
+    dirty_kernel = {"okx-engine-domain": {"okx-api"}, "okx-api": {"reqwest"}}
+    if not pure_dependency_violations(dirty_kernel, ("okx-engine-domain",)):
         print("self-test failed: new kernel network violation went unnoticed", file=sys.stderr)
         return 1
 
     # An external helper may hide a runtime dependency. Preserve exact IDs so
     # an unrelated version of that helper cannot overwrite the leaking path.
     external = {"kernel-id": {"helper-v1"}, "helper-v1": {"tokio-id"}, "helper-v2": set(), "tokio-id": set()}
-    external_names = {"kernel-id": "okx-domain-core", "helper-v1": "helper", "helper-v2": "helper", "tokio-id": "tokio"}
-    if not pure_dependency_violations(external, ("okx-domain-core",), external_names):
+    external_names = {"kernel-id": "okx-engine-domain", "helper-v1": "helper", "helper-v2": "helper", "tokio-id": "tokio"}
+    if not pure_dependency_violations(external, ("okx-engine-domain",), external_names):
         print("self-test failed: external package runtime leak passed", file=sys.stderr)
         return 1
 

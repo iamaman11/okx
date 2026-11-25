@@ -18,7 +18,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 bytes = "1"
 getrandom = "0.4"
 okx-analysis = { path = "../okx-analysis" }
-okx-domain-core = { path = "../okx-domain-core" }
+okx-research-domain = { path = "../okx-research-domain" }
 okx-strategy-core = { path = "../okx-strategy-core" }
 okx-research-protocol = { path = "../okx-research-protocol" }
 okx-research = { path = "../okx-research" }

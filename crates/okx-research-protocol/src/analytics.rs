@@ -1,7 +1,7 @@
 //! Public compact analytics contract. No transport or financial logic.
 use crate::strategy_contract::CompositionRequest;
 pub use crate::strategy_contract::{BreakoutParameters, EmaParameters, StrategyParameters};
-use okx_domain_core::numeric::positive_decimal;
+use okx_research_domain::numeric::is_positive_decimal;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ pub struct PortfolioScenarioRequest {
 }
 impl PortfolioScenarioRequest {
     pub fn valid(&self) -> bool {
-        if positive_decimal(&self.equity_usd).is_err()
+        if !is_positive_decimal(&self.equity_usd)
             || self.positions.is_empty()
             || self.positions.len() > 8
             || self.correlations.len() != self.positions.len() * (self.positions.len() - 1) / 2
@@ -53,8 +53,8 @@ impl PortfolioScenarioRequest {
                     .instrument
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':'))
-                || positive_decimal(&p.notional_usd).is_err()
-                || positive_decimal(&p.margin_usd).is_err()
+                || !is_positive_decimal(&p.notional_usd)
+                || !is_positive_decimal(&p.margin_usd)
                 || !(-10000..=10000).contains(&p.price_shock_bps)
                 || p.volatility_bps > 10000
                 || p.liquidity_cost_bps > 10000

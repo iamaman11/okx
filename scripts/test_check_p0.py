@@ -73,7 +73,7 @@ class FeedbackTests(unittest.TestCase):
             "full_scale_execution": "not_attempted", "side_effects": "none"}}
 
     def test_kernel_and_boundaries(self):
-        self.assertEqual(select("M", "crates/okx-domain-core/src/time_series.rs"), {"expanded"})
+        self.assertEqual(select("M", "crates/okx-research-domain/src/lib.rs"), {"expanded"})
         self.assertEqual(select("M", "crates/okx-strategy-core/src/time_series.rs"),
                          {"strategy", "research", "worker", "analysis"})
         self.assertEqual(select("M", "crates/okx-strategy-core/src/operators.rs"), {"strategy", "research", "worker", "analysis"})
@@ -142,10 +142,10 @@ class FeedbackTests(unittest.TestCase):
         ])
 
     def test_expand_uncertain_impact(self):
-        for path in ("Cargo.lock", "crates/okx-domain-core/Cargo.toml", "rust-toolchain.toml",
+        for path in ("Cargo.lock", "crates/okx-research-domain/Cargo.toml", "rust-toolchain.toml",
                      "crates/okx-research-service/build.rs", ".github/workflows/ci.yml", "unknown"):
             self.assertEqual(select("M", path), {"expanded"})
-        self.assertEqual(select("D", "crates/okx-domain-core/src/query_plan.rs"), {"expanded"})
+        self.assertEqual(select("D", "crates/okx-research-domain/src/lib.rs"), {"expanded"})
 
     def test_one_strategy_primitive_selects_owner_and_ready_research(self):
         def ready_scope(path):
@@ -258,6 +258,7 @@ class FeedbackTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             measured_native_under_research("test result: ok. 1 passed")
 
+    @patch("check_p0.sys.platform", "linux")
     def test_t10_mcp_requires_actual_end_to_end_native_finance_samples(self):
         import json
 

@@ -191,11 +191,11 @@ Run public read-only diagnostics with the authenticated `diagnostics` MCP tool
 or the existing typed `status` request to Windows CONTROL issue #12; follow
 the returned request ID and source reason, not a manual SQL inspection.
 
-**Architecture guard:** canonical normalized models and deterministic fee math
-live in `okx-domain-core`; venue-dependent constructors stay in `okx-observation`.
-`okx-analysis` and `okx-research` no longer depend on observation/API adapters.
-The default guard checks the complete resolved production dependency graph for
-all three pure crates; negative fixtures reject transitive I/O dependencies.
+**Architecture guard:** `okx-engine-domain` owns normalized Engine facts and
+fee math. Venue-dependent constructors stay in `okx-observation`. Research
+consumes its own typed inputs from `okx-research-domain`. The guard checks
+resolved normal, build and test dependencies for the Research boundary and
+checks transitive production purity for both domain packages.
 The [operation/test index](docs/testing.md) records the remaining #501 scope:
 this dependency check alone does not certify every runtime boundary or workflow.
 

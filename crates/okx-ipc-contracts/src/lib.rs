@@ -3,7 +3,7 @@ pub mod account_governance;
 pub mod accounts;
 pub mod crypto;
 pub mod host_state_proto;
-pub use okx_domain_core::numeric;
+pub use okx_engine_domain::numeric;
 pub use okx_research_protocol::{analytics, research_ipc};
 pub mod risk_authority;
 pub mod trading;

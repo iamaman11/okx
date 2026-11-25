@@ -1,6 +1,6 @@
 //! Local research IPC data only; no financial commands or credentials.
 use crate::analytics::{MarketRequest, ResearchRequest};
-pub use okx_domain_core::observation_model::{FundingHistoryEvent, HistoryCandle};
+pub use okx_research_domain::observation_model::{FundingHistoryEvent, HistoryCandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

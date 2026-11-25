@@ -1,11 +1,11 @@
 [package]
-name = "okx-domain-core"
+name = "okx-engine-domain"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# Canonical facts, domain math and deterministic plans: no network, SQL or runtime.
+# Canonical Engine facts and numeric types: no network, SQL or runtime.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

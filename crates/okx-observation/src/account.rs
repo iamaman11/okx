@@ -1,4 +1,4 @@
-pub use okx_domain_core::observation_model::{
+pub use okx_engine_domain::observation_model::{
     AccountBalanceDetail, AccountBalanceState, AccountPositionState, AccountSnapshot,
     PendingOrderState,
 };

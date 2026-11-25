@@ -17,10 +17,11 @@ in the workspace. Runtime boundaries are tracked separately.
 | **Control** | `okx-host-controller` and `okx-host-launcher`; installed component manifests and lifecycle evidence | Authorized start/stop/install/rollback/doctor | Trading decisions, finance ledger, research computations |
 | **Edge** | `cloudflare/okx-mcp`, `okx-bridge-mcp`; transport/session/identity state | Authenticated MCP/API delivery to the matching owner | Financial or research source-of-truth state, venue mutation |
 
-`okx-domain-core` contains shared pure facts. `okx-ipc-contracts` carries
-typed Engine/Research contracts and shared Engine/Host contracts such as the
-child shutdown request/reply and the account catalog. Host-control mailbox
-messages live in `okx-host-protocol`.
+`okx-engine-domain` owns Engine facts and fee rules. `okx-research-domain`
+owns analytical inputs and public market facts for Research.
+`okx-ipc-contracts` carries Engine and Host commands. Its existing Research
+route imports `okx-research-protocol` until the standalone cutover. Host-control
+mailbox messages live in `okx-host-protocol`.
 `okx-api`, `okx-market-runtime`, `okx-observation`, `okx-ws` and
 `okx-github` contain current adapters/support code; their current broad
 dependency fan-out is **not** a reason to grant another owner financial
@@ -102,8 +103,10 @@ checks and usable artifact, and is not yet proved for Engine changes.
 | `okx-trading-engine` | `okx-agent` | Trading process: accounts, positions, financial decisions, exchange sends and recovery |
 | `okx-trade-execution` | `okx-execution` | Engine-owned RiskBook, finance/SQLite and order execution; **not** another process |
 | `okx-native-finance-check` | Engine's `native_finance_acceptance` example | CI-only executable that runs the financial witness binaries and verifies exact-tree receipts |
-| `okx-domain-core` | `okx-kernel` | Shared financial/domain facts and deterministic rules; no I/O or Research time-series implementation |
-| `okx-ipc-contracts` | `okx-protocol` | Shared versioned Engine/Research IPC and typed command contracts |
+| `okx-engine-domain` | `okx-domain-core` | Engine facts, fee rules and exact numeric inputs |
+| `okx-research-domain` | `okx-domain-core` | Public market facts, analytical inputs and numeric validation owned by Research |
+| `okx-ipc-contracts` | `okx-protocol` | Engine and Host wire contracts, including the existing Research route |
+| `okx-research-protocol` | part of `okx-ipc-contracts` | Research commands, Edge frames and source data contracts |
 | `okx-host-protocol` | new | Host installation/control command and result protocol for CONTROL and MCP bridge; no trading ownership |
 | `okx-market-runtime` | `okx-runtime` | Runtime market sources, venue API, WebSocket and observation integration |
 | `okx-research-service` | `okx-research-worker` | Separate research process and IPC implementation; no trading authority |
@@ -194,10 +197,11 @@ their owner jobs. A Host and Edge change runs their two component jobs without
 rebuilding the Engine. A Research release verifies and fetches the accepted Native
 base once, in the job that assembles the artifact.
 
-On the Windows production dependency graph, `okx-analysis`, `okx-strategy-core`
-and the Research crates are outside Trading Engine. Changes to `okx-domain-core`,
-`okx-ipc-contracts`, `okx-market-runtime` and other Engine inputs still affect
-its binary or the contract it implements. The full route also covers changes
+On the Windows production dependency graph, `okx-analysis` and
+`okx-strategy-core` are outside Trading Engine. Research builds independently
+of `okx-engine-domain` and the venue execution adapters. The existing
+Engine-side Research route still consumes `okx-research-protocol` and its
+Research domain inputs through `okx-ipc-contracts`. The full route also covers changes
 to CI policy or inputs whose impact the classifier cannot verify.
 
 The financial collector runs the seven wall-clock scenarios in an isolated
