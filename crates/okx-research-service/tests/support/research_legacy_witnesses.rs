@@ -543,7 +543,7 @@ pub(super) async fn causal_economics_and_portfolio_are_research_only() {
                 .call(ResearchCommand::PortfolioScenario { request: invalid })
                 .await
                 .unwrap_err(),
-            "INVALID_COMMAND"
+            "INVALID_PORTFOLIO_SCENARIO"
         );
     }
     assert_eq!(worker.source_reads, before);
