@@ -133,6 +133,18 @@ impl AnalyticsService {
         service.producer = Some(producer);
         Ok(service)
     }
+    pub fn new_existing_scoped_with_producer(
+        root: PathBuf,
+        bootstrapper: impl Into<crate::source_api::PublicSourceClient>,
+        scope: &okx_research_protocol::research_ipc::ResearchScope,
+        producer: crate::producer::Producer,
+    ) -> Result<Self, String> {
+        let jobs = jobs::Jobs::open_existing_scoped(root.join("research-catalog.sqlite"), scope)?
+            .with_producer(Some(producer.clone()));
+        let mut service = Self::with_jobs(root, bootstrapper.into(), jobs)?;
+        service.producer = Some(producer);
+        Ok(service)
+    }
     fn with_jobs(
         root: PathBuf,
         bootstrapper: crate::source_api::PublicSourceClient,

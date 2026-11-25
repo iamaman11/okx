@@ -1790,7 +1790,29 @@ async fn immutable_result_pages_and_restart_catalog() {
         matches!(jobs::Jobs::open(root.join("research-catalog.sqlite")), Err(e) if e == "RESEARCH_ROOT_LOCKED")
     );
     drop(s);
-    let s = AnalyticsService::new(root.clone(), bootstrap).unwrap();
+    let scope =
+        okx_research_protocol::research_ipc::ResearchScope::new("fixture-scope".into()).unwrap();
+    drop(AnalyticsService::new_scoped(root.clone(), bootstrap.clone(), &scope).unwrap());
+    let producer = crate::producer::Producer::new("a".repeat(64), None, None).unwrap();
+    let s = AnalyticsService::new_existing_scoped_with_producer(
+        root.clone(),
+        bootstrap,
+        &scope,
+        producer,
+    )
+    .unwrap();
+    let adopted_page = crate::edge_runtime::dispatch_research_for_test(
+        &s,
+        ResearchRequest::Result {
+            job_id: id.clone(),
+            cursor: None,
+            limit: 1,
+            view: ResearchResultView::Trades,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(adopted_page["total_rows"], 120);
     assert_eq!(s.jobs.get(&id).unwrap().state, jobs::State::Completed);
     let legacy = s
         .result_page(id.clone(), None, 1, ResearchResultView::Export)

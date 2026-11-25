@@ -164,12 +164,20 @@ impl EdgeRuntimeConfig {
 
 /// Run without an Agent/Engine process, account credentials, or financial DB.
 /// The research catalog is locked to the separately provided scope and root.
-pub async fn run(root: PathBuf, scope: ResearchScope) -> Result<(), String> {
+pub async fn run(
+    root: PathBuf,
+    scope: ResearchScope,
+    existing_catalog: bool,
+) -> Result<(), String> {
     let config = EdgeRuntimeConfig::from_environment()?;
-    std::fs::create_dir_all(&root).map_err(|_| "RESEARCH_ROOT_CREATE_FAILED")?;
     let source = Arc::new(IndependentOkxPublicSource::new()?);
     let producer = Producer::current()?;
-    let service = AnalyticsService::new_scoped_with_producer(
+    let constructor = if existing_catalog {
+        AnalyticsService::new_existing_scoped_with_producer
+    } else {
+        AnalyticsService::new_scoped_with_producer
+    };
+    let service = constructor(
         root,
         PublicSourceClient::new(source.clone()),
         &scope,
@@ -467,6 +475,14 @@ async fn dispatch(
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn dispatch_research_for_test(
+    service: &AnalyticsService,
+    request: okx_research_protocol::analytics::ResearchRequest,
+) -> Result<serde_json::Value, String> {
+    let source = IndependentOkxPublicSource::new()?;
+    dispatch(service, &source, ResearchCommand::Research(request)).await
+}
 fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentResponse {
     let quality = match &result {
         Ok(value)

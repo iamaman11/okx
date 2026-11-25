@@ -80,9 +80,12 @@ pub enum HostControlOperation {
     StopAgent,
     RestartAgent,
     /// Activate only the exact verified Research image currently selected by
-    /// CONTROL. The scoped data root and research credential are host-owned.
+    /// CONTROL. On first use of an existing catalog, bind to its expected
+    /// public scope fingerprint. The data root and credential are host-owned.
     StartResearch {
         expected_installed_worker_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existing_catalog_scope_sha256: Option<String>,
     },
     /// Stop only the observed Research process generation. A stale status
     /// cannot accidentally stop a newly started process or the Trading Engine.
@@ -221,7 +224,14 @@ impl HostControlOperation {
             }
             Self::StartResearch {
                 expected_installed_worker_sha256,
-            } => validate_sha256(expected_installed_worker_sha256),
+                existing_catalog_scope_sha256,
+            } => {
+                validate_sha256(expected_installed_worker_sha256)?;
+                if let Some(scope) = existing_catalog_scope_sha256 {
+                    validate_sha256(scope)?;
+                }
+                Ok(())
+            }
             Self::StopResearch {
                 expected_active_worker_sha256,
                 expected_process_generation,
@@ -263,11 +273,12 @@ pub enum ResearchRuntimePhase {
     InvalidProvenance,
 }
 
-/// Research's catalog is not the legacy Engine-owned analytics database.
+/// Selected catalog binding. This is not evidence that the process opened it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ResearchCatalogMode {
     HostIndependent,
+    ExistingScoped,
 }
 
 /// Readback from the CONTROL-owned Research supervisor. The caller compares
@@ -463,6 +474,12 @@ mod tests {
         assert!(operation.validate().is_ok());
         assert_eq!(serde_json::to_value(operation).unwrap(), start);
 
+        let mut adopt = start.clone();
+        adopt["existing_catalog_scope_sha256"] = serde_json::json!("b".repeat(64));
+        let operation: HostControlOperation = serde_json::from_value(adopt.clone()).unwrap();
+        assert!(operation.validate().is_ok());
+        assert_eq!(serde_json::to_value(operation).unwrap(), adopt);
+
         let stop = serde_json::json!({
             "type": "stop_research",
             "expected_active_worker_sha256": hash,
@@ -481,6 +498,7 @@ mod tests {
 
         for malformed in [
             serde_json::json!({"type":"start_research", "expected_installed_worker_sha256":"a"}),
+            serde_json::json!({"type":"start_research", "expected_installed_worker_sha256":hash, "existing_catalog_scope_sha256":"unknown"}),
             serde_json::json!({"type":"stop_research", "expected_active_worker_sha256":hash, "expected_process_generation":0}),
             serde_json::json!({"type":"stop_research", "expected_active_worker_sha256":"x", "expected_process_generation":8}),
         ] {

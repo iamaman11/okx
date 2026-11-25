@@ -96,30 +96,43 @@ pub(super) enum SignalOutboxState {
 impl Jobs {
     #[cfg(test)]
     pub fn open(path: PathBuf) -> Result<Self, String> {
-        Self::open_impl(path, None)
+        Self::open_impl(path, None, false)
     }
     pub fn open_scoped(
         path: PathBuf,
         scope: &okx_research_protocol::research_ipc::ResearchScope,
     ) -> Result<Self, String> {
-        Self::open_impl(path, Some(scope))
+        Self::open_impl(path, Some(scope), false)
+    }
+    pub fn open_existing_scoped(
+        path: PathBuf,
+        scope: &okx_research_protocol::research_ipc::ResearchScope,
+    ) -> Result<Self, String> {
+        Self::open_impl(path, Some(scope), true)
     }
     fn open_impl(
         path: PathBuf,
         scope: Option<&okx_research_protocol::research_ipc::ResearchScope>,
+        existing: bool,
     ) -> Result<Self, String> {
-        std::fs::create_dir_all(path.parent().ok_or("INVALID_CATALOG_PATH")?)
-            .map_err(|e| e.to_string())?;
+        let parent = path.parent().ok_or("INVALID_CATALOG_PATH")?;
         if path
             .extension()
             .is_none_or(|extension| extension != "sqlite")
         {
             return Err("RESEARCH_SQLITE_PATH_REQUIRED".into());
         }
-        let lock_path = path
-            .parent()
-            .ok_or("INVALID_CATALOG_PATH")?
-            .join("research-worker.lock");
+        if existing {
+            if !path
+                .try_exists()
+                .map_err(|_| "RESEARCH_EXISTING_CATALOG_OPEN_FAILED")?
+            {
+                return Err("RESEARCH_CATALOG_MISSING".into());
+            }
+        } else {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let lock_path = parent.join("research-worker.lock");
         let root_lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -130,9 +143,18 @@ impl Jobs {
         root_lock
             .try_lock()
             .map_err(|_| "RESEARCH_ROOT_LOCKED".to_string())?;
-        let mut connection = Connection::open(path).map_err(|e| e.to_string())?;
-        // The authorized host assigns a legacy unscoped catalog to its configured
-        // scope once, under the root lease, before recovery or schema migration.
+        let mut connection = if existing {
+            use rusqlite::OpenFlags;
+            Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(|_| "RESEARCH_EXISTING_CATALOG_OPEN_FAILED".to_string())?
+        } else {
+            Connection::open(&path).map_err(|e| e.to_string())?
+        };
+        // Standalone handover requires a scope recorded by the previous owner.
+        // Check under the root lease before recovery or schema migration.
         if let Some(scope) = scope {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -147,9 +169,14 @@ impl Jobs {
                     )
                     .optional()
                     .map_err(|e| e.to_string())?;
+                if existing && stored.is_none() {
+                    return Err("RESEARCH_CATALOG_SCOPE_UNBOUND".into());
+                }
                 if stored.as_deref() != Some(scope.as_str()) {
                     return Err("RESEARCH_SCOPE_MISMATCH".into());
                 }
+            } else if existing {
+                return Err("RESEARCH_CATALOG_SCOPE_UNBOUND".into());
             } else {
                 tx.execute_batch("CREATE TABLE research_catalog_metadata(name TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;").map_err(|e| e.to_string())?;
                 tx.execute(

@@ -66,9 +66,18 @@ The standalone mode now has an **opt-in CONTROL code path**:
   the CPU rate control.
 - `StopResearch` requires the active worker SHA and matching process generation;
   status/desired state live in CONTROL's own `research-state.json` rather than
-  Engine's `engine-state.pb`. The standalone SQLite catalog is rooted at
-  `RUNTIME_ROOT/research/edge-catalog`, not the Engine child catalog. These
-  catalogs are deliberately **not** automatically merged.
+  Engine's `engine-state.pb`. A new installation uses
+  `RUNTIME_ROOT/research/edge-catalog`. To retain a previous scoped catalog in
+  `RUNTIME_ROOT/analytics`, the authorized operator supplies
+  `existing_catalog_scope_sha256` on `StartResearch`. This is the SHA-256 of
+  the **raw public key** matching the old catalog's scope, independent of the
+  Research bearer and Edge host identity. The stopped Engine child releases
+  the catalog lease. Research opens the same catalog and artifacts in place
+  and verifies the existing scope under that lease before schema upgrades,
+  job recovery or serving requests. CONTROL retains the selection for
+  subsequent starts. A missing catalog, an unbound or mismatched scope,
+  or data in both roots blocks selection or startup. No merging or
+  replacement catalog is performed in these cases.
 - `ProvisionResearchRuntimeToken` generates a separate secret and passes it to
   the verified Research executable by bounded stdin. Research writes it to
   its own Windows Credential Manager target; the CONTROL response contains
@@ -80,6 +89,8 @@ The standalone mode now has an **opt-in CONTROL code path**:
 - `StatusResearch`, including the read-only MCP Bridge tool `research_status`,
   is **process evidence only**. Its `RUNNING_UNVERIFIED` phase does not mean an
   authenticated Edge session, loaded job catalog, or successful market read.
+  `EXISTING_SCOPED` reports the selected catalog binding. Verify a successful
+  Research status/result read on an existing job before switching routing.
 
 This opt-in code path is subject to Windows CI and subsequent physical
 acceptance, **not** an assertion that the installed product has changed mode.

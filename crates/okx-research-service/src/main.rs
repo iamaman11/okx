@@ -20,7 +20,14 @@ async fn main() {
         Ok(()) => std::process::exit(0),
         Err(error) => {
             eprintln!("OKX Research Service: {error}");
-            std::process::exit(1);
+            let code = match error.as_str() {
+                "RESEARCH_CATALOG_MISSING" => 70,
+                "RESEARCH_SCOPE_MISMATCH" => 71,
+                "RESEARCH_CATALOG_SCOPE_UNBOUND" => 72,
+                "RESEARCH_ROOT_LOCKED" => 73,
+                _ => 1,
+            };
+            std::process::exit(code);
         }
     }
 }
@@ -47,6 +54,7 @@ async fn run() -> Result<(), String> {
     let mut independent_source = false;
     let mut market_request = false;
     let mut edge_runtime = false;
+    let mut existing_catalog = false;
     while let Some(arg) = args.next() {
         if arg == "--root" && root.is_none() {
             root = Some(PathBuf::from(args.next().ok_or("MISSING_ROOT")?));
@@ -64,11 +72,16 @@ async fn run() -> Result<(), String> {
             independent_source = true;
         } else if arg == "--market-request" && !market_request {
             market_request = true;
+        } else if arg == "--existing-catalog" && !existing_catalog {
+            existing_catalog = true;
         } else if arg == "--edge-runtime" && !edge_runtime {
             edge_runtime = true;
         } else {
             return Err("INVALID_ARGUMENT".into());
         }
+    }
+    if existing_catalog && !edge_runtime {
+        return Err("INVALID_ARGUMENT".into());
     }
     if edge_runtime {
         if independent_source || market_request || root.is_none() || scope.is_none() {
@@ -93,7 +106,7 @@ async fn run() -> Result<(), String> {
     let root = root.ok_or("MISSING_ROOT")?;
     let scope = scope.ok_or("MISSING_SCOPE")?;
     if edge_runtime {
-        return okx_research_service::edge_runtime::run(root, scope).await;
+        return okx_research_service::edge_runtime::run(root, scope, existing_catalog).await;
     }
     if market_request {
         if independent_source {

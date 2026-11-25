@@ -192,9 +192,13 @@ impl HostExecutor {
             HostControlOperation::StatusResearch {} => self.research.status(),
             HostControlOperation::StartResearch {
                 expected_installed_worker_sha256,
+                existing_catalog_scope_sha256,
             } => {
                 self.require_engine_stopped_for_research()?;
-                self.research.start(&expected_installed_worker_sha256)
+                self.research.start(
+                    &expected_installed_worker_sha256,
+                    existing_catalog_scope_sha256.as_deref(),
+                )
             }
             HostControlOperation::StopResearch {
                 expected_active_worker_sha256,
@@ -2010,7 +2014,8 @@ mod tests {
         let mut owner = open();
         assert!(matches!(
             owner.execute(HostControlOperation::StartResearch {
-                expected_installed_worker_sha256: sha.clone()
+                expected_installed_worker_sha256: sha.clone(),
+                existing_catalog_scope_sha256: None,
             }),
             Err(HostControlError::ResearchTransitionRequiresExclusiveProcess)
         ));

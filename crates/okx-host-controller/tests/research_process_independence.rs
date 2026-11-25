@@ -235,7 +235,7 @@ fn research_control_root_is_independent_and_start_requires_verified_installation
         "status must not install or create desired state"
     );
     assert_eq!(
-        supervisor.start(&"a".repeat(64)).unwrap_err().code(),
+        supervisor.start(&"a".repeat(64), None).unwrap_err().code(),
         "ARTIFACT_VERIFICATION_FAILED"
     );
     assert!(
@@ -255,7 +255,7 @@ fn corrupted_and_hash_mismatched_research_image_never_launch() {
         ResearchSupervisor::at(roots.control.clone(), roots.runtime.clone()).unwrap();
 
     fs::write(roots.runtime.join("installed-research.json"), b"not json").unwrap();
-    assert!(supervisor.start(&expected).is_err());
+    assert!(supervisor.start(&expected, None).is_err());
     let corrupt: ResearchRuntimeStatus =
         serde_json::from_value(supervisor.status().unwrap()).unwrap();
     assert_eq!(corrupt.phase, ResearchRuntimePhase::InvalidProvenance);
@@ -271,7 +271,7 @@ fn corrupted_and_hash_mismatched_research_image_never_launch() {
     fs::write(image_dir.join("okx-research-service.exe"), b"hash mismatch").unwrap();
     write_pointer_claiming_sha(&roots.runtime, &expected);
     assert_eq!(
-        supervisor.start(&expected).unwrap_err().code(),
+        supervisor.start(&expected, None).unwrap_err().code(),
         "ARTIFACT_HASH_MISMATCH"
     );
     let mismatch: ResearchRuntimeStatus =
@@ -311,7 +311,7 @@ fn standalone_research_status_is_typed_and_does_not_claim_edge_online() {
     .unwrap();
     supervisor.reconcile().unwrap();
     assert_eq!(
-        supervisor.start(&"a".repeat(64)).unwrap_err().code(),
+        supervisor.start(&"a".repeat(64), None).unwrap_err().code(),
         "ARTIFACT_VERIFICATION_FAILED"
     );
     let stopped: ResearchRuntimeStatus =
@@ -331,7 +331,7 @@ fn standalone_research_lifecycle_requires_exact_image_and_process_generation() {
     let pointer = roots.runtime.join("installed-research.json");
 
     fs::write(&pointer, b"{\"schema\":\"invalid\"}").unwrap();
-    assert!(supervisor.start(&expected).is_err());
+    assert!(supervisor.start(&expected, None).is_err());
     let corrupted: ResearchRuntimeStatus =
         serde_json::from_value(supervisor.status().unwrap()).unwrap();
     assert_eq!(corrupted.phase, ResearchRuntimePhase::InvalidProvenance);
@@ -350,7 +350,7 @@ fn standalone_research_lifecycle_requires_exact_image_and_process_generation() {
     .unwrap();
     write_pointer_claiming_sha(&roots.runtime, &expected);
     assert_eq!(
-        supervisor.start(&"a".repeat(64)).unwrap_err().code(),
+        supervisor.start(&"a".repeat(64), None).unwrap_err().code(),
         "ARTIFACT_HASH_MISMATCH"
     );
     assert!(supervisor.status().unwrap()["pid"].is_null());

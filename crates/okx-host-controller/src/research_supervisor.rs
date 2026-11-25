@@ -1,6 +1,8 @@
 //! CONTROL-owned Research process lifecycle, separate from the trading Engine.
 //! No finance credentials, ledger handles, strategy signals or Engine state are
 //! reachable from this module. It never starts a worker from an unchecked path.
+mod catalog;
+
 #[cfg(not(windows))]
 use std::fs::File;
 use std::{
@@ -22,6 +24,7 @@ use crate::{
     HostControlError, HostControlResult, artifact::resolve_verified_installed_research,
     background_process::hidden_command, desired::atomic_replace, job::AgentJob,
 };
+use catalog::{CatalogBinding, CatalogOnDisk};
 
 const RESEARCH_DESIRED_SCHEMA: &str = "okx.host-control.research-desired/v1";
 const STATE_FILE: &str = "research-state.json";
@@ -63,6 +66,8 @@ struct ResearchDesiredState {
     desired_running: bool,
     expected_worker_sha256: Option<String>,
     host_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog: Option<CatalogBinding>,
     process_generation: u64,
 }
 
@@ -73,6 +78,7 @@ impl ResearchDesiredState {
             desired_running: false,
             expected_worker_sha256: None,
             host_scope: None,
+            catalog: None,
             process_generation: 0,
         }
     }
@@ -81,6 +87,13 @@ impl ResearchDesiredState {
         self.schema == RESEARCH_DESIRED_SCHEMA
             && self.expected_worker_sha256.as_deref().is_none_or(valid_sha)
             && self.host_scope.as_deref().is_none_or(valid_sha)
+            && self.catalog.as_ref().is_none_or(|catalog| {
+                self.host_scope.is_some()
+                    && match catalog {
+                        CatalogBinding::HostScoped => true,
+                        CatalogBinding::ExistingScoped { scope_sha256 } => valid_sha(scope_sha256),
+                    }
+            })
             && (self.expected_worker_sha256.is_some() == self.host_scope.is_some())
             && (!self.desired_running || self.expected_worker_sha256.is_some())
             && (self.process_generation == 0 || self.host_scope.is_some())
@@ -197,7 +210,8 @@ impl ResearchStateStore {
 /// along its fixed CONTROL-root path. Missing ancestors are allowed only before
 /// the first atomic save, never when reading an existing state file.
 fn validate_state_ancestors(parent: &Path, allow_missing: bool) -> HostControlResult<()> {
-    for ancestor in parent.ancestors() {
+    let ancestors: Vec<_> = parent.ancestors().collect();
+    for ancestor in ancestors.into_iter().rev() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) if metadata.is_dir() && !is_reparse(&metadata) => {}
             Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {}
@@ -220,7 +234,7 @@ fn is_reparse(metadata: &fs::Metadata) -> bool {
 }
 
 /// One Research process and one independently owned Windows Job. Its desired
-/// state and SQLite root have no dependency on Engine desired state or scope.
+/// state and catalog are owned here after cutover.
 pub struct ResearchSupervisor {
     store: ResearchStateStore,
     runtime_root: PathBuf,
@@ -283,18 +297,27 @@ impl ResearchSupervisor {
     }
 
     fn running(&mut self) -> HostControlResult<bool> {
-        let exited = match self.child.as_mut() {
-            Some(child) => child.try_wait()?.is_some(),
-            None => false,
+        let exit = match self.child.as_mut() {
+            Some(child) => child.try_wait()?,
+            None => None,
         };
-        if exited {
+        if let Some(status) = exit {
             if let Some(mut child) = self.child.take() {
                 let _ = child.wait();
             }
             self.job.take();
             self.active_sha256 = None;
             self.started_at = None;
-            self.last_error = Some("RESEARCH_PROCESS_EXITED".into());
+            self.last_error = Some(
+                match status.code() {
+                    Some(70) => "RESEARCH_CATALOG_MISSING",
+                    Some(71) => "RESEARCH_SCOPE_MISMATCH",
+                    Some(72) => "RESEARCH_CATALOG_SCOPE_UNBOUND",
+                    Some(73) => "RESEARCH_ROOT_LOCKED",
+                    _ => "RESEARCH_PROCESS_EXITED",
+                }
+                .into(),
+            );
             if self.desired.desired_running {
                 self.schedule_restart();
             }
@@ -316,6 +339,22 @@ impl ResearchSupervisor {
         })
     }
 
+    fn catalog_on_disk(&self) -> HostControlResult<CatalogOnDisk> {
+        CatalogOnDisk::inspect(&self.runtime_root)
+    }
+
+    fn select_catalog(
+        &self,
+        expected_scope: Option<&str>,
+        on_disk: CatalogOnDisk,
+    ) -> HostControlResult<CatalogBinding> {
+        on_disk.select(
+            self.desired.catalog.as_ref(),
+            self.desired.host_scope.is_some(),
+            expected_scope,
+        )
+    }
+
     fn launch(&mut self) -> HostControlResult<u32> {
         if !cfg!(windows) {
             return Err(HostControlError::UnsupportedPlatform);
@@ -325,7 +364,7 @@ impl ResearchSupervisor {
             .expected_worker_sha256
             .clone()
             .ok_or(HostControlError::ResearchStateCorrupt)?;
-        let scope = self
+        let host_scope = self
             .desired
             .host_scope
             .clone()
@@ -336,29 +375,49 @@ impl ResearchSupervisor {
         {
             return Err(HostControlError::ResearchIdentityMismatch);
         }
+        let on_disk = self.catalog_on_disk()?;
+        let binding = self
+            .desired
+            .catalog
+            .as_ref()
+            .ok_or(HostControlError::ResearchCatalogScopeRequired)?;
+        // Recheck the selection after a restart or filesystem change.
+        self.select_catalog(None, on_disk)?;
+        let (catalog_root, scope) = match binding {
+            CatalogBinding::HostScoped => {
+                (catalog::independent_root(&self.runtime_root), &host_scope)
+            }
+            CatalogBinding::ExistingScoped { scope_sha256 } => {
+                // Open SQLite, WAL and content-addressed artifacts in place.
+                (catalog::existing_root(&self.runtime_root), scope_sha256)
+            }
+        };
         let generation = self
             .desired
             .process_generation
             .checked_add(1)
             .ok_or(HostControlError::ResearchGenerationExhausted)?;
         let incarnation = fresh_incarnation()?;
-        // Never pass a bearer, Engine account identity or private credential in
-        // argv/env. Research reads its own CredMan target after child startup.
+        // The catalog scope is a public fingerprint. Edge identity uses the
+        // independent host scope and a credential from Research's own target.
         let mut command = hidden_command(&image.binary);
         command
             .env_clear()
             .arg("--edge-runtime")
             .arg("--root")
-            .arg(self.runtime_root.join("research").join("edge-catalog"))
+            .arg(catalog_root)
             .arg("--scope")
-            .arg(&scope)
+            .arg(scope)
             .env("OKX_RESEARCH_EDGE_WSS_URL", RESEARCH_EDGE_WSS_URL)
             .env("OKX_RESEARCH_RUNTIME_ID", RESEARCH_RUNTIME_ID)
-            .env("OKX_RESEARCH_HOST_SCOPE", &scope)
+            .env("OKX_RESEARCH_HOST_SCOPE", &host_scope)
             .env("OKX_RESEARCH_INCAR", incarnation)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if on_disk != CatalogOnDisk::Empty {
+            command.arg("--existing-catalog");
+        }
         // Avoid inheriting Engine/private credentials or diagnostic overrides
         // from CONTROL. Only Windows account and OS process basics pass through.
         for key in [
@@ -421,7 +480,11 @@ impl ResearchSupervisor {
         Ok(pid)
     }
 
-    pub fn start(&mut self, expected_installed_worker_sha256: &str) -> HostControlResult<Value> {
+    pub fn start(
+        &mut self,
+        expected_installed_worker_sha256: &str,
+        existing_catalog_scope_sha256: Option<&str>,
+    ) -> HostControlResult<Value> {
         if !cfg!(windows) {
             return Err(HostControlError::UnsupportedPlatform);
         }
@@ -432,7 +495,12 @@ impl ResearchSupervisor {
         if image.sha256 != expected_installed_worker_sha256 {
             return Err(HostControlError::ResearchIdentityMismatch);
         }
+        let catalog =
+            self.select_catalog(existing_catalog_scope_sha256, self.catalog_on_disk()?)?;
         if self.running()? {
+            if self.desired.catalog.as_ref() != Some(&catalog) {
+                return Err(HostControlError::ResearchCatalogConflict);
+            }
             if self.active_sha256.as_deref() != Some(expected_installed_worker_sha256) {
                 return Err(HostControlError::ResearchIdentityMismatch);
             }
@@ -451,6 +519,7 @@ impl ResearchSupervisor {
         next.desired_running = true;
         next.expected_worker_sha256 = Some(image.sha256);
         next.host_scope = Some(scope);
+        next.catalog = Some(catalog);
         self.persist(next)?;
         match self.launch() {
             Ok(_) => self.status(),
@@ -628,7 +697,10 @@ impl ResearchSupervisor {
             active_worker_sha256: self.active_sha256.clone(),
             installed_worker_sha256: installed.map(|image| image.sha256),
             phase,
-            catalog_mode: ResearchCatalogMode::HostIndependent,
+            catalog_mode: match self.desired.catalog {
+                Some(CatalogBinding::ExistingScoped { .. }) => ResearchCatalogMode::ExistingScoped,
+                _ => ResearchCatalogMode::HostIndependent,
+            },
             retry_in_ms: self.retry_in_ms(),
             last_error: self
                 .state_error
@@ -667,6 +739,7 @@ impl Drop for ResearchSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catalog::CATALOG_DB;
 
     #[test]
     fn research_state_is_strict_and_independent_of_engine_state() {
@@ -680,6 +753,7 @@ mod tests {
             desired_running: true,
             expected_worker_sha256: Some("a".repeat(64)),
             host_scope: Some("b".repeat(64)),
+            catalog: Some(CatalogBinding::HostScoped),
             process_generation: 7,
         };
         store.save(&state).unwrap();
@@ -690,6 +764,79 @@ mod tests {
         assert!(matches!(
             store.read(),
             Err(HostControlError::ResearchStateCorrupt)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn research_catalog_cutover_requires_scope_and_has_no_empty_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-research-catalog-cutover-{}-{}",
+            std::process::id(),
+            fresh_scope().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut owner = ResearchSupervisor::at(root.clone(), root.join("runtime")).unwrap();
+        let scope = "b".repeat(64);
+        assert!(matches!(
+            owner.select_catalog(Some(&scope), owner.catalog_on_disk().unwrap()),
+            Err(HostControlError::ResearchCatalogMissing)
+        ));
+        let legacy = catalog::existing_root(&owner.runtime_root);
+        fs::create_dir_all(&legacy).unwrap();
+        let catalog = legacy.join(CATALOG_DB);
+        fs::write(&catalog, b"existing catalog fixture").unwrap();
+        assert!(matches!(
+            owner.select_catalog(None, owner.catalog_on_disk().unwrap()),
+            Err(HostControlError::ResearchCatalogScopeRequired)
+        ));
+        let binding = owner
+            .select_catalog(Some(&scope), owner.catalog_on_disk().unwrap())
+            .unwrap();
+        assert_eq!(
+            binding,
+            CatalogBinding::ExistingScoped {
+                scope_sha256: scope.clone()
+            }
+        );
+        owner
+            .persist(ResearchDesiredState {
+                expected_worker_sha256: Some("a".repeat(64)),
+                host_scope: Some("c".repeat(64)),
+                catalog: Some(binding.clone()),
+                ..ResearchDesiredState::stopped()
+            })
+            .unwrap();
+        let mut reopened = ResearchSupervisor::at(root.clone(), root.join("runtime")).unwrap();
+        assert_eq!(
+            reopened
+                .select_catalog(None, reopened.catalog_on_disk().unwrap())
+                .unwrap(),
+            binding
+        );
+        let status = reopened.status().unwrap();
+        assert_eq!(status["catalog_mode"], "EXISTING_SCOPED");
+        assert!(!status.to_string().contains(&scope));
+        let independent = catalog::independent_root(&reopened.runtime_root);
+        assert!(!independent.exists());
+        fs::create_dir_all(&independent).unwrap();
+        fs::write(independent.join(CATALOG_DB), b"another catalog fixture").unwrap();
+        assert!(matches!(
+            reopened.catalog_on_disk(),
+            Err(HostControlError::ResearchCatalogConflict)
+        ));
+        assert_eq!(fs::read(&catalog).unwrap(), b"existing catalog fixture");
+        fs::remove_file(independent.join(CATALOG_DB)).unwrap();
+        fs::remove_file(catalog).unwrap();
+        assert!(matches!(
+            reopened.select_catalog(None, reopened.catalog_on_disk().unwrap()),
+            Err(HostControlError::ResearchCatalogMissing)
+        ));
+        // An orphan WAL is state, not a reason to create a new empty catalog.
+        fs::write(legacy.join("research-catalog.sqlite-wal"), b"wal fixture").unwrap();
+        assert!(matches!(
+            reopened.catalog_on_disk(),
+            Err(HostControlError::ResearchCatalogConflict)
         ));
         fs::remove_dir_all(root).unwrap();
     }
@@ -719,6 +866,7 @@ mod tests {
                 desired_running: true,
                 expected_worker_sha256: Some(sha.clone()),
                 host_scope: Some("d".repeat(64)),
+                catalog: Some(CatalogBinding::HostScoped),
                 process_generation: 1,
             })
             .unwrap();

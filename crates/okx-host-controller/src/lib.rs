@@ -111,6 +111,15 @@ pub enum HostControlError {
     )]
     ResearchTransitionRequiresExclusiveProcess,
 
+    #[error("existing Research catalog requires its expected scope fingerprint")]
+    ResearchCatalogScopeRequired,
+
+    #[error("expected existing Research catalog is missing")]
+    ResearchCatalogMissing,
+
+    #[error("Research catalog roots or selected bindings conflict")]
+    ResearchCatalogConflict,
+
     #[error("account metadata catalog is corrupt or invalid")]
     AccountCatalogInvalid,
 
@@ -206,6 +215,9 @@ impl HostControlError {
             Self::ResearchTransitionRequiresExclusiveProcess => {
                 "RESEARCH_TRANSITION_REQUIRES_EXCLUSIVE_PROCESS"
             }
+            Self::ResearchCatalogScopeRequired => "RESEARCH_CATALOG_SCOPE_REQUIRED",
+            Self::ResearchCatalogMissing => "RESEARCH_CATALOG_MISSING",
+            Self::ResearchCatalogConflict => "RESEARCH_CATALOG_CONFLICT",
             Self::JobAssignment(_) => "JOB_ASSIGNMENT_FAILED",
             Self::ControllerAlreadyRunning => "CONTROLLER_ALREADY_RUNNING",
             Self::WindowsIdentityUnavailable => "WINDOWS_IDENTITY_UNAVAILABLE",

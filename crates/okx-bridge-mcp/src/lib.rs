@@ -573,6 +573,7 @@ mod tests {
             HostControlOperation::ProvisionResearchRuntimeToken {},
             HostControlOperation::StartResearch {
                 expected_installed_worker_sha256: "a".repeat(64),
+                existing_catalog_scope_sha256: None,
             },
             HostControlOperation::StopResearch {
                 expected_active_worker_sha256: "b".repeat(64),
