@@ -14,24 +14,46 @@ use okx_research_protocol::{
     },
     research_ipc::ResearchScope,
 };
-use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     time::{Instant, MissedTickBehavior},
 };
+#[cfg(test)]
+use tokio_tungstenite::connect_async;
 use tokio_tungstenite::{
-    WebSocketStream, connect_async,
+    WebSocketStream, connect_async_with_config,
     tungstenite::{
         Message,
         client::IntoClientRequest,
         http::header::{AUTHORIZATION, HeaderValue},
+        protocol::WebSocketConfig,
     },
 };
 use zeroize::Zeroizing;
 
 const MAX_RESEARCH_IN_FLIGHT: usize = 6;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(80);
+const EDGE_WRITE_DEADLINE: Duration = Duration::from_secs(10);
 const SUPERVISOR_GATE: &[u8] = b"RESEARCH_HOST_JOB_ASSIGNED\n";
+
+/// Apply the protocol's 64 KiB budget at the WebSocket decoder, before
+/// Tungstenite aggregates a fragmented message into a much larger allocation.
+/// The default 64 MiB message/16 MiB frame limits are not Research budgets.
+fn edge_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .read_buffer_size(4 * 1024)
+        .write_buffer_size(4 * 1024)
+        .max_write_buffer_size(2 * FRAME_LIMIT)
+        .max_message_size(Some(FRAME_LIMIT))
+        .max_frame_size(Some(FRAME_LIMIT))
+}
 
 /// CONTROL assigns its Windows Job BEFORE releasing the Research child. This
 /// prevents the child's narrower memory Job from racing with the host's Job
@@ -243,18 +265,93 @@ fn research_session_binding(
     }
 }
 
+/// Serde writes into this capped buffer incrementally. A giant result is
+/// rejected before another unbounded JSON String/Vec copy can be allocated.
+struct BoundedFrameWriter {
+    bytes: Vec<u8>,
+    oversized: bool,
+}
+
+impl BoundedFrameWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            oversized: false,
+        }
+    }
+}
+
+impl Write for BoundedFrameWriter {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        if input.len() > FRAME_LIMIT.saturating_sub(self.bytes.len()) {
+            self.oversized = true;
+            return Err(io::Error::other("RESEARCH_EDGE_RESPONSE_OVERSIZED"));
+        }
+        self.bytes.extend_from_slice(input);
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_frame(frame: &OutgoingFrame) -> Result<String, String> {
+    let mut writer = BoundedFrameWriter::new();
+    if serde_json::to_writer(&mut writer, frame).is_err() {
+        return Err(if writer.oversized {
+            "RESEARCH_EDGE_RESPONSE_OVERSIZED"
+        } else {
+            "RESEARCH_EDGE_ENCODE_FAILED"
+        }
+        .into());
+    }
+    String::from_utf8(writer.bytes).map_err(|_| "RESEARCH_EDGE_ENCODE_FAILED".into())
+}
+
+async fn send_encoded<S>(socket: &mut S, json: String, deadline: Duration) -> Result<(), String>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    tokio::time::timeout(deadline, socket.send(Message::Text(json.into())))
+        .await
+        .map_err(|_| "RESEARCH_EDGE_WRITE_TIMEOUT")?
+        .map_err(|_| "RESEARCH_EDGE_WRITE_FAILED".into())
+}
+
 async fn send<S>(socket: &mut S, frame: OutgoingFrame) -> Result<(), String>
 where
     S: futures_util::Sink<Message> + Unpin,
 {
-    let json = serde_json::to_string(&frame).map_err(|_| "RESEARCH_EDGE_ENCODE_FAILED")?;
-    if json.len() > FRAME_LIMIT {
-        return Err("RESEARCH_EDGE_RESPONSE_OVERSIZED".into());
+    send_encoded(socket, encode_frame(&frame)?, EDGE_WRITE_DEADLINE).await
+}
+
+/// An oversized result becomes one bounded failure envelope on the SAME
+/// Research session; encoding never allocates the unbounded result twice.
+fn encode_result_response(
+    session_id: &str,
+    connection_generation: u64,
+    id: &str,
+    result: AgentResponse,
+) -> Result<String, String> {
+    let response = OutgoingFrame::Response {
+        schema: SCHEMA.into(),
+        session_id: session_id.into(),
+        connection_generation,
+        response: result,
+    };
+    match encode_frame(&response) {
+        Ok(json) => Ok(json),
+        Err(reason) if reason == "RESEARCH_EDGE_RESPONSE_OVERSIZED" => {
+            encode_frame(&OutgoingFrame::Response {
+                schema: SCHEMA.into(),
+                session_id: session_id.into(),
+                connection_generation,
+                response: response_for(id, Err("RESEARCH_RESULT_TOO_LARGE".into())),
+            })
+        }
+        Err(reason) => Err(reason),
     }
-    socket
-        .send(Message::Text(json.into()))
-        .await
-        .map_err(|_| "RESEARCH_EDGE_WRITE_FAILED".into())
 }
 
 async fn session(
@@ -273,10 +370,13 @@ async fn session(
         AUTHORIZATION,
         HeaderValue::from_str(&header).map_err(|_| "INVALID_RESEARCH_BEARER")?,
     );
-    let (socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(request))
-        .await
-        .map_err(|_| "RESEARCH_EDGE_CONNECT_TIMEOUT")?
-        .map_err(|_| "RESEARCH_EDGE_CONNECT_FAILED")?;
+    let (socket, _) = tokio::time::timeout(
+        Duration::from_secs(15),
+        connect_async_with_config(request, Some(edge_websocket_config()), false),
+    )
+    .await
+    .map_err(|_| "RESEARCH_EDGE_CONNECT_TIMEOUT")?
+    .map_err(|_| "RESEARCH_EDGE_CONNECT_FAILED")?;
     run_session(socket, config.hello(producer), service, public_data).await
 }
 
@@ -323,18 +423,8 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
             },
             Some((id, result)) = requests.next(), if !requests.is_empty() => {
                 pending.remove(&id);
-                let response = OutgoingFrame::Response {
-                    schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation,
-                    response: result,
-                };
-                if serde_json::to_vec(&response).map_err(|_| "RESEARCH_EDGE_ENCODE_FAILED")?.len() > FRAME_LIMIT {
-                    send(&mut sink, OutgoingFrame::Response {
-                        schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation,
-                        response: response_for(&id, Err("RESEARCH_RESULT_TOO_LARGE".into())),
-                    }).await?;
-                } else {
-                    send(&mut sink, response).await?;
-                }
+                let json = encode_result_response(&session_id, connection_generation, &id, result)?;
+                send_encoded(&mut sink, json, EDGE_WRITE_DEADLINE).await?;
             },
             next = source.next() => {
                 let message = next.ok_or("RESEARCH_EDGE_CLOSED")?
@@ -880,6 +970,10 @@ mod tests {
 #[cfg(test)]
 #[path = "edge_market_tests.rs"]
 mod market_tests;
+
+#[cfg(test)]
+#[path = "edge_transport_tests.rs"]
+mod transport_tests;
 
 #[cfg(test)]
 #[path = "edge_runtime/standalone_mcp_tests.rs"]
