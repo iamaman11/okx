@@ -32,6 +32,7 @@ const nativeCacheJobs = [
 
 function validate(yaml, fileNames) {
   assert.ok(!fileNames.includes('publish-native-base.yml'), 'SECOND_PUBLICATION_WORKFLOW');
+  assert.ok(!fileNames.includes('all26-slice-targeted.yml'), 'RETIRED_FINANCE_WORKFLOW_RESURRECTED');
   const parts = yaml.split(/^jobs:\s*$/m);
   assert.equal(parts.length, 2, 'MALFORMED_CI_JOBS');
   const [header, jobs] = parts;
@@ -170,6 +171,18 @@ function validate(yaml, fileNames) {
   // checks again inside portable Rust CI doubles setup without new evidence.
   const linux = job('rust_tests_linux');
   const edge = job('cloudflare_mcp_contracts');
+  const architecture = job('architecture_contracts');
+  assert.match(linux, /cargo fmt --all -- --check/);
+  assert.match(linux, /cargo clippy --locked --workspace --exclude okx-trading-engine --exclude okx-host-controller --all-targets -- -D warnings/);
+  assert.match(linux, /cargo test --locked --workspace --exclude okx-trading-engine --exclude okx-host-controller --exclude okx-research-service/);
+  assert.doesNotMatch(linux, /sqlite_million_history_bounded_rss|two_account_100_parallel_sql_readonly_isolation/,
+    'RETIRED_OR_ZERO_TEST_LINUX_STEP');
+  assert.doesNotMatch(linux, /name: Native policy and original financial invariants|native-policy\.log/,
+    'DUPLICATED_PORTABLE_FINANCE_STEP');
+  assert.match(architecture, /node scripts\/run-trade-integration\.mjs --list/);
+  assert.match(architecture, /node scripts\/run-trade-integration\.mjs --self-test/);
+  assert.match(architecture, /node scripts\/run-trade-integration\.mjs --case T09\.0 --artifacts/);
+  assert.match(architecture, /RETIRED_REMOTE_FINANCE_HARNESS_EXECUTED/);
   assert.doesNotMatch(linux, /npm ci|npm run check|test-native-finance-retirement-do\.mjs|actions\/setup-node@/);
   assert.match(edge, /npm ci --ignore-scripts --no-audit --no-fund/);
   assert.match(edge, /needs\.component_impact\.outputs\.edge_required == 'true'/);
@@ -532,6 +545,11 @@ assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.
 assert.throws(() => validate(source.replace('git fetch --no-tags --depth=1 origin "$BASE_SHA"',
   'git fetch --no-tags --depth=1 origin main'), workflows));
 assert.throws(() => validate(source.replace('name: rust-tests-linux', 'name: linux-trader'), workflows));
+assert.throws(() => validate(source.replace('      - name: Format\n        run: cargo fmt --all -- --check',
+  '      - name: Format\n        run: echo skipped-format'), workflows));
+assert.throws(() => validate(source.replace('cargo test --locked --workspace --exclude okx-trading-engine --exclude okx-host-controller --exclude okx-research-service', 'echo skipped-portable-tests'), workflows));
+assert.throws(() => validate(source.replace('      - name: Test portable crates',
+  '      - run: cargo test -p okx-trade-execution --lib two_account_100_parallel_sql_readonly_isolation\n      - name: Test portable crates'), workflows));
 assert.throws(() => validate(source.replace('      - name: Test portable crates',
   '      - run: npm ci --ignore-scripts --no-audit --no-fund\n      - name: Test portable crates'), workflows));
 assert.throws(() => validate(source.replace('        default: true', '        default: false'), workflows));

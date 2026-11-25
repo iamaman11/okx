@@ -1,20 +1,9 @@
 #!/usr/bin/env node
-// Historical T09/T10 artifact parser. Execution is retired after Native cutover.
-// A missing scenario is a failure,
-// never a skip or a copied component-test PASS. Cases invoke production owners
-// with recorded raw HTTP/WS inputs and must return independently checked facts.
-import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
-import { basename, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import os from "node:os";
-import { nativeCohortSnapshot } from "./trade-integration/native-workerd.mjs";
-import { runScenario } from "./trade-integration/scenario-lifecycle.mjs";
-
-const here = fileURLToPath(new URL(".", import.meta.url));
-const root = resolve(here, "..");
+// Historical T09/T10 case IDs, offline evidence verifier and negative oracle.
+// Execution was retired after Native cutover. Never equate old recorded
+// evidence with the current Windows 62/107 financial acceptance.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 const t09 = [...Array.from({ length: 9 }, (_, i) => `T09.${i}`), "T09-MA", "T09-SPEC"];
 const t10 = Array.from({ length: 15 }, (_, i) => `T10-${String(i + 1).padStart(2, "0")}`);
 const required = Object.freeze([...t09, ...t10]);
@@ -24,8 +13,6 @@ const mandatoryStages = Object.freeze([
   "settlement_committed", "release_confirmed",
 ]);
 const failures = {
-  missing: "MISSING_REQUIRED_CASE",
-  timeout: "CASE_DEADLINE_EXCEEDED",
   invalid: "UNVERIFIED_CASE_EVIDENCE",
 };
 // Exact per-case *minimum* observed stages; T09.0 is bootstrap without a POST,
@@ -166,7 +153,7 @@ const terminalGolden = new Map([
   ])],
 ]);
 function usage() {
-  throw Error("USAGE: --list | --suite t09,t10 --artifacts DIR | --case T10-05 --artifacts DIR | --verify-case-artifact FILE");
+  throw Error("USAGE: --list | --self-test | --verify-case-artifact FILE (execution --suite/--case is retired)");
 }
 function args(input) {
   if (input.length === 1 && input[0] === "--list") return { list: true };
@@ -185,12 +172,6 @@ function args(input) {
   if (required.includes(config["--case"]) && !config["--suite"] && config["--artifacts"])
     return { selected: [config["--case"]], artifacts: config["--artifacts"] };
   usage();
-}
-function hash(data) { return createHash("sha256").update(data).digest("hex"); }
-function hashFile(path) { return existsSync(path) ? hash(readFileSync(path)) : null; }
-function git(...cmd) {
-  try { return execFileSync("git", cmd, { cwd: root, encoding: "utf8" }).trim(); }
-  catch { return null; }
 }
 function verified(output, caseId) {
   // A PASS requires stage records from physical owners, independent expected
@@ -441,122 +422,3 @@ if (cli.list) {
   process.exit(0);
 }
 throw Error("RETIRED_REMOTE_FINANCE_HARNESS: run the Native Rust property collector; no historical scenario was executed");
-const dir = resolve(cli.artifacts);
-if (basename(dir) === "." || dir === root) throw Error("ARTIFACTS_MUST_BE_SEPARATE_DIRECTORY");
-await mkdir(dir, { recursive: true });
-const events = [];
-const caseResults = [];
-const assertions = [];
-const caseReadbacks = [];
-// Cases execute in one Node process; never let an opt-in fault probe from
-// a previous case silently change the next Native/Worker financial cohort.
-// Preserve deliberate caller-provided environment (e.g. targeted S2-05)
-// while restoring every per-case override before advancing the matrix.
-const scopedProbeKeys = Object.freeze([
-  "OKX_T09_MA_CONCURRENT_PROBE",
-  "OKX_T10_06_CONCURRENT_PROBE",
-  "OKX_T10_07_NATIVE_PROBE",
-  "OKX_T10_02_EXTERNAL_EXPOSURE_PROBE",
-  "OKX_T10_04_FOREIGN_WORKER_REPLY_PROBE",
-  "OKX_T09_SPEC_SECOND_LINEAR_PROBE",
-  "OKX_T10_05_LOST_ACK_PROBE",
-  "OKX_T10_05_EXPLICIT_REJECT_PROBE",
-  "OKX_T10_15_POST_HELD_SOURCE_PROBE",
-  "OKX_T10_03_POST_AUTH_REPLY_LOST_PROBE",
-  "OKX_T10_03_LOST_RESERVE_REPLY_PROBE",
-  "OKX_T10_01_PARTIAL_SOURCE_RECOVERY_PROBE",
-  "OKX_T10_13_STOP_PROBE",
-  "OKX_T10_10_FINANCE_REPLAY_PROBE",
-  "OKX_T10_14_NATIVE_PROBE",
-  "OKX_T10_09_LATE_FILL_PROBE",
-  "OKX_B1_NATIVE_CAP_PROBE",
-  "OKX_B1_SECOND_POSITIVE_PROBE",
-  "OKX_S2_05_POLICY_CAS_PROBE",
-]);
-const initialProbes = new Map(scopedProbeKeys.map(k => [k, process.env[k]]));
-
-const started = Date.now();
-let teardownFailed = false;
-for (const caseId of cli.selected) {
-  const script = resolve(root, "scripts", "trade-integration", "cases", caseId + ".mjs");
-  const runStarted = Date.now();
-  let status = "FAIL", reason = null;
-  try {
-    if (!existsSync(script)) throw Error(failures.missing);
-    const { run } = await import(pathToFileURL(script).href);
-    if (typeof run !== "function") throw Error(failures.invalid);
-    // Managed close + native OS process and persisted DO restart are the
-    // same bounded full financial replay, not a short isolated unit case.
-    // 80 connected kills measured 274s; include the ninth phase and bounded startup margin.
-    const deadline = caseId === "T10-11" ? 420_000 : ["T10-05", "T10-07", "T10-10", "T10-11", "T10-12"].includes(caseId) ? 300_000
-      : ["T09.6", "T09.7", "T09.8"].includes(caseId) ? 260_000 : 120_000;
-    {
-      const output = await runScenario(signal =>
-        run({ caseId, root, signal, artifactsDir: dir }),
-      { deadline, timeoutCode: failures.timeout });
-      const accepted = verified(output, caseId);
-      status = "PASS";
-      caseReadbacks.push({
-        case_id:caseId,
-        provenance:accepted.provenance ?? null,
-        sql:accepted.readbacks.sql,
-        risk_book:accepted.readbacks.risk_book,
-        outbound_sends:accepted.outbound_sends,
-      });
-      for (const a of accepted.assertions) assertions.push({ case_id: caseId, ...a });
-      for (const e of accepted.events) events.push({ case_id: caseId, ...e });
-    }
-  } catch (error) {
-    reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
-    events.push({ case_id: caseId, stage: "case_failed", owner: "integration_runner", reason });
-    if (error.teardownFailure) {
-      teardownFailed = true;
-      events.push({ case_id:caseId, stage:"teardown_failed", owner:"integration_runner",
-        reason:String(error.teardownReason ?? error.errors?.[1]?.message ?? "SCENARIO_TEARDOWN_FAILED") });
-    }
-  } finally {
-    for (const [key, original] of initialProbes) {
-      if (original === undefined) delete process.env[key];
-      else process.env[key] = original;
-    }
-  }
-  caseResults.push({ id: caseId, status, reason, elapsed_ms: Date.now() - runStarted });
-  if (teardownFailed) break; // Never start another case with unresolved owned resources.
-}
-const successful = caseResults.every(c => c.status === "PASS");
-const summary = {
-  schema: "okx.trade-integration-summary/v1", spec_revision: "#449-r9",
-  exact_commit: git("rev-parse", "HEAD"), exact_tree: git("rev-parse", "HEAD^{tree}"),
-  driver_sha256: hashFile(fileURLToPath(import.meta.url)),
-  cargo_lock_sha256: hashFile(resolve(root, "Cargo.lock")),
-  worker_lock_sha256: hashFile(resolve(root, "cloudflare", "okx-mcp", "package-lock.json")),
-  worker_bundle_sha256: null,
-  os: { platform: os.platform(), release: os.release(), arch: os.arch() },
-  runtime: process.version, seed: process.env.OKX_INTEGRATION_SEED ?? null,
-  required, selected: cli.selected,
-  outcomes: caseResults,
-  executed_pass: caseResults.filter(c => c.status === "PASS").length,
-  executed_failures: caseResults.filter(c => c.status !== "PASS" && c.reason !== failures.missing).map(c => c.id),
-  missing_required: caseResults.filter(c => c.reason === failures.missing).map(c => c.id),
-  cohort_usages: nativeCohortSnapshot(),
-  elapsed_ms: Date.now() - started,
-  gate: successful ? "PASS" : "BLOCKED",
-  rerun: cli.selected.length === 1
-    ? `node scripts/run-trade-integration.mjs --case ${cli.selected[0]} --artifacts <run-dir>`
-    : "node scripts/run-trade-integration.mjs --suite t09,t10 --artifacts <run-dir>",
-};
-await Promise.all([
-  writeFile(resolve(dir, "summary.json"), JSON.stringify(summary, null, 2) + "\n"),
-  writeFile(resolve(dir, "assertions.json"), JSON.stringify({
-    schema:"okx.trade-assertions/v1", assertions
-  }, null, 2) + "\n"),
-  writeFile(resolve(dir, "events.jsonl"), events.slice(0, 4096).map(x => JSON.stringify(x)).join("\n") + "\n"),
-  writeFile(resolve(dir, "readbacks.json"), JSON.stringify({
-    schema:"okx.trade-integration-readbacks/v1",cases:caseReadbacks,
-  }, null, 2) + "\n"),
-]);
-process.stdout.write(JSON.stringify({
-  schema: summary.schema, gate: summary.gate, pass: caseResults.filter(x=>x.status==="PASS").length,
-  required: cli.selected.length, artifacts: dir, failures: caseResults.filter(x=>x.status!=="PASS")
-}) + "\n");
-if (!successful) process.exitCode = 1;
