@@ -214,9 +214,12 @@ impl WorkerClient {
                                 let wire = HostFrame::SourceReply {
                                     id, session: session.clone(), result,
                                 };
-                                match serde_json::to_vec(&wire) {
-                                    Ok(bytes) if input.send(Bytes::from(bytes)).await.is_ok() => {},
-                                    _ => break,
+                                let bytes = match serde_json::to_vec(&wire) {
+                                    Ok(bytes) => bytes,
+                                    Err(_) => break,
+                                };
+                                if input.send(Bytes::from(bytes)).await.is_err() {
+                                    break;
                                 }
                             }
                             Ok(WorkerFrame::Response { id, session: actual, result })
