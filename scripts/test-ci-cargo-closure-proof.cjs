@@ -46,6 +46,10 @@ function metadata(workspaceRoot = root) {
 const files = (...names) => [names.map(filename => ({filename, status: 'modified'}))];
 const research = files('crates/okx-research-service/Cargo.toml', 'Cargo.lock');
 const host = files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock');
+const mixed = files('crates/okx-research-service/Cargo.toml',
+  'crates/okx-host-controller/Cargo.toml', 'Cargo.lock',
+  'crates/okx-research-service/src/edge_runtime.rs',
+  'crates/okx-host-controller/tests/research_process.rs');
 const head = metadata(), before = metadata(base);
 
 assert.equal(verify(before, head, research, 'research').protected_closures_identical, true);
@@ -64,6 +68,11 @@ assert.equal(verify(before, head, files('crates/okx-research-service/Cargo.toml'
   'crates/okx-research-service/src/edge_runtime.rs',
   'crates/okx-research-service/tests/edge_wss.rs'), 'research').protected_closures_identical, true);
 assert.equal(verify(before, head, host, 'host-controller').target, 'x86_64-pc-windows-msvc');
+const mixedEvidence = verify(before, head, mixed, 'research-host');
+assert.equal(mixedEvidence.protected_closures_identical, true);
+assert.deepEqual(mixedEvidence.protected_roots, ['okx-trading-engine']);
+assert.equal(verify(before, head, files('crates/okx-research-protocol/src/analytics.rs',
+  'crates/okx-host-controller/src/research_acl.rs'), 'research-host').protected_closures_identical, true);
 assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock',
   'cloudflare/okx-mcp/src/mcp.ts'), 'host-controller').protected_closures_identical, true);
 assert.equal(verify(before, head, files('crates/okx-host-controller/Cargo.toml',
@@ -126,6 +135,27 @@ reject(m => m.resolve.nodes.find(n => n.id === 'okx-research-service')
   .features.push('research_change'), 'host-controller', host);
 reject(m => m.resolve.nodes.find(n => n.id === 'okx-host-protocol')
   .features.push('new_host_wire'), 'research', research);
+reject(m => m.resolve.nodes.find(n => n.id === 'okx-trading-engine')
+  .deps.push(edge('okx-research-protocol', 'dev')), 'research-host', mixed);
+reject(m => m.resolve.nodes.find(n => n.id === 'okx-trading-engine')
+  .features.push('changed_engine_feature'), 'research-host', mixed);
+reject(m => m.packages.find(p => p.id === external('sqlite'))
+  .checksum = 'different', 'research-host', mixed);
+
+for (const diff of [
+  files('crates/okx-research-service/Cargo.toml', 'Cargo.lock'),
+  files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-host-controller/Cargo.toml',
+    '.github/workflows/ci.yml'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-host-controller/Cargo.toml',
+    'crates/okx-research-service/src/main.rs'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-host-controller/Cargo.toml',
+    'crates/okx-host-controller/src/job.rs'),
+  files('crates/okx-research-service/Cargo.toml', 'crates/okx-host-controller/Cargo.toml',
+    'crates/okx-ipc-contracts/src/lib.rs'),
+  [[{filename:'crates/okx-research-service/Cargo.toml',status:'added'},
+    {filename:'crates/okx-host-controller/Cargo.toml',status:'modified'}]],
+]) assert.throws(() => verify(before, head, diff, 'research-host'));
 
 for (const diff of [
   files('Cargo.lock'),
@@ -174,9 +204,10 @@ assert.throws(() => verify(includedBefore, included,
   files('crates/okx-research-service/Cargo.toml'), 'research'),
   /EDITED_SOURCE_IN_PROTECTED_CARGO_CLOSURE/);
 
-// A source-only Research protocol change cannot skip Engine if the protocol
-// remains in *any* Engine closure, including dev-only test dependencies. This
-// explicitly protects the temporary legacy T06–T10 Rust test arrangement.
+// A source-only Research protocol change cannot skip Engine if a future graph
+// reintroduces it into *any* Engine closure, including dev-only test edges.
+// The accepted main removed the original T06–T10 coupling; this synthetic
+// legacy graph remains an adversarial regression for future refactors.
 const legacyBase = structuredClone(before), legacyHead = structuredClone(head);
 for (const graph of [legacyBase, legacyHead]) {
   graph.resolve.nodes.find(n => n.id === 'okx-trading-engine')
@@ -219,6 +250,8 @@ if (process.argv[2]) {
   for (const [scope, diff] of [
     ['research', files('crates/okx-research-service/Cargo.toml')],
     ['host-controller', files('crates/okx-host-controller/Cargo.toml')],
+    ['research-host', files('crates/okx-research-service/Cargo.toml',
+      'crates/okx-host-controller/Cargo.toml', 'Cargo.lock')],
   ]) {
     assert.equal(verify(actual, actual, diff, scope).protected_closures_identical, true);
   }
@@ -238,6 +271,8 @@ if (process.argv[2]) {
     ['research', 'okx-research-service', files('crates/okx-research-service/Cargo.toml')],
     ['host-controller', 'okx-host-controller', files('crates/okx-host-controller/Cargo.toml')],
     ['host-launcher', 'okx-host-launcher', files('crates/okx-host-launcher/Cargo.toml')],
+    ['research-host', 'okx-research-service', files('crates/okx-research-service/Cargo.toml',
+      'crates/okx-host-controller/Cargo.toml', 'Cargo.lock')],
   ]) {
     const ownerOnly = structuredClone(actual);
     declaredFeature(ownerOnly, owner);
@@ -250,6 +285,8 @@ if (process.argv[2]) {
     for (const [scope, diff] of [
       ['research', files('crates/okx-research-service/Cargo.toml', 'Cargo.lock')],
       ['host-controller', files('crates/okx-host-controller/Cargo.toml', 'Cargo.lock')],
+      ['research-host', files('crates/okx-research-service/Cargo.toml',
+        'crates/okx-host-controller/Cargo.toml', 'Cargo.lock')],
     ]) {
       assert.throws(() => verify(actual, changedShared, diff, scope),
         /PROTECTED_WINDOWS_CARGO_CLOSURE_CHANGED/,

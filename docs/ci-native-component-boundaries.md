@@ -9,9 +9,11 @@ checks and, only after their success, the optional Native-base publication job.
 No second `workflow_run` is started on completion. GitHub Actions has separate
 manual operational workflows for protected account access and Cloudflare
 deployment; those operations do not appear as permanently skipped CI jobs.
-The historical All26 branch-only workflow and explicit recovery promotion
-remain separate from the normal `main` CI path. Closed #510/#512 migration
-jobs were removed from the main workflow.
+The historical All26 branch-only workflow and 26 unreachable JS adapters
+were **deleted** in merged PR #593; the exact 26-ID archive and offline
+negative verifier remain as historical evidence. Explicit manual recovery
+operations are outside the normal automatic `main` CI path. Closed #510/#512
+migration jobs were removed from the main workflow.
 
 | Changed files (complete GitHub diff) | Direct owner and consumers | Ready CI | Native release artifact |
 | --- | --- | --- | --- |
@@ -22,7 +24,9 @@ jobs were removed from the main workflow.
 | Narrow Research/Host `Cargo.toml` with optional `Cargo.lock` | Only that owner and its actual consumers | Scoped **only after exact before/after Windows Cargo closure proof**, including versions/features/dev dependencies; otherwise full Native | Research-only standalone three-file component when its exact owner scope qualifies; host-only nondeployable evidence otherwise |
 | Research-only owner changes; unchanged Engine/Host release closure | Research/IPC consumers | Standalone Research Windows gate and independently verified Cargo closure, exact Ready PR attempt and required aggregate jobs | Raw `okx-research-component-<PR_HEAD_SHA>` CI artifact: only `Cargo.lock`, `manifest.json` (`okx.windows.research-component/v1`), `okx-research-service.exe`; append-only `research-component-<MERGE_SHA>` after verified merge, no Engine files |
 | Documentation only / Cloudflare-only | Documentation / MCP | Existing scoped gates | No fresh Native build |
-| Mixed host + Research or Cloudflare, unknown paths, renames, incomplete diff | Unknown/shared impact | Full Native matrix | Only if accepted |
+| Mixed Host + Research with exact independently proven Windows closures | CONTROL and Research | Both scoped Windows owners' checks; no Engine build | Separate component evidence, no combined unsafely repacked release |
+| Host + Cloudflare source, when each scope is independently proven | CONTROL + Edge | Host Windows checks and Cloudflare contracts | No Engine rebuild |
+| Shared wire, unknown path, cross-owner ambiguity, renames or incomplete diff | Potentially all | Full Native matrix | Only if accepted |
 
 The host-only source exception remains intentionally **narrow**: just Rust
 implementation files inside the two host crates. A Host or Research manifest
@@ -98,7 +102,9 @@ Acceptance controls:
 1. A CONTROL-only or Launcher-only Rust diff selects its own Windows job;
    that job compiles both host owner/consumer crates, never Agent/Execution.
 2. A shared IPC, Cargo manifest, SQL or Engine diff selects full financial CI.
-3. A mixed host and non-host diff cannot inherit the cheap host path.
+3. A mixed Host+Research or Host+Edge diff must run **both** proven owner
+   routes; it cannot inherit the cheap Host path alone. Unknown/shared
+   cross-owner impact always takes the full financial route.
 4. Existing protected aggregate names remain, and the host-only branch fails
    if its specific Windows job fails or is skipped.
 5. Changes to these classifier/workflow/architecture rules themselves select
@@ -113,15 +119,19 @@ The existing `dependency-audit` job already runs `cargo metadata --locked`. The
 same resolved graph is now reused by `scripts/ci-component-impact.cjs` to record
 which deployable Windows binaries consume each changed workspace crate via
 normal/build dependencies. The Research release closure excludes
-`okx-engine-domain`. Changes to `okx-research-domain` still reach the Engine
-through the existing Research route in `okx-ipc-contracts`. A Launcher
+`okx-engine-domain`. Research-protocol/domain changes are isolated from the
+Engine/CONTROL/Launcher/Bridge Windows normal/build/dev closures as of #595;
+the classifier must prove this for each new candidate. A Launcher
 implementation change reaches the Host Controller. Dev-only dependencies are excluded from **release** impact,
 not from the tests that may need to run.
 
 The report lists actual dependency paths, affected binary names and separate
 Cloudflare changes. It is retained in the existing dependency-audit artifact
 and GitHub job summary; no new CI workflow, Rust compilation or Windows runner
-is introduced for inventory. Any Cargo manifest, lock, build script, unknown
+is introduced for inventory. The old statement that Research protocol still
+reaches Engine through `okx-ipc-contracts` is obsolete after PR #595: the
+strict Windows normal/build/dev boundary is now checked on current HEAD.
+Any Cargo manifest, lock, build script, unknown
 path, unverified rename or incomplete diff is reported as potentially affecting
 all Windows binaries. An unavailable push diff is also explicitly unverified.
 

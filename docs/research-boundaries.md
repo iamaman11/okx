@@ -5,46 +5,34 @@ are Cargo dependencies, Rust visibility, the IPC enums, and the SQL owners.
 
 ## Acceptance state and migration debt
 
-At the read-only source baseline `78b63c3097a3d98e8aa647453cc1bbc7b7bfb7dc`
-(2026-11-25), the normal/build Engine → Research Cargo boundary and the
-Research-owned Edge/process paths are **implemented in code**. This is not a
-claim that the current candidate passed CI or that a Windows installation
-has been upgraded. **S1 DEV DEBT is unresolved; S2 installed/physical is
-NOT_PROVEN.** Rerun source/closure tests and attach exact HEAD/tree, Windows
-CI receipts and physical observations to the final candidate, rather than
-reusing an earlier PASS.
+At accepted `main` `ef9060bd30a00225ea78050103a1768aa98217c5`
+(2026-11-25), PRs [#593](https://github.com/iamaman11/okx/pull/593),
+[#594](https://github.com/iamaman11/okx/pull/594) and
+[#595](https://github.com/iamaman11/okx/pull/595) are merged. Engine,
+CONTROL, Launcher and Rust MCP Bridge **normal/build/dev Windows Cargo
+closures** no longer contain Research protocol/domain. The former
+`legacy-research-test` features, Engine `ResearchClient` and Engine child
+Research IPC tests have been removed. Research owns the independently
+executed T06–T12 IPC/process witnesses. The strict architecture test
+boundary is now a required **PASS**, not an expected failure.
 
-The precise remaining test-only exceptions are:
+The exact first-attempt Ready run
+[#45684845788](https://github.com/iamaman11/okx/actions/runs/45684845788)
+passed Linux, Windows, architecture, four regression suites, release build,
+the Native **62 financial contracts / 107 witnesses** and both heavy-Research
+T10 checks. Post-merge
+[#45685939326](https://github.com/iamaman11/okx/actions/runs/45685939326)
+reused the accepted exact source tree and bundle rather than compiling Engine
+again; this is publication evidence, **not another fresh financial run**.
 
-- `crates/okx-trading-engine/Cargo.toml`: dev-only
-  `okx-ipc-contracts/legacy-research-test`,
-  `okx-market-runtime/legacy-research-test` and direct
-  `okx-research-protocol`.
-- `crates/okx-ipc-contracts/Cargo.toml`: optional Research protocol
-  feature; `crates/okx-market-runtime/Cargo.toml`: legacy Research source
-  adapter feature. Unified Cargo test features may reintroduce them into
-  a non-test library target during `--all-targets`; this is **not** an
-  acceptable strict dev-closure PASS.
-- Engine's `research_client.rs`, `research_dispatch_tests.rs`,
-  `research_test_support.rs`, mixed `query_dispatch_tests.rs` and
-  `accounts_native_engine_research_contract_tests.rs` still provide
-  historical Research child IPC and mandatory T06–T10/T11–T12 evidence.
-  `scripts/check_p0.py` and Windows CI require exact test names and measured
-  receipts. In particular the Native + MCP load tests must retain real
-  two-Grid CPU overlap/disconnect, 100 read-only samples per measured path,
-  p95 ≤100 ms, no exchange POST, real MCP HTTP → DO → WSS, and the
-  `T11_T12_NATIVE_ISOLATION_JSON` / `T10_MCP_NATIVE_LOAD_JSON` receipts.
-
-The next safe migration puts Research commands, source/decision replay,
-cancel and installed-image tests in Research-owned integration suites,
-then replaces the mixed Engine-private native-load fixture with a separately
-run cross-owner process acceptance. Only after equivalent Windows receipts
-can Engine's test-only child client and the three Cargo dev edges be removed.
-The native financial collector's **62/62 properties and 107 witnesses** are
-independent mandatory acceptance and must not be weakened by this move.
-`python scripts/check_architecture.py` checks normal/build boundaries;
-`--strict-component-test-boundary` should still fail as
-`ARCHITECTURE_TEST_BOUNDARY=DEBT_UNRESOLVED` at this baseline.
+That completes this *code/test dependency migration* at the recorded SHA.
+It does **not** complete #580 S2 installed execution or prove a hostile
+Windows sandbox. CONTROL-owned Research startup, image/catalog ACLs,
+LPAC/AppContainer token and effective finance/CredMan denial, installed
+Research-only routing, reboot, rollback and independent updates still need
+physical evidence. Source-only PRs #578/#583 and security Drafts #588/#592
+must not be interpreted as an installed cutover merely because the features
+or equivalent commits exist in `main`.
 
 ## Ownership
 
@@ -153,16 +141,14 @@ Separate Credential Manager targets and distinct crates are a code-level
 least-authority measure, **not** an OS security boundary when both processes
 run as the same Windows user.
 
-Engine no longer has a normal/build dependency on the Research implementation,
-but an older Engine-test-only `ResearchClient` requires temporary migration
-coverage. The historic `okx-ipc-contracts → okx-research-protocol` import was
-also a separate **build** coupling even without the Research runtime crate;
-its removal must be proven against normal/build Cargo closures. Research's
-standalone Edge runtime uses its own public source, protocols and catalog;
-it does not import Engine, account SQL or exchange-order capabilities.
-`scripts/check_architecture.py` validates resolved normal/build boundaries,
-records any temporary test-only exception as **S1 DEV DEBT**, and exposes a
-strict dev-closure guard for final S1 acceptance.
+At `ef9060bd`, Engine has no Research normal/build/dev dependency. The
+historical `okx-ipc-contracts → okx-research-protocol` edge and test-only
+ResearchClient were removed in #595. Research's standalone Edge runtime uses
+its own public source, protocols and catalog without Engine finance or venue
+send authority. `scripts/check_architecture.py
+--strict-component-test-boundary` must continue to succeed on each new
+candidate; unknown Cargo features, changed shared inputs or incomplete
+dependency evidence fall back to the full financial CI route.
 
 The Research executable still supports legacy framed commands with
 `--independent-source --root <research-dir> --scope <scope>`. Its local
@@ -259,20 +245,13 @@ cargo test --locked -p okx-research-service --test causal_release_smoke
 cargo test --locked -p okx-research-service --lib standalone_catalog_reopens_through_real_mcp_do_websocket -- --ignored --nocapture
 cargo test --locked -p okx-research-service --lib two_heavy_research_jobs_ingestion_stop_and_cancel_latency
 
-# Temporary historical Engine child acceptance: an explicitly non-shipping
-# debug Research executable with test-only per-root singleton namespaces.
-cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton
-Copy-Item target/debug/okx-research-service.exe target/debug/okx-research-service-test-isolated.exe
-$env:OKX_RESEARCH_SERVICE_TEST_EXE = (Resolve-Path target/debug/okx-research-service-test-isolated.exe).Path
-cargo test --locked -p okx-trading-engine --lib research_dispatch_tests::
-cargo test --locked -p okx-trading-engine --lib research_client::
-cargo test --locked -p okx-trading-engine --lib query::public_dispatch_tests::
-cargo test --locked -p okx-trading-engine --lib cloudflare_transport::session_tests::
+# An opt-in non-shipping fixture supplies real Research work to the two
+# Native financial latency/load witnesses. It is not the installed Worker.
+cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture
 cargo test --locked -p okx-trading-engine --lib finance_startup::
-cargo test --locked -p okx-market-runtime --lib public::reference_refresh::tests::
 python scripts/check_architecture.py --self-test
 python scripts/check_architecture.py
-# Expected failure until T06–T10/T11–T12 migration is accepted:
+# Required strict S1 code/test closure acceptance; failure blocks Ready:
 python scripts/check_architecture.py --strict-component-test-boundary
 ```
 

@@ -17,6 +17,12 @@ const pureCoreFile = 'crates/okx-strategy-core/src/operators.rs';
 const analysisFile = 'crates/okx-analysis/src/lib.rs';
 const mixedFiles = [analysisFile, 'crates/okx-host-controller/src/control_ack.rs'];
 assert.equal(checkMixed(meta, meta, mixedFiles).engine_windows_cargo_closure_identical,true);
+const mixedManifestFiles = ['crates/okx-research-service/Cargo.toml',
+  'crates/okx-host-controller/Cargo.toml', 'Cargo.lock',
+  'crates/okx-host-controller/tests/research_process.rs'];
+assert.equal(checkMixed(meta, meta, mixedManifestFiles).engine_windows_cargo_closure_identical, true);
+assert.equal(checkMixed(meta, meta, ['crates/okx-research-protocol/src/analytics.rs',
+  'crates/okx-host-controller/src/research_acl.rs']).engine_windows_cargo_closure_identical, true);
 const engineOnlyFiles = ['crates/okx-trading-engine/src/query.rs', 'docs/engine.md'];
 assert.equal(checkEngine(meta, meta, engineOnlyFiles).other_windows_cargo_closures_identical, true);
 for (const file of ['crates/okx-research-service/src/analytics/market.rs',
@@ -30,7 +36,12 @@ hostConsumesEngine.resolve.nodes.find(n=>n.id==='okx-host-controller').deps.push
 assert.throws(()=>checkEngine(hostConsumesEngine, hostConsumesEngine, engineOnlyFiles),
   /EDITED_SOURCE_IN_PROTECTED_WINDOWS_CARGO_CLOSURE/);
 assert.throws(()=>checkMixed(meta, meta, mixedFiles.slice(0,1)),/INVALID_MIXED_OWNER_DIFF/);
-for (const file of ['Cargo.lock', 'crates/okx-ipc-contracts/src/lib.rs', 'crates/okx-research-service/Cargo.toml'])
+for (const file of ['crates/okx-ipc-contracts/src/lib.rs'])
+  assert.throws(()=>checkMixed(meta, meta, [...mixedFiles,file]),/OUTSIDE_MIXED_OWNER_SCOPE/);
+for (const file of ['crates/okx-research-service/src/main.rs',
+  'crates/okx-research-service/src/process_memory.rs',
+  'crates/okx-host-controller/src/job.rs',
+  'crates/okx-host-controller/src/lifecycle_executor.rs'])
   assert.throws(()=>checkMixed(meta, meta, [...mixedFiles,file]),/OUTSIDE_MIXED_OWNER_SCOPE/);
 const changedEngine = structuredClone(meta);
 changedEngine.resolve.nodes.find(n=>n.id==='okx-ipc-contracts').features.push('changed');

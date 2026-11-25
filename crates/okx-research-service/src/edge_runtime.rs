@@ -14,6 +14,7 @@ use okx_research_protocol::{
     },
     research_ipc::ResearchScope,
 };
+use serde::Deserialize;
 use std::{
     collections::HashSet,
     io::{self, Write},
@@ -41,7 +42,6 @@ use zeroize::Zeroizing;
 const MAX_RESEARCH_IN_FLIGHT: usize = 6;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(80);
 const EDGE_WRITE_DEADLINE: Duration = Duration::from_secs(10);
-const SUPERVISOR_GATE: &[u8] = b"RESEARCH_HOST_JOB_ASSIGNED\n";
 
 /// Apply the protocol's 64 KiB budget at the WebSocket decoder, before
 /// Tungstenite aggregates a fragmented message into a much larger allocation.
@@ -55,28 +55,70 @@ fn edge_websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(FRAME_LIMIT))
 }
 
-/// CONTROL assigns its Windows Job BEFORE releasing the Research child. This
-/// prevents the child's narrower memory Job from racing with the host's Job
-/// assignment. No bearer is accepted through this channel.
-pub async fn await_supervisor_job() -> Result<(), String> {
-    let mut input = tokio::io::stdin();
-    supervisor_gate(&mut input, Duration::from_secs(10)).await
+const STARTUP_SCHEMA: &str = "okx.research.startup/v1";
+const STARTUP_MAX_BYTES: usize = 1536;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorStartup {
+    schema: String,
+    job_assigned: bool,
+    #[serde(deserialize_with = "deserialize_bearer")]
+    bearer: Zeroizing<String>,
 }
 
-async fn supervisor_gate<R: tokio::io::AsyncRead + Unpin>(
+fn deserialize_bearer<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Zeroizing<String>, D::Error> {
+    let bearer = String::deserialize(deserializer)?;
+    Ok(Zeroizing::new(bearer))
+}
+
+/// Receive a one-shot bearer only after CONTROL has verified the restricted
+/// child and assigned its Windows Job. The inherited pipe is never reused for
+/// commands and no credential is accepted from argv or the environment.
+pub async fn await_supervisor_startup() -> Result<Zeroizing<String>, String> {
+    let mut input = tokio::io::stdin();
+    startup_gate(&mut input, Duration::from_secs(10)).await
+}
+
+async fn startup_gate<R: tokio::io::AsyncRead + Unpin>(
     input: &mut R,
     deadline: Duration,
-) -> Result<(), String> {
+) -> Result<Zeroizing<String>, String> {
     use tokio::io::AsyncReadExt as _;
-    let mut receipt = Zeroizing::new(Vec::new());
-    tokio::time::timeout(deadline, input.take(129).read_to_end(&mut receipt))
-        .await
-        .map_err(|_| "RESEARCH_SUPERVISOR_ASSIGNMENT_TIMEOUT")?
-        .map_err(|_| "RESEARCH_SUPERVISOR_ASSIGNMENT_INVALID")?;
-    if receipt.as_slice() != SUPERVISOR_GATE {
-        return Err("RESEARCH_SUPERVISOR_ASSIGNMENT_INVALID".into());
+    // Keep raw JSON (which contains the bearer) zeroizing even on malformed
+    // frames, oversized input, timeout and allocation/read failure.
+    let mut receipt = Zeroizing::new(Vec::with_capacity(STARTUP_MAX_BYTES + 1));
+    tokio::time::timeout(
+        deadline,
+        input
+            .take((STARTUP_MAX_BYTES + 1) as u64)
+            .read_to_end(&mut receipt),
+    )
+    .await
+    .map_err(|_| "RESEARCH_STARTUP_BEARER_UNAVAILABLE")?
+    .map_err(|_| "RESEARCH_STARTUP_BEARER_UNAVAILABLE")?;
+    if receipt.is_empty() {
+        return Err("RESEARCH_STARTUP_BEARER_UNAVAILABLE".into());
     }
-    Ok(())
+    if receipt.len() > STARTUP_MAX_BYTES
+        || receipt.last() != Some(&b'}')
+        || receipt.contains(&b'\n')
+        || receipt.contains(&b'\r')
+    {
+        return Err("RESEARCH_STARTUP_ENVELOPE_INVALID".into());
+    }
+    let envelope: SupervisorStartup =
+        serde_json::from_slice(&receipt).map_err(|_| "RESEARCH_STARTUP_ENVELOPE_INVALID")?;
+    let bearer = envelope.bearer;
+    if envelope.schema != STARTUP_SCHEMA || !envelope.job_assigned {
+        return Err("RESEARCH_STARTUP_ENVELOPE_INVALID".into());
+    }
+    if !crate::edge_credentials::valid_token(bearer.as_bytes()) {
+        return Err("RESEARCH_STARTUP_BEARER_INVALID".into());
+    }
+    Ok(bearer)
 }
 
 /// Inputs are supplied by the native process supervisor, never via CLI args,
@@ -90,16 +132,10 @@ pub struct EdgeRuntimeConfig {
 }
 
 impl EdgeRuntimeConfig {
-    pub fn from_environment() -> Result<Self, String> {
+    pub fn from_supervisor(token: Zeroizing<String>) -> Result<Self, String> {
         fn required(name: &str) -> Result<String, String> {
             std::env::var(name).map_err(|_| format!("{name}_UNAVAILABLE"))
         }
-        // Research's installed Windows credential is distinct from the Engine
-        // token and is not accepted through an inheritable process environment.
-        #[cfg(windows)]
-        let token = crate::edge_credentials::load()?;
-        #[cfg(not(windows))]
-        let token = Zeroizing::new(required("OKX_RESEARCH_BEARER_TOKEN")?);
         Self::new(
             required("OKX_RESEARCH_EDGE_WSS_URL")?,
             required("OKX_RESEARCH_RUNTIME_ID")?,
@@ -124,7 +160,7 @@ impl EdgeRuntimeConfig {
         {
             return Err("INVALID_RESEARCH_EDGE_WSS_URL".into());
         }
-        // A Windows bearer loaded from Credential Manager may not be sent to
+        // A Research bearer supplied by CONTROL may not be sent to
         // a caller-selected origin. CONTROL and Research share this immutable
         // installed Edge endpoint; alternative deployments require a reviewed
         // native release, never an environment-only URL substitution.
@@ -190,8 +226,9 @@ pub async fn run(
     root: PathBuf,
     scope: ResearchScope,
     existing_catalog: bool,
+    token: Zeroizing<String>,
 ) -> Result<(), String> {
-    let config = EdgeRuntimeConfig::from_environment()?;
+    let config = EdgeRuntimeConfig::from_supervisor(token)?;
     let source = Arc::new(IndependentOkxPublicSource::new()?);
     let producer = Producer::current()?;
     let constructor = if existing_catalog {
@@ -532,6 +569,10 @@ async fn dispatch(
             .await
         }
         ResearchCommand::MarketOverview { instrument } => {
+            // The wire envelope allows broader identifiers than the venue's
+            // public instrument grammar. Reject malformed names before they
+            // reserve one of the two bounded public WebSocket sessions.
+            public_microstructure::validate_request(&instrument, None)?;
             match public_ws::capture(public_data, &instrument).await {
                 Ok(snapshot) => Ok(public_overview::websocket_overview(&snapshot)),
                 Err(reason) => {
@@ -573,17 +614,25 @@ pub(crate) async fn dispatch_research_for_test(
     let source = IndependentOkxPublicSource::new()?;
     dispatch(service, &source, ResearchCommand::Research(request)).await
 }
+/// The user-facing transport quality must not upgrade an explicitly assumed,
+/// stale or unverified Research result to FRESH. Unknown quality labels fail
+/// conservatively; the value itself remains intact for the caller to inspect.
+fn transport_quality(value: &serde_json::Value) -> DataQuality {
+    match value.get("quality") {
+        None => DataQuality::Fresh,
+        Some(serde_json::Value::String(label)) => match label.as_str() {
+            "stale" => DataQuality::Stale,
+            "fresh" | "complete" | "verified" | "verified_reexecution"
+            | "verified_normalized_capture" => DataQuality::Fresh,
+            _ => DataQuality::Degraded,
+        },
+        Some(_) => DataQuality::Degraded,
+    }
+}
+
 fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentResponse {
     let quality = match &result {
-        Ok(value)
-            if value
-                .get("quality")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|v| matches!(v, "partial" | "missing" | "stale" | "degraded")) =>
-        {
-            DataQuality::Degraded
-        }
-        Ok(_) => DataQuality::Fresh,
+        Ok(value) => transport_quality(value),
         Err(_) => DataQuality::NotReady,
     };
     let (status, result, failure) = match result {
@@ -647,35 +696,92 @@ mod tests {
     const TEST_WSS_URL: &str = "wss://edge.example/runtime";
 
     #[tokio::test]
-    async fn research_starts_only_after_finite_supervisor_job_receipt() {
+    async fn research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof() {
         use tokio::io::AsyncWriteExt as _;
-        let (mut writer, mut reader) = tokio::io::duplex(256);
-        writer.write_all(SUPERVISOR_GATE).await.unwrap();
+        let (mut writer, mut reader) = tokio::io::duplex(2048);
+        let bearer = "d".repeat(64);
+        let valid = format!(
+            r#"{{"schema":"okx.research.startup/v1","job_assigned":true,"bearer":"{bearer}"}}"#
+        );
+        writer.write_all(valid.as_bytes()).await.unwrap();
         drop(writer);
-        assert!(
-            supervisor_gate(&mut reader, Duration::from_secs(1))
+        assert_eq!(
+            startup_gate(&mut reader, Duration::from_secs(1))
                 .await
-                .is_ok()
+                .unwrap()
+                .as_str(),
+            bearer
         );
 
-        for invalid in [&b"READY\n"[..], &b"RESEARCH_HOST_JOB_ASSIGNED"[..]] {
-            let (mut writer, mut reader) = tokio::io::duplex(256);
-            writer.write_all(invalid).await.unwrap();
+        let invalid = [
+            r#"{"schema":"okx.research.startup/v1","job_assigned":true}"#.to_owned(),
+            format!(r#"{{"schema":"wrong","job_assigned":true,"bearer":"{bearer}"}}"#),
+            format!(
+                r#"{{"schema":"okx.research.startup/v1","job_assigned":false,"bearer":"{bearer}"}}"#
+            ),
+            format!(
+                r#"{{"schema":"okx.research.startup/v1","job_assigned":true,"bearer":"{bearer}","extra":0}}"#
+            ),
+            format!(
+                r#"{{"schema":"okx.research.startup/v1","job_assigned":true,"job_assigned":true,"bearer":"{bearer}"}}"#
+            ),
+            format!(
+                r#"{{"schema":"okx.research.startup/v1","job_assigned":true,"bearer":"{bearer}"}}\n"#
+            ),
+            format!(
+                r#"{{"schema":"okx.research.startup/v1","job_assigned":true,"bearer":"{bearer}"}}{{}}"#
+            ),
+            format!(
+                r#"{{"schema":"okx.research.startup/v1","job_assigned":true,"bearer":"{}"}}"#,
+                "x".repeat(1600)
+            ),
+            r#"{"schema":"okx.research.startup/v1","job_assigned":true,"bearer":"short"}"#
+                .to_owned(),
+            r#"RESEARCH_HOST_JOB_ASSIGNED"#.to_owned(),
+        ];
+        for frame in invalid {
+            let (mut writer, mut reader) = tokio::io::duplex(2048);
+            writer.write_all(frame.as_bytes()).await.unwrap();
             drop(writer);
-            assert_eq!(
-                supervisor_gate(&mut reader, Duration::from_secs(1))
-                    .await
-                    .unwrap_err(),
-                "RESEARCH_SUPERVISOR_ASSIGNMENT_INVALID"
+            let err = startup_gate(&mut reader, Duration::from_secs(1))
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                err == "RESEARCH_STARTUP_ENVELOPE_INVALID"
+                    || err == "RESEARCH_STARTUP_BEARER_INVALID",
+                "unexpected startup rejection: {err}"
             );
+            assert!(!err.contains(&bearer));
         }
 
         let (writer, mut reader) = tokio::io::duplex(256);
         assert_eq!(
-            supervisor_gate(&mut reader, Duration::from_millis(1))
+            startup_gate(&mut reader, Duration::from_millis(1))
                 .await
                 .unwrap_err(),
-            "RESEARCH_SUPERVISOR_ASSIGNMENT_TIMEOUT"
+            "RESEARCH_STARTUP_BEARER_UNAVAILABLE"
+        );
+        drop(writer);
+
+        let (writer, mut reader) = tokio::io::duplex(256);
+        drop(writer);
+        assert_eq!(
+            startup_gate(&mut reader, Duration::from_secs(1))
+                .await
+                .unwrap_err(),
+            "RESEARCH_STARTUP_BEARER_UNAVAILABLE"
+        );
+
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        writer.write_all(valid.as_bytes()).await.unwrap();
+        // A syntactically complete frame cannot start until CONTROL closes
+        // the one-shot pipe; extra delayed data cannot be accepted later.
+        assert_eq!(
+            startup_gate(&mut reader, Duration::from_millis(1))
+                .await
+                .unwrap_err(),
+            "RESEARCH_STARTUP_BEARER_UNAVAILABLE"
         );
         drop(writer);
     }

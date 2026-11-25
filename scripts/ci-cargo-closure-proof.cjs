@@ -21,6 +21,7 @@ const HOST = new Set([
   'crates/okx-host-controller/Cargo.toml',
   'crates/okx-host-launcher/Cargo.toml',
 ]);
+const MIXED = new Set([...RESEARCH, ...HOST]);
 const PROTECTED = Object.freeze({
   // Bridge is a live MCP consumer of shared IPC contracts. A future dev-only
   // Research protocol edge in Bridge must block a scoped wire/domain edit just
@@ -28,6 +29,9 @@ const PROTECTED = Object.freeze({
   research: ['okx-trading-engine', 'okx-host-controller', 'okx-host-launcher', 'okx-bridge-mcp'],
   'host-controller': ['okx-trading-engine', 'okx-research-service'],
   'host-launcher': ['okx-trading-engine', 'okx-research-service'],
+  // CONTROL and Research are both freshly tested by the mixed-owner route.
+  // Only the financial owner is reused from the immutable accepted release.
+  'research-host': ['okx-trading-engine'],
 });
 
 const safePath = p => typeof p === 'string' && p.length > 0 && p.length <= 512 &&
@@ -43,6 +47,12 @@ const host = p => ['crates/okx-host-controller/src/', 'crates/okx-host-launcher/
   'crates/okx-host-protocol/src/', 'crates/okx-host-controller/tests/',
   'crates/okx-host-launcher/tests/', 'crates/okx-host-protocol/tests/']
   .some(prefix => p.startsWith(prefix)) && p.endsWith('.rs');
+const financialRuntimeBoundary = p => [
+  'crates/okx-research-service/src/main.rs',
+  'crates/okx-research-service/src/process_memory.rs',
+  'crates/okx-host-controller/src/job.rs',
+  'crates/okx-host-controller/src/lifecycle_executor.rs',
+].includes(p);
 
 function candidateFiles(input, scope) {
   if (!Object.hasOwn(PROTECTED, scope)) throw Error('UNSUPPORTED_CARGO_SCOPE');
@@ -52,20 +62,26 @@ function candidateFiles(input, scope) {
   const files = changedFiles(input).files;
   if (!files || !files.length || files.length > 500 || new Set(files).size !== files.length ||
       !files.every(safePath)) throw Error('CARGO_DIFF_NOT_VERIFIED');
-  const manifests = scope === 'research' ? RESEARCH : HOST;
+  const manifests = scope === 'research' ? RESEARCH : scope === 'research-host' ? MIXED : HOST;
   const statuses = new Map(input.flat().map(entry => [entry.filename, entry.status]));
   if (files.some(file => (file === 'Cargo.lock' || manifests.has(file) ||
-      (scope === 'research' && protectedResearchSource(file))) && statuses.get(file) !== 'modified'))
+      (['research', 'research-host'].includes(scope) && protectedResearchSource(file))) && statuses.get(file) !== 'modified'))
     throw Error('CARGO_PROOF_REQUIRES_EXISTING_MODIFIED_OWNER_INPUT');
   // Research wire/domain crates may enter a protected owner via future
   // dev/test edges, even if the current Engine build is decoupled. Their
   // source changes need the same *resolved* protected-closure proof as a
   // manifest change. Ordinary owner source files retain their fast route.
-  if (!files.some(file => manifests.has(file) || (scope === 'research' && protectedResearchSource(file))))
+  if (!files.some(file => manifests.has(file) ||
+      (['research', 'research-host'].includes(scope) && protectedResearchSource(file))))
     throw Error('CARGO_PROOF_CANDIDATE_MISSING');
+  if (scope === 'research-host' && (files.some(financialRuntimeBoundary) ||
+      !files.some(file => research(file)) || !files.some(file => host(file) || HOST.has(file))))
+    throw Error('MIXED_OWNER_FINANCIAL_BOUNDARY_OR_OWNER_MISSING');
   if (!files.every(file => {
     if (file === 'Cargo.lock' || docs(file)) return true;
     if (scope === 'research') return research(file) || file.startsWith('cloudflare/okx-mcp/');
+    if (scope === 'research-host') return research(file) || host(file) ||
+      HOST.has(file) || file.startsWith('cloudflare/okx-mcp/');
     return host(file) || HOST.has(file) || file.startsWith('cloudflare/okx-mcp/');
   })) throw Error('MIXED_OR_UNSAFE_CARGO_DIFF');
   // A second owner's Cargo.toml can change the Rust feature graph even when

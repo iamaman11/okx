@@ -3,15 +3,20 @@
 //! reachable from this module. It never starts a worker from an unchecked path.
 mod catalog;
 
+#[cfg(windows)]
+use crate::research_sandbox::ResearchChild;
 #[cfg(not(windows))]
 use std::fs::File;
+#[cfg(all(test, windows))]
+use std::process::Stdio;
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Stdio},
     time::{Duration, Instant},
 };
+#[cfg(not(windows))]
+type ResearchChild = std::process::Child;
 
 use okx_host_protocol::{
     HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1, ResearchCatalogMode, ResearchRuntimePhase,
@@ -22,20 +27,19 @@ use serde_json::Value;
 
 use crate::{
     HostControlError, HostControlResult, artifact::resolve_verified_installed_research,
-    background_process::hidden_command, desired::atomic_replace, job::AgentJob,
+    desired::atomic_replace, job::AgentJob,
 };
 use catalog::{CatalogBinding, CatalogOnDisk};
 
 const RESEARCH_DESIRED_SCHEMA: &str = "okx.host-control.research-desired/v1";
 const STATE_FILE: &str = "research-state.json";
 const MAX_STATE_BYTES: u64 = 4096;
-const RESEARCH_RUNTIME_ID: &str = "windows-primary";
 // The authenticated Edge origin is fixed by the installation, never supplied
 // through an MCP/CONTROL command or a writable Research state file.
+#[cfg(windows)]
 const RESEARCH_EDGE_WSS_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/runtime";
 const RETRY_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
 const STABLE_PROCESS_SECONDS: u64 = 30;
-const HOST_JOB_ASSIGNED_MARKER: &[u8] = b"RESEARCH_HOST_JOB_ASSIGNED\n";
 
 fn research_exit_reason(code: Option<i32>) -> &'static str {
     match code {
@@ -65,6 +69,7 @@ fn fresh_scope() -> HostControlResult<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+#[cfg(windows)]
 fn fresh_incarnation() -> HostControlResult<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| HostControlError::Random(e.to_string()))?;
@@ -255,7 +260,7 @@ pub struct ResearchSupervisor {
     runtime_root: PathBuf,
     desired: ResearchDesiredState,
     state_error: Option<String>,
-    child: Option<Child>,
+    child: Option<ResearchChild>,
     job: Option<AgentJob>,
     active_sha256: Option<String>,
     started_at: Option<Instant>,
@@ -361,10 +366,13 @@ impl ResearchSupervisor {
         )
     }
 
+    #[cfg(not(windows))]
     fn launch(&mut self) -> HostControlResult<u32> {
-        if !cfg!(windows) {
-            return Err(HostControlError::UnsupportedPlatform);
-        }
+        Err(HostControlError::UnsupportedPlatform)
+    }
+
+    #[cfg(windows)]
+    fn launch(&mut self) -> HostControlResult<u32> {
         let expected = self
             .desired
             .expected_worker_sha256
@@ -381,6 +389,8 @@ impl ResearchSupervisor {
         {
             return Err(HostControlError::ResearchIdentityMismatch);
         }
+        #[cfg(windows)]
+        crate::research_acl::verify_version_image(&image.binary, &image.sha256)?;
         let on_disk = self.catalog_on_disk()?;
         let binding = self
             .desired
@@ -398,75 +408,31 @@ impl ResearchSupervisor {
                 (catalog::existing_root(&self.runtime_root), scope_sha256)
             }
         };
+        #[cfg(windows)]
+        if matches!(binding, CatalogBinding::HostScoped) {
+            crate::research_acl::ensure_independent_catalog(&catalog_root)?;
+        }
         let generation = self
             .desired
             .process_generation
             .checked_add(1)
             .ok_or(HostControlError::ResearchGenerationExhausted)?;
         let incarnation = fresh_incarnation()?;
-        // The catalog scope is a public fingerprint. Edge identity uses the
-        // independent host scope and a credential from Research's own target.
-        let mut command = hidden_command(&image.binary);
-        command
-            .env_clear()
-            .arg("--edge-runtime")
-            .arg("--root")
-            .arg(catalog_root)
-            .arg("--scope")
-            .arg(scope)
-            .env("OKX_RESEARCH_EDGE_WSS_URL", RESEARCH_EDGE_WSS_URL)
-            .env("OKX_RESEARCH_RUNTIME_ID", RESEARCH_RUNTIME_ID)
-            .env("OKX_RESEARCH_HOST_SCOPE", &host_scope)
-            .env("OKX_RESEARCH_INCAR", incarnation)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if on_disk != CatalogOnDisk::Empty {
-            command.arg("--existing-catalog");
-        }
-        // Avoid inheriting Engine/private credentials or diagnostic overrides
-        // from CONTROL. Only Windows account and OS process basics pass through.
-        for key in [
-            "SystemRoot",
-            "WINDIR",
-            "USERPROFILE",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "ProgramData",
-            "TEMP",
-            "TMP",
-            "PATH",
-            "HOMEDRIVE",
-            "HOMEPATH",
-        ] {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
-        }
         let job = AgentJob::new()?;
-        let mut child = command.spawn()?;
-        job.assign(&mut child)?;
-        // The Research executable waits at this bounded stdin gate BEFORE it
-        // self-assigns its memory Job. Job assignment must therefore precede
-        // any Research runtime startup, and the marker must end with EOF.
-        let gate_result = (|| -> std::io::Result<()> {
-            let mut stdin = child.stdin.take().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "research startup gate missing",
-                )
-            })?;
-            stdin.write_all(HOST_JOB_ASSIGNED_MARKER)?;
-            stdin.flush()?;
-            drop(stdin);
-            Ok(())
-        })();
-        if let Err(error) = gate_result {
-            let _ = job.terminate();
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error.into());
-        }
+        // The ONLY production path is AppContainer CreateProcessW suspended,
+        // verify child token + finance ACL, Job-before-resume, probe READY,
+        // then one bounded stdin bearer. No ordinary Command::spawn fallback.
+        let mut child = crate::research_sandbox::launch_research(
+            &job,
+            &image.binary,
+            &catalog_root,
+            &self.runtime_root,
+            scope,
+            &host_scope,
+            &incarnation,
+            RESEARCH_EDGE_WSS_URL,
+            on_disk != CatalogOnDisk::Empty,
+        )?;
         let pid = child.id();
         let mut next = self.desired.clone();
         next.process_generation = generation;
@@ -680,7 +646,7 @@ impl ResearchSupervisor {
             schema: HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1.into(),
             desired_running: self.desired.desired_running,
             process_generation: self.desired.process_generation,
-            pid: self.child.as_ref().map(Child::id),
+            pid: self.child.as_ref().map(ResearchChild::id),
             active_worker_sha256: self.active_sha256.clone(),
             installed_worker_sha256: installed.map(|image| image.sha256),
             phase,
@@ -978,7 +944,7 @@ mod tests {
         let job = AgentJob::new().unwrap();
         job.assign(&mut child).unwrap();
         owner.active_sha256 = Some(sha.clone());
-        owner.child = Some(child);
+        owner.child = Some(ResearchChild::from_test_child(child));
         owner.job = Some(job);
         owner.terminate_fail_once = true;
 

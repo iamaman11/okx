@@ -4,6 +4,10 @@ Names describe **ownership**, not historical implementation details. A Cargo
 package is a compilation boundary, a Windows executable is a release artifact,
 and a CI job is evidence. They are not interchangeable.
 
+Current S2–S4 installed/runtime/CI acceptance is enumerated in
+[#580 acceptance map](580-s2-s4-acceptance.md); successful Cargo or CI
+checks do not certify physical Windows LPAC isolation.
+
 ## Four application owners
 
 The workspace has four logical owners across 21 Cargo packages in PR #581. Shared
@@ -19,12 +23,13 @@ in the workspace. Runtime boundaries are tracked separately.
 
 `okx-engine-domain` owns Engine facts and fee rules. `okx-research-domain`
 owns analytical inputs and public market facts for Research.
-`okx-ipc-contracts` carries the Engine-facing wire. Its historical import of
-`okx-research-protocol` is an S1 build-coupling defect, not an accepted
-cross-owner dependency: the target Engine normal/build closure must contain
-**no Research protocol or domain**. The temporary `legacy-research-test`
-feature is a **dev-only debt**, not a waiver for final S1: normal/build/dev
-must all be clean after T06–T10 witnesses move to an independent test harness.
+`okx-ipc-contracts` carries the Engine-facing wire. The historical import of
+`okx-research-protocol` and the `legacy-research-test` Cargo features were
+removed by accepted PR #595. On `main` `ef9060bd`, Engine, CONTROL, Launcher
+and MCP Bridge normal/build/dev Windows closures exclude Research protocol
+and domain. The Research process/causality witnesses now run under Research,
+with Native financial load supplied by a separate non-shipping fixture.
+The strict test-boundary guard remains mandatory on subsequent changes.
 Research owns its separate authenticated Edge request types. Host-control mailbox messages live
 in `okx-host-protocol`.
 `okx-api`, `okx-market-runtime`, `okx-observation`, `okx-ws` and
@@ -91,16 +96,15 @@ remain Engine-owned financial reads.
 
 ### Confirmed remaining coupling and release rules
 
-At PR #581, Engine's `trade_service/strategies.rs::strategy_turn` evaluates
-its installed rules locally against verified closed bars, then submits the
+Since PR #581, Engine's `trade_service/strategies.rs::strategy_turn` evaluates
+its installed rules locally against verified closed bars and submits the
 decision to its own SQL/RiskBook authority. The Engine query dispatcher rejects
-Research operations with `RESEARCH_OWNER_REQUIRED`; Edge routes those to
-Research's separate socket. However, `research_client.rs` and historical
-child-process acceptance fixtures still compile under `#[cfg(test)]`, and
-the Research executable retains a legacy framed-IPC entrypoint. In addition,
-the old shared `okx-ipc-contracts → okx-research-protocol` dependency must be
-disabled for production, with a visibly unresolved dev-only exception until
-witness migration. The exact transition is tracked
+Research operations with `RESEARCH_OWNER_REQUIRED`; Edge selects the Research
+socket, including explicit offline errors. PR #595 removed Engine's historical
+test-only Research client, its obsolete Market shim and shared Research
+features; the separate Research executable retains an explicit legacy IPC
+entrypoint for its own compatibility tests, not a trading call path. The source
+history and current acceptance state are tracked
 in [the source and transition map](research-boundaries.md).
 
 An independent Research change is accepted only when it can compile/test,

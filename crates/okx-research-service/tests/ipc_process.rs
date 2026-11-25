@@ -37,6 +37,113 @@ fn expected_worker_sha256() -> &'static str {
         format!("{:x}", hash.finalize())
     })
 }
+
+#[test]
+fn research_worker_has_no_privileged_credential_store_api_or_dependency() {
+    // The only Research-side Credential Manager calls are synthetic negative
+    // sandbox probes; CONTROL alone owns credential provisioning and readback.
+    let source = include_str!("../src/edge_credentials.rs");
+    for forbidden in [
+        "pub fn store(",
+        "pub fn load(",
+        "CredWriteW",
+        "CredDeleteW",
+        "windows_native_keyring_store",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "privileged Research API: {forbidden}"
+        );
+    }
+    let manifest = include_str!("../Cargo.toml");
+    assert!(!manifest.contains("keyring-core"));
+    assert!(!manifest.contains("windows-native-keyring-store"));
+    let binary = include_str!("../src/main.rs");
+    assert!(!binary.contains("fn provision_research_edge_token("));
+}
+
+#[tokio::test]
+async fn privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms() {
+    for option_order in [
+        vec!["--set-edge-token"],
+        vec!["--set-edge-token", "--root"],
+        vec!["--root", "--set-edge-token"],
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_okx-research-service"));
+        for option in option_order {
+            command.arg(option);
+            if option == "--root" {
+                command.arg(root.path());
+            }
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        // Keep stdin OPEN and send no token. If any provisioning path still
+        // attempts to read it, the child would hang until this timeout.
+        let _still_open = child.stdin.take().unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("disabled CLI must not await stdin")
+            .unwrap();
+        assert_eq!(status.code(), Some(76));
+        let mut stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        use tokio::io::AsyncReadExt as _;
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).await.unwrap();
+        assert!(output.is_empty());
+        let mut diagnostics = String::new();
+        stderr.read_to_string(&mut diagnostics).await.unwrap();
+        assert!(diagnostics.contains("RESEARCH_EDGE_PROVISIONER_DISABLED"));
+        assert!(!root.path().join("research-catalog.sqlite").exists());
+    }
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn edge_runtime_process_rejects_missing_and_malformed_supervisor_bearers_without_catalog() {
+    use tokio::io::AsyncWriteExt as _;
+
+    for (frame, expected_exit) in [
+        ("", 75),
+        ("RESEARCH_HOST_JOB_ASSIGNED\n", 76),
+        (
+            r#"{"schema":"okx.research.startup/v1","job_assigned":false,"bearer":"12345678901234567890123456789012"}"#,
+            76,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_okx-research-service"))
+            .arg("--edge-runtime")
+            .arg("--root")
+            .arg(root.path())
+            .arg("--scope")
+            .arg("research-startup-negative")
+            .env_remove("OKX_RESEARCH_BEARER_TOKEN")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(frame.as_bytes()).await.unwrap();
+        drop(stdin);
+        let exit = tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(exit.code(), Some(expected_exit));
+        assert!(!root.path().join("research-catalog.sqlite").exists());
+    }
+}
+
 async fn send(w: &mut FramedWrite<ChildStdin, LengthDelimitedCodec>, f: HostFrame) {
     w.send(bytes::Bytes::from(serde_json::to_vec(&f).unwrap()))
         .await
@@ -101,8 +208,6 @@ async fn start(
 #[cfg(windows)]
 #[tokio::test]
 async fn legacy_and_standalone_workers_cannot_claim_separate_cpu_quotas() {
-    use tokio::io::AsyncWriteExt;
-
     let legacy_root = tempfile::tempdir().unwrap();
     let standalone_root = tempfile::tempdir().unwrap();
     let legacy_scope = ResearchScope::new("legacy-no-overlap-test".into()).unwrap();
@@ -111,27 +216,20 @@ async fn legacy_and_standalone_workers_cannot_claim_separate_cpu_quotas() {
     let (mut legacy, legacy_input, legacy_output) =
         start(legacy_root.path(), &session, &legacy_scope).await;
 
-    // The standalone start gate is a test-only receipt. The second process
-    // must fail on the kernel singleton before reading credentials, starting
-    // an Edge connection or creating a second resource Job.
+    // The second process must fail on the kernel singleton before probing
+    // sandbox canaries, reading bearer stdin or creating another CPU Job.
     let mut standalone = Command::new(env!("CARGO_BIN_EXE_okx-research-service"))
         .arg("--edge-runtime")
         .arg("--root")
         .arg(standalone_root.path())
         .arg("--scope")
         .arg(standalone_scope.as_str())
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut input = standalone.stdin.take().unwrap();
-    input
-        .write_all(b"RESEARCH_HOST_JOB_ASSIGNED\n")
-        .await
-        .unwrap();
-    drop(input);
     let status = tokio::time::timeout(Duration::from_secs(10), standalone.wait())
         .await
         .unwrap()
@@ -144,8 +242,8 @@ async fn legacy_and_standalone_workers_cannot_claim_separate_cpu_quotas() {
             .exists()
     );
 
-    // Direct execution of the built-in provisioning command must not bypass
-    // CONTROL's no-rotation-while-running rule or modify Credential Manager.
+    // The legacy privileged provisioning CLI is disabled even with another
+    // Worker running; CONTROL now owns singleton-excluded credential writes.
     let mut provisioner = Command::new(env!("CARGO_BIN_EXE_okx-research-service"))
         .arg("--set-edge-token")
         .stdin(Stdio::piped())
@@ -154,17 +252,12 @@ async fn legacy_and_standalone_workers_cannot_claim_separate_cpu_quotas() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut token_input = provisioner.stdin.take().unwrap();
-    token_input
-        .write_all(b"research-test-secret-value-0123456789")
-        .await
-        .unwrap();
-    drop(token_input);
+    let _stdin_remains_open = provisioner.stdin.take().unwrap();
     let credential_status = tokio::time::timeout(Duration::from_secs(10), provisioner.wait())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(credential_status.code(), Some(74));
+    assert_eq!(credential_status.code(), Some(76));
 
     drop(legacy_input);
     drop(legacy_output);

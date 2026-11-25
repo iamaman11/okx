@@ -15,8 +15,17 @@ const safe = file => typeof file === 'string' && file.length <= 512 && !file.sta
 const nonNative = file => file === 'README.md' || (file.startsWith('docs/') && file.endsWith('.md')) || file.startsWith('cloudflare/okx-mcp/') || baselineCiOnly.has(file);
 const researchSource = file => /^crates\/okx-(analysis|research-service|research|strategy-core|research-domain|research-protocol)\/(src|tests)\/.+\.rs$/.test(file);
 const protectedResearchSource = file => /^crates\/okx-research-(domain|protocol)\/(src|tests)\/.+\.rs$/.test(file);
-const hostSource = file => /^crates\/okx-host-(controller|launcher|protocol)\/src\/.+\.rs$/.test(file);
+const hostSource = file => /^crates\/okx-host-(controller|launcher|protocol)\/(src|tests)\/.+\.rs$/.test(file);
 const engineSource = file => /^crates\/okx-(trading-engine|trade-execution)\/(src|tests)\/.+\.rs$/.test(file);
+const researchManifest = file => ['research', 'research-service', 'strategy-core',
+  'analysis', 'research-domain', 'research-protocol'].some(name => file === `crates/okx-${name}/Cargo.toml`);
+const hostManifest = file => ['controller', 'launcher'].some(name => file === `crates/okx-host-${name}/Cargo.toml`);
+const needsFinancialMatrix = file => [
+  'crates/okx-research-service/src/main.rs',
+  'crates/okx-research-service/src/process_memory.rs',
+  'crates/okx-host-controller/src/job.rs',
+  'crates/okx-host-controller/src/lifecycle_executor.rs',
+].includes(file);
 
 function checkEngine(baseMetadata, metadata, changed) {
   if (!Array.isArray(changed) || changed.length < 1 || changed.length > 500 ||
@@ -36,11 +45,14 @@ function checkEngine(baseMetadata, metadata, changed) {
 }
 
 function checkMixed(baseMetadata, metadata, changed) {
-  if (!Array.isArray(changed) || changed.length > 500 ||
+  if (!Array.isArray(changed) || changed.length < 2 || changed.length > 500 ||
       new Set(changed).size !== changed.length || !changed.every(safe) ||
-      !changed.some(researchSource) || !changed.some(hostSource))
+      !changed.some(file => researchSource(file) || protectedResearchSource(file) || researchManifest(file)) ||
+      !changed.some(file => hostSource(file) || hostManifest(file)))
     throw Error('INVALID_MIXED_OWNER_DIFF');
-  if (!changed.every(file => researchSource(file) || hostSource(file) || nonNative(file)))
+  if (changed.some(needsFinancialMatrix) ||
+      !changed.every(file => researchSource(file) || protectedResearchSource(file) || researchManifest(file) ||
+        hostSource(file) || hostManifest(file) || file === 'Cargo.lock' || nonNative(file)))
     throw Error('OUTSIDE_MIXED_OWNER_SCOPE');
   const protectedDirs = verifyEngineInputs(baseMetadata, metadata, changed);
   return {

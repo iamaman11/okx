@@ -2,32 +2,38 @@
 
 Исходный `main`: `ce3238d09ff83a8a2ff19aebde060c8a93108a09` (19 Cargo packages). Первый автономный кандидат PR #581: `36add9b7a6793be24d097cacf66376a5f4f7e309` (21 package после выделения `okx-engine-domain` и `okx-research-domain`/`okx-research-protocol` и других переносов). Это **исходное и рабочее CODE-свидетельство**, не отметка о принятом установленном релизе. Полный перечень исходников закреплён в #580 §7; для приёмки обновлять точный candidate SHA/tree и Cargo closure на финальном HEAD.
 
-### Текущее разделение и незакрытая приёмка (исходники на `78b63c3097a3d98e8aa647453cc1bbc7b7bfb7dc`)
+### Принятая граница S1 и открытая физическая приёмка S2–S5
 
-Эта отметка фиксирует **прочитанный исходный код**, а не результаты нового CI-прогона или установленный Windows-релиз. HEAD меняется при следующем PR; все утверждения о тестах, SHA и дереве должны быть подтверждены заново на точном финальном кандидате.
+Актуальный контрольный `main` —
+[`ef9060bd`](https://github.com/iamaman11/okx/commit/ef9060bd30a00225ea78050103a1768aa98217c5),
+source tree `ed0884d1402565378a7c61265700eeeb42be1ad0` (25.11.2026).
+Это исходная точка **нового** среза, а не автоматическая приёмка любого
+последующего SHA.
 
-| Граница | Состояние в CODE | Состояние установленной системы / условие завершения |
+| Граница | Доказано на `ef9060bd` | Что ещё принять |
 | --- | --- | --- |
-| Engine normal/build → Research crates | **IMPLEMENTED**: production `query` отказывает Research-запросам с `RESEARCH_OWNER_REQUIRED`; runtime не запускает Research child; `okx-ipc-contracts` держит Research-протокол только в необязательной feature | **NOT_PROVEN** до exact-SHA Windows/CONTROL и проверки реальных Trade/Strategy маршрутов |
-| Research standalone → Edge | **IMPLEMENTED в исходниках**: Research-owned `edge_runtime`, собственный публичный источник и каталог; есть `standalone_catalog_reopens_through_real_mcp_do_websocket` | **NOT_PROVEN** для установленного Edge bearer, авторизованного WSS, существующего каталога, reboot/restart и rollback |
-| CONTROL lifecycle | **IMPLEMENTED в исходниках**: `StartResearch`/`StopResearch`/`StatusResearch`, независимая генерация процесса, SHA image, Windows Job и отказ несовместимого Engine | **NOT_PROVEN** до физического Windows испытания установки, разделения PID/Job, CPU 50%, RAM 4 GiB и восстановления каталога |
-| Research-only component artifact | **Контракт согласован, реализация/CI под проверкой**: `okx.windows.research-component/v1`, ровно `Cargo.lock`, `manifest.json`, `okx-research-service.exe`; manifest связывает HEAD/tree, Rust 1.100.0, lock SHA-256, worker SHA-256/size и версии протокола/хранилища | **NOT_PROVEN** как установленный релиз: компонентный артефакт не содержит Engine, CONTROL и не доказывает ранее принятую base, merge, deploy либо rollback |
-| Engine dev/test → Research | **S1 DEV DEBT, UNRESOLVED**: legacy child witnesses T06–T10/T11–T12 всё ещё участвуют в Engine Rust unit tests и Windows CI | Строгая dev-граница должна **FAIL** до переноса доказательств с эквивалентными отрицательными сценариями; S1 full PASS и S2 installed PASS не заявлены |
+| Engine + финансовый SQLite/RiskBook | Собственный live-strategy turn; Engine/CONTROL/Launcher/Bridge не имеют Research protocol/domain в Windows normal/build/dev closures, включая test-only клиент. Строгий architecture guard обязателен | Engine без установленного Research, реальный Windows PID/Job и сохранность торговли при update Research |
+| Research process и данные | Research-owned `edge_runtime`, публичный источник, самостоятельные 10 Windows IPC/process tests, causal/replay и собственный catalog | Чистая Research-only установка, прежние job/result, cancel, reboot/rollback, изоляция от финансовых ресурсов |
+| CONTROL/Launcher | Версионированное исполнение Windows и manifest/readback; самостоятельный supervisor в коде | Физический LPAC/AppContainer запуск, точные ACL/Low IL и CredMan/finance DENY, действующий один владелец запуска |
+| Edge | Маршрутизация Research WSS и отдельный `RESEARCH_RUNTIME_OFFLINE` для публичных операций в `main` (`d0703b6a`) | Авторизованный Edge↔Research WSS на установленной системе и отсутствие Engine fallback при отказе |
+| CI и публикация | Ready [#45684845788](https://github.com/iamaman11/okx/actions/runs/45684845788) успешно проверил четыре Windows regression suites, 62/107 финансовых свидетельств и обе T10 нагрузки; `main` [#45685939326](https://github.com/iamaman11/okx/actions/runs/45685939326) повторно не компилировал Engine | Четыре owner-only diff + отрицательные контроли, 12 прогретых измерений по #580, каждый ≤120 с; полный Ready #595 занял 5:55 |
 
-Точные оставшиеся Cargo-связи: `crates/okx-trading-engine/Cargo.toml` `[dev-dependencies]` содержит `okx-ipc-contracts/legacy-research-test`, `okx-market-runtime/legacy-research-test` и `okx-research-protocol`; `crates/okx-ipc-contracts/Cargo.toml` держит `okx-research-protocol` optional через `legacy-research-test`, `crates/okx-market-runtime/Cargo.toml` передаёт эту feature. При проверке **normal/build** feature не активируется; при `cargo test`/`--all-targets` Cargo объединяет features, и эту связь нельзя называть устранённой dev-зависимостью.
-
-Нельзя удалять старые Engine child-тесты одним изменением манифеста: `crates/okx-trading-engine/src/research_dispatch_tests.rs` содержит реальные T06–T09 IPC/экономические сценарии; `research_client.rs` и `research_client/{activation_tests.rs,measurement_tests.rs,installed.rs}` сохраняют отмену, handoff, проверку immutable image; `query_dispatch_tests.rs` смешивает независимые Trade/Strategies route tests с legacy Research публичными тестами. Главное препятствие — `accounts_native_engine_research_contract_tests.rs`: два настоящих Grid child процесса и их остановка, неизменность Native финансового SQL, 100 независимых измерений read-only/Explain, настоящая цепочка MCP HTTP → DO → WSS → Engine, p95 ≤100 мс и `T11_T12_NATIVE_ISOLATION_JSON`/`T10_MCP_NATIVE_LOAD_JSON`. Тест использует закрытые Engine fixture и `runtime::run_engine_until`, поэтому простой перенос в Research crate неравноценен.
-
-Порядок закрытия долга: (1) перенести T06–T09, cancellation, установленный image/handoff и соответствующие сценарии public Research в **Research-owned IPC/Edge integration tests**, проверив идентичные инварианты; (2) построить отдельную process-level cross-owner приёмку Research + Engine + Native SQL + MCP, **сохранив оба T10/11–12 JSON, размеры выборок, latency p95, отрицательные отключение/late reply и запрет POST**; (3) только после её PASS на Windows перенастроить `scripts/check_p0.py`, CI и финансовые witness checks без сокращения обязательной матрицы 62/62 свойств и 107 witnesses; (4) удалить Engine child/feature/dev edges, выполнить строгую dev Cargo closure проверку. До шага 3 прежние обязательные проверки остаются включёнными.
+В PR #595 устранены прежние Engine `ResearchClient` тесты, старые
+`legacy-research-test` features и тестовые Cargo связи с Research.
+T06–T12 перенесены в Research-owned IPC-проверки, а обе настоящие
+финансовые T10 нагрузки используют отдельный non-shipping Research fixture.
+**Нельзя возвращать `S1 DEV DEBT` в документы как актуальный статус**;
+одновременно нельзя засчитывать успешную статическую границу как физическую
+изоляцию Windows. Старые замеры ниже — исторический baseline.
 
 | Исходный пакет | Владелец | Действие |
 | --- | --- | --- |
-| okx-trading-engine, okx-trade-execution, okx-engine-domain | Engine | Один торговый runtime, SQLite writer и RiskBook. Engine вычисляет решения установленных живых стратегий. Удалить оставшуюся тестовую ResearchClient/IPC оснастку после переноса обязательных свидетелей. |
+| okx-trading-engine, okx-trade-execution, okx-engine-domain | Engine | Один торговый runtime, SQLite writer и RiskBook. Engine вычисляет решения установленных живых стратегий. Тестовая оснастка ResearchClient уже удалена в #595. |
 | okx-api, okx-ws, okx-market-runtime, okx-observation | Engine | Сохранить подписанные и публичные источники, которые использует Engine. Research использует собственный публичный клиент. Проверить, что Research tests также не подтягивают эти пакеты. |
 | okx-research-service, okx-research, okx-analysis, okx-strategy-core, okx-research-domain, okx-research-protocol | Research | Исследовательские расчёты, задания, артефакты, публичные источники, строго типизированные Research Edge команды. Удалить исторический child IPC после переноса его свидетельств. |
 | okx-host-controller, okx-host-launcher, okx-host-protocol | CONTROL | Сохранить установленный жизненный цикл и артефакты. Подключить один Research supervisor. |
 | okx-bridge-mcp | Edge | Сохранить штатный GitHub mailbox вход, определить назначение каждого маршрута после удаления Engine fallback. |
-| okx-ipc-contracts | Engine/CONTROL общий wire | Убрать Research-протокол из Engine normal/build closure. Временная `legacy-research-test` feature и dev-only тестовая связь допустимы только до миграции T06–T10, при явном S1 `PARTIAL`; строгая dev-граница обязательна для полного PASS. |
+| okx-ipc-contracts | Engine/CONTROL общий wire | Research-протокол уже выведен из normal/build/dev защищённых closures. Не вводить обратную тестовую зависимость; строгий dev guard обязателен. |
 | okx-github | Библиотека GitHub | Сохранить для действующих потребителей. |
 | okx-cli, okx-native-finance-check | Инструменты | Сохранить read-only CLI и финансовые проверки. |
 
@@ -42,7 +48,7 @@
 
 ### Что удалить при проверенном переходе
 
-- Engine runtime и query больше не запускают Research, не проксируют его задачи и не читают его хранилище. Удалить ResearchClient, диагностику дочернего процесса и устаревшие маршруты, когда их заменяющие операции пройдут приёмку.
+- Engine runtime и query больше не запускают Research, не проксируют его задачи и не читают его хранилище. Старый Engine ResearchClient удалён; не возвращать его ради совместимости тестовых fixtures.
 - Research перестаёт принимать Engine-child команды и сигнальные запросы торговли после перехода живых стратегий на Engine. Сохранить исследовательские БД, ключи заданий и артефакты.
 - Edge удаляет legacy_research и маршрутизацию исследовательского запроса через Engine. Отказ устаревшему финансовому RPC продолжают проверять.
 - Финансовый сборщик сохраняет действующие свойства. Местоположение исходника и идентификаторы тестов сверяются при каждом переносе.
@@ -61,7 +67,11 @@ python scripts/check_architecture.py
 python scripts/check_architecture.py --strict-component-test-boundary
 ```
 
-На промежуточной базе `2435cbf` Engine не тянул реализацию Research, но **всё ещё компилировал `okx-research-protocol` через `okx-ipc-contracts`**. Это недостаточно для независимого owner-only CI: изменение Research-протокола могло заново компилировать торговый бинарник. Исследовательские dev-зависимости на `okx-api`/`okx-market-runtime` в этом срезе уже были устранены. Следующий кандидат выводит Research-протокол из Engine normal/build, но временно сохраняет `legacy-research-test` для ранее обязательных T06–T10. Это **S1 PARTIAL**: обычный guard запрещает normal/build нарушение и показывает существующий dev-долг, а `--strict-component-test-boundary` обязан стать зелёным только после переноса этих свидетелей.
+На промежуточной базе `2435cbf` Engine ещё компилировал
+`okx-research-protocol` через общий IPC. Это **исторический дефект**, устранённый
+в #595. Сравнивать с ним актуальную границу следует по точному
+Windows Cargo normal/build/dev resolver и успешному
+`--strict-component-test-boundary`, а не по старому описанию S1 PARTIAL.
 
 ### Исходные замеры
 
@@ -72,7 +82,7 @@ python scripts/check_architecture.py --strict-component-test-boundary
 
 ### Проверки первого среза S1
 
-- Отдельные Windows-графы Cargo с normal/build должны подтвердить, что Research не собирает Engine market/finance packages, а production Engine не собирает ни реализацию Research, ни `okx-research-domain`/`okx-research-protocol`. Дополнительно сохранить точный test-only manifest T06–T10 и выполнить `--strict-component-test-boundary`: до замены этих свидетелей его красный результат — честный незакрытый долг, а не причина ослаблять финансовые тесты.
+- Отдельные Windows-графы Cargo с normal/build/dev должны подтвердить, что Research не собирает Engine market/finance packages, а production Engine не собирает ни реализацию Research, ни `okx-research-domain`/`okx-research-protocol`. Сверить перенесённые T06–T12 Research IPC tests и выполнить `--strict-component-test-boundary`: красный результат теперь означает **регрессию**, а не допустимый прежний долг.
 - `python scripts/check_architecture.py`, `--self-test` и `--k10-purity` прошли. Контрольные графы подставляют запрещённые normal/build/dev зависимости в обоих направлениях.
 - `cargo test --offline --locked -p okx-trade-execution --lib risk::` — 63 PASS. Шесть свидетельств финансового манифеста сохранили прежние имена после перемещения в торговый пакет.
 - `cargo test --offline --locked -p okx-trading-engine --lib strategy` — 10 PASS.

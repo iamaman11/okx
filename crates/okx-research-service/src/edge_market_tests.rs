@@ -198,6 +198,90 @@ async fn request(
     dispatch(service, public, ResearchCommand::try_from(*request)?).await
 }
 
+#[test]
+fn research_response_transport_quality_preserves_provenance_and_staleness() {
+    for (label, expected) in [
+        ("complete", DataQuality::Fresh),
+        ("verified", DataQuality::Fresh),
+        ("fresh", DataQuality::Fresh),
+        ("verified_reexecution", DataQuality::Fresh),
+        ("stale", DataQuality::Stale),
+        ("partial", DataQuality::Degraded),
+        ("missing", DataQuality::Degraded),
+        ("degraded", DataQuality::Degraded),
+        ("assumed", DataQuality::Degraded),
+        ("unverified_legacy", DataQuality::Degraded),
+        ("not_verified", DataQuality::Degraded),
+        ("unavailable", DataQuality::Degraded),
+        ("future_unsupported_quality", DataQuality::Degraded),
+    ] {
+        let body = json!({"quality":label,"preserved":"same-result"});
+        let response = response_for("quality-check", Ok(body.clone()));
+        assert_eq!(response.quality, expected, "{label}");
+        assert_eq!(response.status, AgentResponseStatus::Completed);
+        assert_eq!(response.result, Some(body));
+    }
+    for unexpected in [serde_json::Value::Null, json!(42), json!({"status":"ambiguous"})] {
+        let body = json!({"quality":unexpected});
+        let response = response_for("quality-check", Ok(body.clone()));
+        assert_eq!(response.quality, DataQuality::Degraded);
+        assert_eq!(response.result, Some(body));
+    }
+    assert_eq!(
+        response_for("quality-check", Err("RESEARCH_SOURCE_FAILED".into())).quality,
+        DataQuality::NotReady
+    );
+}
+
+#[tokio::test]
+async fn invalid_market_view_names_never_reserve_source_or_socket() {
+    // These names pass the broader public wire envelope grammar but cannot be
+    // queried as OKX venue instruments. Reject *before* the WSS session is
+    // created, or repeated malformed requests can occupy both WSS slots.
+    let root = tempfile::tempdir().unwrap();
+    let venue = Arc::new(Venue::default());
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let public = Arc::new(
+        IndependentOkxPublicSource::with_get(venue.clone())
+            .with_market_ws_endpoint(format!("ws://{}", listener.local_addr().unwrap())),
+    );
+    let scope = ResearchScope::new("malformed-public-market-view".into()).unwrap();
+    let service = AnalyticsService::new_scoped(
+        root.path().into(),
+        PublicSourceClient::new(public.clone()),
+        &scope,
+    )
+    .unwrap();
+    for instrument in [
+        "BTC__USDT_SWAP",
+        "BTC--USDT-SWAP",
+        "-BTC-USDT-SWAP",
+        "BTC-USDT-SWAP-",
+    ] {
+        for operation in [
+            json!({"type":"market_overview","instrument":instrument}),
+            json!({"type":"market_microstructure","instrument":instrument}),
+        ] {
+            let result = tokio::time::timeout(
+                Duration::from_millis(200),
+                request(&service, &public, operation),
+            )
+            .await
+            .expect("a rejected public market request must have no source delay");
+            assert_eq!(result.unwrap_err(), "INSTRUMENT_INVALID");
+        }
+    }
+    assert_eq!(venue.0.load(Ordering::Relaxed), 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "invalid market names must not open a Research public WSS"
+    );
+}
+
 #[tokio::test]
 async fn standalone_market_only_runtime_fails_closed_without_engine_or_public_source() {
     // Disposable Research catalog, a recorded failing GET, and a closed

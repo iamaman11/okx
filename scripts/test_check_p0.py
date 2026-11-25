@@ -5,11 +5,37 @@ import re
 import sys
 
 from check_ci_native_scope import classify as ready_classify, github_plan, select_draft
-from check_p0 import (check_counts, local_component, measured_mcp_native_under_research,
+from check_p0 import (RESEARCH_IPC_LINUX, RESEARCH_IPC_PORTABLE, RESEARCH_IPC_WINDOWS,
+                      check_counts, check_research_ipc_result, check_research_ipc_wiring,
+                      local_component, measured_mcp_native_under_research,
                       measured_native_under_research, measured_t10, execute)
 
 
 class FeedbackTests(unittest.TestCase):
+    def test_research_ipc_twelve_tests_are_actual_and_platform_scoped(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "crates/okx-research-service/tests/ipc_process.rs").read_text()
+        check_research_ipc_wiring(source)
+        self.assertEqual(len(RESEARCH_IPC_PORTABLE), 11)
+        for windows, platform in ((False, RESEARCH_IPC_LINUX),
+                                  (True, RESEARCH_IPC_WINDOWS)):
+            names = RESEARCH_IPC_PORTABLE + (platform,)
+            self.assertEqual(len(names), 12)
+            output = "\n".join(f"test {name} ... ok" for name in names)
+            output += "\ntest result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"
+            self.assertEqual(check_counts(output, names), 12)
+            check_research_ipc_result(output, windows=windows)
+            with self.assertRaisesRegex(ValueError, "not exactly 12/12"):
+                check_research_ipc_result(output.replace("12 passed", "11 passed"), windows=windows)
+            with self.assertRaises(ValueError):
+                check_counts(output.replace(f"test {platform} ... ok", ""), names)
+        for name in ("research_worker_has_no_privileged_credential_store_api_or_dependency",
+                     "privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms",
+                     RESEARCH_IPC_LINUX, RESEARCH_IPC_WINDOWS):
+            altered = source.replace(f"fn {name}(", f"fn bypassed_{name}(", 1)
+            with self.assertRaises(ValueError):
+                check_research_ipc_wiring(altered)
+
     def test_local_component_repeats_only_the_requested_package(self):
         with (patch("check_p0.git", side_effect=[b"abc\n", b" M changed\n"]),
               patch("check_p0.report") as report,

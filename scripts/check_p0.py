@@ -28,9 +28,10 @@ STANDALONE_MCP_TEST = (
     "edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket",
 )
 # These are the actual, independently owned Research process tests. The first
-# three invoke the retained T06–T10 helpers inside their bodies, so adding a
-# second `#[test]` target (and silently changing Windows's exact 10/10 gate)
-# is not an acceptable substitute for their execution.
+# three invoke the retained T06–T10 helpers inside their bodies. The two new
+# privileged-provisioner denials run on both platforms; the negative startup
+# test replaces the Windows-only Job test on Linux. Every case must execute
+# in the *same* exact 12-case Research IPC target.
 RESEARCH_IPC_PORTABLE = (
     "child_round_trip_source_and_eof_restart",
     "strategy_outbox_publishes_once_and_recovers_committed_proposal_after_restart",
@@ -41,8 +42,11 @@ RESEARCH_IPC_PORTABLE = (
     "lost_enqueue_ack_retry_preserves_job_and_rejects_conflict",
     "draining_preserves_active_job_and_rejects_new_admission",
     "t11_t12_real_worker_observation_and_cancel_survive_saturated_work_lane",
+    "research_worker_has_no_privileged_credential_store_api_or_dependency",
+    "privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms",
 )
 RESEARCH_IPC_WINDOWS = "legacy_and_standalone_workers_cannot_claim_separate_cpu_quotas"
+RESEARCH_IPC_LINUX = "edge_runtime_process_rejects_missing_and_malformed_supervisor_bearers_without_catalog"
 RESEARCH_IPC_HELPERS = (
     ('child_round_trip_source_and_eof_restart',
      'research_legacy_witnesses', 'causal_economics_and_portfolio_are_research_only'),
@@ -103,8 +107,19 @@ def check_research_ipc_wiring(source=None):
     # Ignore comments so a description of the witness cannot replace its
     # executable call. A change to these entry points needs an explicit review.
     executable = "\n".join(line.split("//", 1)[0] for line in source.splitlines())
-    if executable.count("#[tokio::test]") != 10:
-        raise ValueError("Research IPC exact ten process tests were altered")
+    if executable.count("#[tokio::test]") != 12 or executable.count("#[test]") != 1:
+        raise ValueError("Research IPC exact twelve process tests were altered")
+    names = RESEARCH_IPC_PORTABLE + (RESEARCH_IPC_WINDOWS, RESEARCH_IPC_LINUX)
+    for name in names:
+        decorator = "#[test]" if name == "research_worker_has_no_privileged_credential_store_api_or_dependency" else "#[tokio::test]"
+        body = rf'(?m)^{re.escape(decorator)}\s*\n(?:async\s+)?fn\s+{re.escape(name)}\s*\('
+        if len(re.findall(body, executable)) != 1:
+            raise ValueError(f"Research IPC required executable test missing/duplicated: {name}")
+    for platform, name in (("windows", RESEARCH_IPC_WINDOWS),
+                           ("not(windows)", RESEARCH_IPC_LINUX)):
+        guarded = rf'(?m)^#\[cfg\({re.escape(platform)}\)\]\s*\n#\[tokio::test\]\s*\nasync\s+fn\s+{re.escape(name)}\s*\('
+        if not re.search(guarded, executable):
+            raise ValueError(f"Research IPC platform guard missing: {name}")
     for test_name, module, witness in RESEARCH_IPC_HELPERS:
         if not re.search(rf'\#\[path\s*=\s*"support/{module}\.rs"\]\s*mod\s+{module}\s*;', executable):
             raise ValueError(f"Research IPC owner helper not imported: {module}")
@@ -122,9 +137,9 @@ def check_research_ipc_wiring(source=None):
 def check_research_ipc_result(output, windows=None):
     if windows is None:
         windows = os.name == "nt"
-    expected = 10 if windows else 9
-    # No ignored/filtered/replaced test may satisfy the protected 10/10
-    # Windows process roster (or the corresponding nine Linux cases).
+    expected = 12
+    # No ignored/filtered/replaced test may satisfy either platform's
+    # twelve-case protected Research IPC roster.
     result = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; "
                         r"(\d+) measured; (\d+) filtered out;", output, re.M)
     if len(result) != 1 or result[0] != (str(expected), "0", "0", "0", "0"):
@@ -167,6 +182,16 @@ def check_financial_manifest_counts(manifest):
 def self_test():
     check_research_ipc_wiring()
     source = (ROOT / "crates/okx-research-service/tests/ipc_process.rs").read_text(encoding="utf-8")
+    for name in RESEARCH_IPC_PORTABLE + (RESEARCH_IPC_WINDOWS, RESEARCH_IPC_LINUX):
+        changed = re.sub(rf'\bfn\s+{re.escape(name)}\s*\(', f'fn removed_{name}(', source, count=1)
+        if changed == source:
+            raise ValueError(f"missing Research IPC test declaration: {name}")
+        try:
+            check_research_ipc_wiring(changed)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(f"removed Research IPC test was accepted: {name}")
     for _, module, witness in RESEARCH_IPC_HELPERS:
         changed = source.replace(f"{module}::{witness}().await;", "", 1)
         if changed == source:
@@ -178,7 +203,7 @@ def self_test():
         else:
             raise ValueError(f"removed Research witness was accepted: {witness}")
     for windows in (False, True):
-        names = RESEARCH_IPC_PORTABLE + ((RESEARCH_IPC_WINDOWS,) if windows else ())
+        names = RESEARCH_IPC_PORTABLE + ((RESEARCH_IPC_WINDOWS,) if windows else (RESEARCH_IPC_LINUX,))
         rows = "\n".join(f"test {name} ... ok" for name in names)
         result = f"test result: ok. {len(names)} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"
         check_counts(rows, names)

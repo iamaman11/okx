@@ -1,73 +1,142 @@
-//! Research-only Windows Credential Manager identity. Never reuse the Engine
-//! credential target, even when both components run under the same OS user.
-#[cfg(windows)]
-use keyring::api::CredentialStoreApi;
-use zeroize::Zeroizing;
-
-pub const RESEARCH_CLOUDFLARE_SERVICE: &str = "iamaman11.okx-research-service.cloudflare";
-pub const RESEARCH_CLOUDFLARE_USER: &str = "runtime-token";
+//! Research bearer syntax and the restricted child's disposable sandbox proof.
+//! Research has no runtime Credential Manager store/read API: CONTROL owns
+//! provisioning and only transmits a one-shot token after child attestation.
 
 pub fn valid_token(token: &[u8]) -> bool {
     (32..=1024).contains(&token.len()) && token.iter().all(u8::is_ascii_graphic)
 }
 
-/// Native one-shot provisioning. The caller supplies bytes through stdin and
-/// zeroizes them after this function returns; nothing is logged or echoed.
-pub fn store(token: &[u8]) -> Result<(), String> {
-    if !valid_token(token) {
-        return Err("RESEARCH_EDGE_TOKEN_INVALID".into());
-    }
-    #[cfg(windows)]
-    {
-        entry()?
-            .set_secret(token)
-            .map_err(|_| "RESEARCH_EDGE_CREDENTIAL_STORE_FAILED".to_owned())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = token;
-        Err("RESEARCH_EDGE_CREDENTIAL_PLATFORM_UNSUPPORTED".into())
-    }
+#[cfg(any(test, windows))]
+fn valid_sandbox_canary(
+    nonce: &str,
+    credential_target: &str,
+    finance_canary: &std::path::Path,
+) -> bool {
+    nonce.len() == 32
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && credential_target == format!("finance-sandbox-canary.{nonce}.iamaman11.okx-agent")
+        && finance_canary.is_absolute()
+        && finance_canary.file_name()
+            == Some(std::ffi::OsStr::new(&format!(
+                "finance-sandbox-canary.{nonce}"
+            )))
 }
 
-/// Windows runtime reads only its dedicated installed secret; it never
-/// inherits Engine bearer state or accepts a token through command-line args.
-pub fn load() -> Result<Zeroizing<String>, String> {
-    #[cfg(windows)]
-    {
-        let secret = Zeroizing::new(match entry()?.get_secret() {
-            Ok(secret) => secret,
-            Err(keyring::Error::NoEntry) => {
-                return Err("RESEARCH_EDGE_CREDENTIAL_NOT_FOUND".into());
-            }
-            Err(_) => return Err("RESEARCH_EDGE_CREDENTIAL_READ_FAILED".into()),
-        });
-        if !valid_token(&secret) {
-            return Err("RESEARCH_EDGE_TOKEN_INVALID".into());
-        }
-        let token = std::str::from_utf8(&secret)
-            .map_err(|_| "RESEARCH_EDGE_TOKEN_INVALID")?
-            .to_owned();
-        Ok(Zeroizing::new(token))
+#[cfg(any(test, windows))]
+fn sandbox_ready_line(nonce: &str) -> Result<Vec<u8>, String> {
+    let ready = serde_json::json!({
+        "schema": "okx.research.sandbox-ready/v1",
+        "nonce": nonce,
+        "credman_denied": true,
+        "finance_file_denied": true,
+    })
+    .to_string();
+    if ready.len() + 1 > 256 {
+        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
     }
-    #[cfg(not(windows))]
-    {
-        Err("RESEARCH_EDGE_CREDENTIAL_PLATFORM_UNSUPPORTED".into())
-    }
+    let mut ready = ready.into_bytes();
+    ready.push(b'\n');
+    Ok(ready)
 }
 
+/// A real Windows sandbox witness, performed IN the Research child before a
+/// bearer is ever sent by CONTROL. CONTROL first proves it can read the
+/// disposable synthetic credential and file, then resumes the restricted
+/// child and requires this attestation before writing the startup secret.
+/// No real financial credential or financial filesystem path is inspected.
 #[cfg(windows)]
-fn entry() -> Result<keyring::Entry, String> {
-    let store = windows_native_keyring_store::Store::new()
-        .map_err(|_| "RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE")?;
-    entry_from_store(store.as_ref())
-}
+pub fn attest_startup_sandbox() -> Result<(), String> {
+    use std::{ffi::OsStr, io::Write as _, os::windows::ffi::OsStrExt as _};
+    use windows_sys::Win32::{
+        Foundation::{
+            CloseHandle, ERROR_ACCESS_DENIED, ERROR_NO_SUCH_LOGON_SESSION, ERROR_NOT_FOUND,
+            GENERIC_READ, GetLastError, INVALID_HANDLE_VALUE,
+        },
+        Security::Credentials::{
+            CRED_TYPE_GENERIC, CREDENTIALW, CredEnumerateW, CredFree, CredReadW,
+        },
+        Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING},
+    };
 
-#[cfg(windows)]
-fn entry_from_store(store: &dyn CredentialStoreApi) -> Result<keyring::Entry, String> {
-    store
-        .build(RESEARCH_CLOUDFLARE_SERVICE, RESEARCH_CLOUDFLARE_USER, None)
-        .map_err(|_| "RESEARCH_EDGE_CREDENTIAL_STORE_UNAVAILABLE".into())
+    fn denied_or_missing(error: u32) -> bool {
+        matches!(
+            error,
+            ERROR_ACCESS_DENIED | ERROR_NOT_FOUND | ERROR_NO_SUCH_LOGON_SESSION
+        )
+    }
+    fn to_wide(s: &OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let nonce = std::env::var("OKX_RESEARCH_SANDBOX_NONCE")
+        .map_err(|_| "RESEARCH_SANDBOX_ATTESTATION_INVALID")?;
+    let target = std::env::var("OKX_RESEARCH_CRED_CANARY_TARGET")
+        .map_err(|_| "RESEARCH_SANDBOX_ATTESTATION_INVALID")?;
+    let finance_canary = std::env::var_os("OKX_RESEARCH_FINANCE_CANARY_PATH")
+        .ok_or("RESEARCH_SANDBOX_ATTESTATION_INVALID")?;
+    let finance_canary = std::path::PathBuf::from(finance_canary);
+    if !valid_sandbox_canary(&nonce, &target, &finance_canary) {
+        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+    }
+
+    let target_wide = to_wide(OsStr::new(&target));
+    let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+    // SAFETY: all pointers refer to owned, NUL-terminated UTF-16 buffers or
+    // writable pointer outputs. CredFree handles any successful allocation.
+    let credential_read =
+        unsafe { CredReadW(target_wide.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
+    if credential_read != 0 {
+        unsafe { CredFree(credential.cast()) };
+        return Err("RESEARCH_SANDBOX_CREDMAN_EXPOSED".into());
+    }
+    let read_error = unsafe { GetLastError() };
+    if !denied_or_missing(read_error) {
+        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+    }
+
+    let mut count = 0u32;
+    let mut credentials: *mut *mut CREDENTIALW = std::ptr::null_mut();
+    let enumerated =
+        unsafe { CredEnumerateW(target_wide.as_ptr(), 0, &mut count, &mut credentials) };
+    if enumerated != 0 {
+        unsafe { CredFree(credentials.cast()) };
+        return Err("RESEARCH_SANDBOX_CREDMAN_EXPOSED".into());
+    }
+    let enumerate_error = unsafe { GetLastError() };
+    if !denied_or_missing(enumerate_error) {
+        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+    }
+
+    let file_wide = to_wide(finance_canary.as_os_str());
+    let handle = unsafe {
+        CreateFileW(
+            file_wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle != INVALID_HANDLE_VALUE {
+        unsafe { CloseHandle(handle) };
+        return Err("RESEARCH_SANDBOX_FINANCE_FILE_EXPOSED".into());
+    }
+    if unsafe { GetLastError() } != ERROR_ACCESS_DENIED {
+        // A missing synthetic file, invalid path or sharing violation is NOT
+        // evidence of a successfully enforced AppContainer ACL.
+        return Err("RESEARCH_SANDBOX_ATTESTATION_INVALID".into());
+    }
+
+    let ready = sandbox_ready_line(&nonce)?;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&ready)
+        .and_then(|_| stdout.flush())
+        .map_err(|_| "RESEARCH_SANDBOX_ATTESTATION_INVALID".to_owned())
 }
 
 #[cfg(test)]
@@ -94,40 +163,37 @@ mod tests {
         ] {
             assert!(!valid_token(&invalid));
         }
-        assert_ne!(
-            RESEARCH_CLOUDFLARE_SERVICE,
-            "iamaman11.okx-agent.cloudflare"
-        );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn research_native_target_is_distinct_from_engine() {
-        let native = windows_native_keyring_store::Store::new().unwrap();
-        let entry = entry_from_store(native.as_ref()).unwrap();
-        let target = format!("{entry:?}");
-        assert!(target.contains("runtime-token.iamaman11.okx-research-service.cloudflare"));
-        assert!(!target.contains("runtime-token.iamaman11.okx-agent.cloudflare"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn mock_store_never_exposes_research_bearer_to_engine_target() {
-        let store = keyring::mock::Store::new().unwrap();
-        let research = entry_from_store(store.as_ref()).unwrap();
-        research
-            .set_secret(b"research-only-secret-value-0123456789")
-            .unwrap();
-        assert_eq!(
-            entry_from_store(store.as_ref())
-                .unwrap()
-                .get_secret()
-                .unwrap(),
-            b"research-only-secret-value-0123456789"
-        );
-        let engine = store
-            .build("iamaman11.okx-agent.cloudflare", "runtime-token", None)
-            .unwrap();
-        assert!(matches!(engine.get_secret(), Err(keyring::Error::NoEntry)));
+    fn sandbox_ready_attests_only_disposable_canaries_without_secret_material() {
+        let nonce = "a".repeat(32);
+        let target = format!("finance-sandbox-canary.{nonce}.iamaman11.okx-agent");
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(format!("finance-sandbox-canary.{nonce}"));
+        assert!(valid_sandbox_canary(&nonce, &target, &path));
+        assert!(!valid_sandbox_canary(&"A".repeat(32), &target, &path));
+        assert!(!valid_sandbox_canary(
+            &nonce,
+            "runtime-token.iamaman11.okx-agent",
+            &path
+        ));
+        assert!(!valid_sandbox_canary(
+            &nonce,
+            &target,
+            &root.path().join("finance.sqlite")
+        ));
+        let ready = sandbox_ready_line(&nonce).unwrap();
+        assert!(ready.len() <= 256);
+        assert_eq!(ready.last(), Some(&b'\n'));
+        assert_eq!(ready.iter().filter(|&&byte| byte == b'\n').count(), 1);
+        let value: serde_json::Value = serde_json::from_slice(&ready).unwrap();
+        assert_eq!(value["schema"], "okx.research.sandbox-ready/v1");
+        assert_eq!(value["nonce"], nonce);
+        assert_eq!(value["credman_denied"], true);
+        assert_eq!(value["finance_file_denied"], true);
+        assert!(value.get("bearer").is_none());
+        assert!(value.get("canary").is_none());
+        assert!(value.get("path").is_none());
     }
 }

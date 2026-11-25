@@ -20,9 +20,12 @@ Research или Host. Торговый Engine из этих маршрутов �
 
 Проверить каждый бинарник можно командой `cargo tree --locked -p <package>
 --target x86_64-pc-windows-msvc -e normal,build,dev`. Research собирается
-со своими моделями рынка и аналитическими входами. Старый IPC-маршрут
-Engine использует протокол Research транзитивно через `okx-ipc-contracts`.
-Адаптация типов публичных наблюдений находится в этом маршруте.
+со своими моделями рынка и аналитическими входами. Историческая передача
+Research-протокола через `okx-ipc-contracts` устранена в PR #595,
+принятом в `main` `ef9060bd`. Engine, CONTROL, Launcher и MCP Bridge не
+должны получать `okx-research-protocol` или `okx-research-domain` ни через
+обычные, ни через dev/build зависимости. Это проверяет
+`scripts/check_architecture.py --strict-component-test-boundary`.
 
 ## 2. Перенос A — временные ряды в Strategy Core
 

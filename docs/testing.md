@@ -33,6 +33,14 @@ evidence.
 
 The current F01–F12 handler/owner/effect/test map is [operation-map.md](acceptance/512/operation-map.md); [research-boundaries.md](research-boundaries.md) describes the Worker and finance boundary. The sections below are historical checkpoints, including the former S0 map; their source identities, measurements and statements about then-unfinished code remain evidence of those cuts only.
 
+For **current #580 S1–S4** use
+[the exact-SHA acceptance map](580-s2-s4-acceptance.md). In particular,
+any earlier `ResearchClient::evaluate_signal` or Engine-child IPC path in
+the #512 table is historical: Engine now calculates installed live-strategy
+decisions locally and #595 removed the test-only Research client. The
+accepted Native financial roster is **62 contracts / 107 witnesses**, not
+the historical 61/106 snapshot below.
+
 #512 CODE and U01–U05 acceptance are decided against the current exact SHA/tree in [issue #512](https://github.com/iamaman11/okx/issues/512) and [PR #513](https://github.com/iamaman11/okx/pull/513). The following completed run is an independently verifiable checkpoint, **not** automatic acceptance for a later documentation or code commit. Physical/installed/live checks belong to #449.
 
 ### First green complete candidate — exact historical checkpoint
@@ -67,7 +75,7 @@ Local fixed measurements (Windows x86_64/Intel family6 model60/8 logical CPUs, d
 
 Full acceptance remains `cargo run --locked -p okx-native-finance-check` on clean exact SHA. Current manifest requires the added property, typed retry/cause, logical deadline and source-reopen witnesses. Missing/zero/ignored/foreign evidence cannot become FULL_PASS. No quick subset or old distributed ALL26 result substitutes for the full property/physical/resource gate.
 
-## #512 S0 — current production entrypoint map (working, not acceptance)
+## #512 S0 — historical production entrypoint map (working checkpoint, not current acceptance)
 
 Source of truth: issue #512 r13, code of accepted main commit 9c36f50fc9a02d59d67de8e15b31950b1f58dea7 (tree 7805454a8abcf318ef4f0b1819b039aaf268435f), #510 exact FULL_PASS 61/61 properties and 85 witnesses in GitHub CI 43899933082. This section is navigation to actual Rust entrypoints, not an alternate business schema, ACL, or test oracle. Status: **S0 IN PROGRESS**, no #512 CODE acceptance claimed. Do not use historical checkpoints below as the current pass/fail state.
 

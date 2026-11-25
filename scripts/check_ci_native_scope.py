@@ -92,9 +92,9 @@ def category(path):
     # affect the installed product; they must not bypass the Native gate.
     if _research_source(path):
         return "research"
-    # These new Research crates are still included by an Engine dev-only
-    # compatibility test. They become Research-only *only after* the exact
-    # before/after Windows test closure proves the dependency removed.
+    # Research protocol/domain are currently outside the Engine Cargo closure.
+    # Their source edits still require a fresh before/after Windows proof:
+    # a future optional/dev/test dependency must never silently bypass finance.
     if _research_protected_source(path):
         return "full"
     # Engine/Execution are both owned by the single financial writer. Their
@@ -279,6 +279,14 @@ def dependency_candidate(pages):
     if kinds == {"host"}:
         return "host-controller" if any(path.startswith("crates/okx-host-controller/") for path in manifests +
                                    [entry["filename"] for entry in files]) else "host-launcher"
+    if kinds == {"research", "host"}:
+        # A coupled *change* in two independent owners is not necessarily a
+        # change to Engine. The separate resolver must prove Engine's complete
+        # Windows normal/build/dev graph and source inputs unchanged; until
+        # then the ordinary classifier remains full and runs all finance.
+        risky = _ENGINE_RESEARCH_RUNTIME_POLICY | _ENGINE_HOST_LIFECYCLE
+        if not any(entry["filename"] in risky for entry in files):
+            return "research-host"
     return "none"
 
 
@@ -312,11 +320,14 @@ def _self_test() -> None:
         ),
         "crates/okx-research-service/src/edge_credentials.rs": (
             "research_token_validation_is_bounded_and_ascii_only",
-            "research_native_target_is_distinct_from_engine",
-            "mock_store_never_exposes_research_bearer_to_engine_target",
+            "sandbox_ready_attests_only_disposable_canaries_without_secret_material",
+        ),
+        "crates/okx-research-service/tests/ipc_process.rs": (
+            "research_worker_has_no_privileged_credential_store_api_or_dependency",
+            "privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms",
         ),
         "crates/okx-research-service/src/edge_runtime.rs": (
-            "research_starts_only_after_finite_supervisor_job_receipt",
+            "research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof",
             "installed_research_bearer_is_pinned_to_control_edge_origin",
         ),
     }
@@ -363,12 +374,15 @@ def _self_test() -> None:
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
     for witness in (
         "research_token_validation_is_bounded_and_ascii_only",
-        "research_native_target_is_distinct_from_engine",
-        "mock_store_never_exposes_research_bearer_to_engine_target",
-        "research_starts_only_after_finite_supervisor_job_receipt",
+        "sandbox_ready_attests_only_disposable_canaries_without_secret_material",
+        "research_bearer_requires_bounded_one_shot_supervisor_envelope_and_eof",
         "installed_research_bearer_is_pinned_to_control_edge_origin",
+        "research_worker_has_no_privileged_credential_store_api_or_dependency",
+        "privileged_edge_token_cli_is_disabled_before_stdin_or_catalog_on_all_platforms",
     ):
         assert witness in research, f"RESEARCH_WINDOWS_SECRET_WITNESS_REQUIRED:{witness}"
+    assert "RESEARCH_IPC_ALL_TWELVE_TESTS_REQUIRED" in research
+    assert "test result: ok\\. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;" in research
     assert "cargo fmt --all -- --check" in research, "SCOPED_RESEARCH_MUST_VERIFY_RUST_FORMATTING"
     # Reuse the same established Cargo cache action and one target directory.
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
@@ -457,6 +471,9 @@ def _self_test() -> None:
         ("host-controller", files("crates/okx-host-controller/Cargo.toml", "crates/okx-host-launcher/Cargo.toml")),
         ("host-launcher", files("crates/okx-host-launcher/Cargo.toml", "Cargo.lock")),
         ("host-launcher", files("crates/okx-host-launcher/Cargo.toml", "cloudflare/okx-mcp/src/mcp.ts")),
+        ("research-host", files("crates/okx-research-service/Cargo.toml", "crates/okx-host-controller/Cargo.toml", "Cargo.lock")),
+        ("research-host", files("crates/okx-research-protocol/src/analytics.rs", "crates/okx-host-controller/src/research_acl.rs")),
+        ("research-host", files("crates/okx-research-service/Cargo.toml", "crates/okx-host-controller/tests/research_process.rs")),
     ):
         assert classify(selection) == "full"  # never grant scope before Cargo proof
         assert dependency_candidate(selection) == wanted
@@ -498,13 +515,21 @@ def _self_test() -> None:
     for selection in (
         files("Cargo.lock"), files("Cargo.toml", "crates/okx-research-service/Cargo.toml"),
         files("crates/okx-ipc-contracts/Cargo.toml", "Cargo.lock"),
-        files("crates/okx-host-launcher/Cargo.toml", "crates/okx-research-service/Cargo.toml"),
         files("crates/okx-research-service/Cargo.toml", ".github/workflows/ci.yml"),
         files("crates/okx-research-service/Cargo.toml", "crates/okx-research-service/config/edge_wss.json"),
         [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "removed"}]],
         [[{"filename": "crates/okx-research-service/Cargo.toml", "status": "renamed", "previous_filename": "x"}]],
     ):
         assert dependency_candidate(selection) == "none"
+    for selection in (
+        files("crates/okx-research-service/Cargo.toml", "crates/okx-host-controller/src/job.rs"),
+        files("crates/okx-research-service/src/main.rs", "crates/okx-host-controller/Cargo.toml"),
+        files("crates/okx-research-service/src/process_memory.rs", "crates/okx-host-controller/Cargo.toml"),
+        files("crates/okx-research-service/Cargo.toml", "crates/okx-host-controller/src/lifecycle_executor.rs"),
+    ):
+        assert dependency_candidate(selection) == "none"
+    assert dependency_candidate(files("crates/okx-host-launcher/Cargo.toml",
+                                      "crates/okx-research-service/Cargo.toml")) == "research-host"
     assert classify([[{"filename": "docs/obsolete.md", "status": "removed"}]]) == "docs"
     print("CI_COMPONENT_SCOPE_NEGATIVE_CONTROLS=PASS")
 
