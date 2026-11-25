@@ -1159,7 +1159,11 @@ mod native {
     fn checked_parent_windows_environment_directory(
         name: &'static str,
     ) -> HostControlResult<String> {
-        use windows_sys::Win32::Storage::FileSystem::{DRIVE_FIXED, GetDriveTypeW};
+        use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+        // Win32 GetDriveTypeW returns DRIVE_FIXED=3; the pinned windows-sys
+        // exposes the function but not that symbolic constant.
+        const DRIVE_FIXED: u32 = 3;
 
         let value = std::env::var(name)
             .map_err(|_| denied("startup_windows_directory_environment_missing"))?;
@@ -1381,7 +1385,10 @@ mod native {
                 "LOCALAPPDATA",
                 checked_parent_windows_environment_directory("LOCALAPPDATA")?,
             ),
-            ("TEMP", checked_parent_windows_environment_directory("TEMP")?),
+            (
+                "TEMP",
+                checked_parent_windows_environment_directory("TEMP")?,
+            ),
             ("TMP", checked_parent_windows_environment_directory("TMP")?),
             ("OKX_RESEARCH_EDGE_WSS_URL", edge_wss.to_owned()),
             ("OKX_RESEARCH_RUNTIME_ID", "windows-primary".to_owned()),
