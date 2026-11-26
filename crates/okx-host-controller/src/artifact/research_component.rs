@@ -626,19 +626,22 @@ fn validate_research_ready_jobs_for_policy(
             ));
         }
     }
-    // All Native Engine jobs are deliberately skipped for a Research-only
-    // release. The separate Research owner job alone supplies this image.
-    for name in [
-        "trading-engine-acceptance-windows",
-        "trading-engine-build-windows",
-        "host-controller-launcher-checks",
-    ] {
-        if jobs
-            .iter()
-            .any(|job| job.name == name && job.conclusion.as_deref() != Some("skipped"))
-        {
+    // Research-only Ready must not borrow a successful Engine/Host owner or
+    // regression job. Include retired legacy names for older accepted runs.
+    // GitHub may report an unexpanded matrix job name when the entire matrix
+    // was skipped; a skipped conclusion is explicitly permitted in that case.
+    for job in jobs {
+        let is_native_owner = matches!(
+            job.name.as_str(),
+            "trading-engine-acceptance-windows"
+                | "trading-engine-build-windows"
+                | "host-controller-launcher-checks"
+                | "engine-windows"
+                | "host-windows"
+        ) || job.name.starts_with("trading-engine-regressions-windows");
+        if is_native_owner && job.conclusion.as_deref() != Some("skipped") {
             return Err(HostControlError::ArtifactVerification(
-                "research-only release unexpectedly executed Native Engine CI",
+                "research-only release unexpectedly executed Native Engine/Host CI",
             ));
         }
     }
@@ -650,6 +653,31 @@ fn verify_research_zip_digest(artifact: &WorkflowArtifact, bytes: &[u8]) -> Host
         return Err(HostControlError::ArtifactHashMismatch);
     }
     Ok(())
+}
+
+/// Single pre-activation verification path for every Research manifest version.
+/// The manifest policy is untrusted until its archive digest, exact three-file
+/// shape, typed schema, source identity and payload hashes have been checked.
+/// Only then may it select the required Ready jobs of this first run attempt.
+/// This function is pure: no active CONTROL identity or installation pointer
+/// is consulted or modified until the caller receives its verified result.
+fn verify_research_ready_archive(
+    run: &WorkflowRun,
+    artifact: &WorkflowArtifact,
+    jobs: &[WorkflowJob],
+    zip_bytes: &[u8],
+    expected_source_tree: &str,
+) -> HostControlResult<(InstalledResearch, Vec<u8>)> {
+    verify_research_zip_digest(artifact, zip_bytes)?;
+    let (record, worker, policy) = parse_research_component_archive(
+        zip_bytes,
+        &run.head_sha,
+        expected_source_tree,
+        run.id,
+        artifact.id,
+    )?;
+    validate_research_ready_jobs_for_policy(policy, run, artifact, jobs)?;
+    Ok((record, worker))
 }
 
 pub async fn deploy_research(
@@ -673,9 +701,9 @@ pub async fn deploy_research(
             "research component is not from accepted PR CI",
         ));
     }
-    // DeployResearch accepts only the independent three-file Research archive,
-    // whose manifest has an explicitly selected v1 or v2 Ready policy. Native
-    // bundles can never bypass these checks or enter Research-only deploy.
+    // DeployResearch accepts only the independent three-file Research archive.
+    // Native bundles cannot enter Research-only deploy, and v1/v2/v3 archives
+    // select their exact Ready policy only after strict archive verification.
     if artifact.name != format!("okx-research-component-{}", run.head_sha) {
         return Err(HostControlError::ArtifactVerification(
             "standalone research artifact name does not bind to PR head",
@@ -686,11 +714,6 @@ pub async fn deploy_research(
     let jobs = github
         .workflow_run_attempt_jobs(run_id, run.run_attempt)
         .await?;
-    // Retain the original v1 Ready gate *before* fetching an archive. V2
-    // deliberately pins the same seven names today; its explicit manifest
-    // policy is then checked again below. Any future status migration must
-    // update both gates atomically and may only fail closed in older CONTROL.
-    validate_research_ready_jobs_for_policy(ReadyEvidencePolicy::LegacyV1, &run, &artifact, &jobs)?;
     if !valid_hex(expected_source_tree, 40)
         || github.repository_commit_tree(&run.head_sha).await? != expected_source_tree
         || github.repository_commit_tree("main").await? != expected_source_tree
@@ -698,20 +721,9 @@ pub async fn deploy_research(
         return Err(HostControlError::ArtifactSourceTreeMismatch);
     }
     let zip_bytes = github.download_artifact_zip(artifact_id).await?;
-    verify_research_zip_digest(&artifact, &zip_bytes)?;
     let archive_ready = Instant::now();
-    let (record, worker, policy) = parse_research_component_archive(
-        &zip_bytes,
-        &run.head_sha,
-        expected_source_tree,
-        run_id,
-        artifact_id,
-    )?;
-    // This untrusted archive can only *select* a policy after its own ZIP
-    // digest, immutable source tree, three-file shape and typed manifest have
-    // been verified. No installation mutation happens before the exact
-    // policy-specific Ready jobs from this run attempt have all succeeded.
-    validate_research_ready_jobs_for_policy(policy, &run, &artifact, &jobs)?;
+    let (record, worker) =
+        verify_research_ready_archive(&run, &artifact, &jobs, &zip_bytes, expected_source_tree)?;
     verify_active_control_identity()?;
     let verified = Instant::now();
     let (status, staged) = activate_verified_research_image(supervisor, &record, &worker)?;
@@ -1517,6 +1529,168 @@ mod tests {
             })
             .collect();
         (run, artifact, jobs)
+    }
+
+    fn ready_archive_fixture(
+        policy: ReadyEvidencePolicy,
+    ) -> (WorkflowRun, WorkflowArtifact, Vec<WorkflowJob>, Vec<u8>) {
+        let zip = match policy {
+            ReadyEvidencePolicy::LegacyV1 => standalone_fixture().1,
+            ReadyEvidencePolicy::NamedV2 => standalone_v2_fixture().1,
+            ReadyEvidencePolicy::NamedV3 => standalone_v3_fixture().1,
+        };
+        let (run, mut artifact, jobs) = match policy {
+            ReadyEvidencePolicy::LegacyV1 | ReadyEvidencePolicy::NamedV2 => ready_jobs(),
+            ReadyEvidencePolicy::NamedV3 => ready_jobs_v3(),
+        };
+        artifact.digest = Some(format!("sha256:{}", sha256_hex(&zip)));
+        (run, artifact, jobs, zip)
+    }
+
+    fn verify_ready_fixture(
+        run: &WorkflowRun,
+        artifact: &WorkflowArtifact,
+        jobs: &[WorkflowJob],
+        zip: &[u8],
+    ) -> HostControlResult<(InstalledResearch, Vec<u8>)> {
+        verify_research_ready_archive(run, artifact, jobs, zip, &"b".repeat(40))
+    }
+
+    #[test]
+    fn deploy_research_pre_activation_path_accepts_exact_v1_v2_v3_ready_rosters() {
+        // Exercise the exact production helper invoked by DeployResearch,
+        // not a manifest parse and separate status check that can conceal an
+        // earlier unconditional legacy gate.
+        for policy in [
+            ReadyEvidencePolicy::LegacyV1,
+            ReadyEvidencePolicy::NamedV2,
+            ReadyEvidencePolicy::NamedV3,
+        ] {
+            let (run, artifact, jobs, zip) = ready_archive_fixture(policy);
+            let (record, worker) = verify_ready_fixture(&run, &artifact, &jobs, &zip).unwrap();
+            assert_eq!(record.run_id, run.id);
+            assert_eq!(record.artifact_id, artifact.id);
+            assert_eq!(record.source_head_sha, run.head_sha);
+            assert_eq!(record.source_tree, "b".repeat(40));
+            assert_eq!(record.worker_sha256, sha256_hex(&worker));
+            assert_eq!(worker, fixture_pe_image());
+        }
+        let (run, artifact, jobs, zip) = ready_archive_fixture(ReadyEvidencePolicy::NamedV3);
+        assert!(
+            validate_research_ready_jobs_for_policy(
+                ReadyEvidencePolicy::LegacyV1,
+                &run,
+                &artifact,
+                &jobs
+            )
+            .is_err()
+        );
+        assert!(verify_ready_fixture(&run, &artifact, &jobs, &zip).is_ok());
+    }
+
+    #[test]
+    fn deploy_research_pre_activation_path_rejects_wrong_ready_policy_or_provenance() {
+        for policy in [
+            ReadyEvidencePolicy::LegacyV1,
+            ReadyEvidencePolicy::NamedV2,
+            ReadyEvidencePolicy::NamedV3,
+        ] {
+            let (run, artifact, jobs, zip) = ready_archive_fixture(policy);
+            let wrong_jobs = match policy {
+                ReadyEvidencePolicy::LegacyV1 | ReadyEvidencePolicy::NamedV2 => ready_jobs_v3().2,
+                ReadyEvidencePolicy::NamedV3 => ready_jobs().2,
+            };
+            assert!(verify_ready_fixture(&run, &artifact, &wrong_jobs, &zip).is_err());
+
+            let mut missing = jobs.clone();
+            missing.pop();
+            assert!(verify_ready_fixture(&run, &artifact, &missing, &zip).is_err());
+
+            let mut failed = jobs.clone();
+            failed[0].conclusion = Some("failure".into());
+            assert!(verify_ready_fixture(&run, &artifact, &failed, &zip).is_err());
+
+            let mut duplicate = jobs.clone();
+            duplicate.push(jobs[0].clone());
+            assert!(verify_ready_fixture(&run, &artifact, &duplicate, &zip).is_err());
+
+            let mut stale_attempt = run.clone();
+            stale_attempt.run_attempt = 2;
+            assert!(verify_ready_fixture(&stale_attempt, &artifact, &jobs, &zip).is_err());
+
+            let mut foreign_job = jobs.clone();
+            foreign_job[0].head_sha = "c".repeat(40);
+            assert!(verify_ready_fixture(&run, &artifact, &foreign_job, &zip).is_err());
+
+            let mut bad_digest = artifact.clone();
+            bad_digest.digest = Some(format!("sha256:{}", "0".repeat(64)));
+            assert!(verify_ready_fixture(&run, &bad_digest, &jobs, &zip).is_err());
+
+            let mut corrupt_zip = zip.clone();
+            corrupt_zip[0] ^= 1;
+            assert!(verify_ready_fixture(&run, &artifact, &jobs, &corrupt_zip).is_err());
+
+            assert!(
+                verify_research_ready_archive(&run, &artifact, &jobs, &zip, &"c".repeat(40))
+                    .is_err()
+            );
+        }
+
+        // Recalculate the outer digest to simulate a self-consistent yet
+        // malicious archive. Typed v3 policy and the exact three-file shape
+        // still must fail before Research activation is reachable.
+        let (run, mut artifact, jobs, _) = ready_archive_fixture(ReadyEvidencePolicy::NamedV3);
+        let (mut manifest, _) = standalone_v3_fixture();
+        manifest["ci_status_policy"] = json!("okx.github.actions.research-ready/v2");
+        let bad_policy_zip = standalone_fixture_zip(manifest.clone(), &[], None);
+        artifact.digest = Some(format!("sha256:{}", sha256_hex(&bad_policy_zip)));
+        assert!(verify_ready_fixture(&run, &artifact, &jobs, &bad_policy_zip).is_err());
+
+        manifest["ci_status_policy"] = json!("okx.github.actions.research-ready/v3");
+        let extra_native_zip =
+            standalone_fixture_zip(manifest, &[("okx-agent.exe", b"native")], None);
+        artifact.digest = Some(format!("sha256:{}", sha256_hex(&extra_native_zip)));
+        assert!(verify_ready_fixture(&run, &artifact, &jobs, &extra_native_zip).is_err());
+    }
+
+    #[test]
+    fn research_only_ready_rejects_successful_legacy_and_current_native_jobs() {
+        let native_names = [
+            "trading-engine-acceptance-windows",
+            "trading-engine-build-windows",
+            "host-controller-launcher-checks",
+            "engine-windows",
+            "host-windows",
+            "trading-engine-regressions-windows (engine)",
+            "trading-engine-regressions-windows (host)",
+            "trading-engine-regressions-windows (execution)",
+            "trading-engine-regressions-windows (research)",
+            // GitHub exposes this unexpanded matrix label when its parent is
+            // skipped, so ensure it cannot be accepted if it later succeeds.
+            "trading-engine-regressions-windows (${{ matrix.suite }})",
+        ];
+        for policy in [ReadyEvidencePolicy::LegacyV1, ReadyEvidencePolicy::NamedV3] {
+            let (run, artifact, jobs, zip) = ready_archive_fixture(policy);
+            for name in native_names {
+                let mut with_native = jobs.clone();
+                with_native.push(WorkflowJob {
+                    run_id: run.id,
+                    name: name.into(),
+                    status: "completed".into(),
+                    conclusion: Some("success".into()),
+                    head_sha: run.head_sha.clone(),
+                });
+                assert!(
+                    verify_ready_fixture(&run, &artifact, &with_native, &zip).is_err(),
+                    "{policy:?} accepted successful Native owner {name}"
+                );
+                with_native.last_mut().unwrap().conclusion = Some("skipped".into());
+                assert!(
+                    verify_ready_fixture(&run, &artifact, &with_native, &zip).is_ok(),
+                    "{policy:?} rejected skipped Native owner {name}"
+                );
+            }
+        }
     }
 
     #[test]

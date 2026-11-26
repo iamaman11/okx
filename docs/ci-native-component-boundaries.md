@@ -28,6 +28,12 @@ jobs were removed from the main workflow.
 | Mixed Research + Host with proven unchanged Engine dependency closure | Research and Host consumers | `research-windows` and `host-windows`, no Engine compilation | Separate Research/Host evidence; not a replacement Native base |
 | Unknown/shared impact, unsafe mixed changes, renames, incomplete diff | All potentially affected consumers | Full Native matrix (fail closed) | Only if accepted |
 
+Research coverage is monotonic across owner combinations: adding Host source
+changes to an otherwise Research-only PR still requires `cloudflare-mcp` and
+the live Research MCP/DO/WSS loopback witness in `research-windows`. It does
+**not** authorize creation of a Research-only standalone release artifact from
+mixed-owner changes. Negative routing mutations cover both requirements.
+
 The host-only source exception remains intentionally **narrow**: just Rust
 implementation files inside the two host crates. A Host or Research manifest
 change takes the corresponding scoped route **only if a separate resolver proof
@@ -62,6 +68,12 @@ collector manifest. Engine's SQLite writer and source-frontier fixtures retain
 their serial test settings. Research runs its library tests, IPC process tests
 and K9 in its own suite. The release build uses the same source tree.
 Publication verifies the success of every suite.
+Every selected Engine/Host/Execution Cargo package must report at least one
+actually passed test, even if Cargo exits successfully; zero-test binary
+targets are allowed provided another target in the package executed tests.
+The Full Windows Research matrix separately requires all ten real-process IPC
+cases (zero ignored/filtered), matching the owner-only Research gate. These
+checks reuse existing jobs and do not add a matrix cell or runner.
 
 The four serialized, clock-sensitive Trading Engine witnesses also record nine
 monotonic lifecycle phase durations each in the existing financial JSON report
@@ -183,6 +195,10 @@ the strict three-file `okx.windows.research-component/v3` manifest and uploads
 the raw `okx-research-component-<PR_HEAD_SHA>` PR CI artifact. CONTROL accepts
 it only after checking the exact successful Ready run **attempt**, required
 job results, non-expired artifact digest, and equal GitHub tested/main trees.
+The deploy-side CONTROL pre-activation path first verifies the archive SHA-256
+and typed three-file manifest, then selects its explicit v1/v2/v3 Ready-job
+roster. Research v3 is **not** subjected to the retired seven-name v1 roster;
+successful Engine/Host/matrix jobs remain forbidden on Research-only releases.
 After a source-identical merge, main CI may publish the identical ZIP with
 `published-research-origin.json` and `SHA256SUMS.txt` under the immutable,
 append-only `research-component-<MERGE_SHA>` tag; that release does not install
