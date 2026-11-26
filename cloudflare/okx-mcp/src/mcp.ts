@@ -161,9 +161,19 @@ export function operationTrace(view:'operation'|'research',reference:string|unde
  const owner=view==='research'?'research_job_catalog':'trading_engine';
  const data=isObject(projected.data)?projected.data:undefined;
  const job=data&&isObject(data.job)?data.job:undefined;
+ const researchRequest=view==='research'&&reference?.startsWith('request:')?reference.slice(8):undefined;
+ // A retry legitimately has a different request ID from the original job.
+ // Only the Research owner may attest that its bounded lookup matched the
+ // exact queried ID. Older Research owners remain valid for the *original*
+ // invocation alone; a present but mismatched attestation fails closed.
+ const matchedResearchRequest=researchRequest!==undefined&&
+   /^[A-Za-z0-9_.:-]{1,128}$/.test(researchRequest)&&
+   data?.reference_kind==='request_id'&&data.matched_request_id===researchRequest;
+ const originalResearchRequest=researchRequest!==undefined&&
+   data?.matched_request_id===undefined&&job?.origin_invocation===researchRequest;
  const bound=view==='research'?data?.state!=='OBSERVED'||
    (job&&typeof job.id==='string'&&job.id.length===64&&/^[a-f0-9]+$/.test(job.id)&&
-    (reference?.startsWith('request:')?job.origin_invocation===reference.slice(8):job.id===reference)):
+    (researchRequest!==undefined?(matchedResearchRequest||originalResearchRequest):job.id===reference)):
    !!data&&data.reference===reference&&(!reference?.startsWith('request:')||
     (data.origin_request_id===reference.slice(8)&&
      (data.state==='NOT_OBSERVED'||
