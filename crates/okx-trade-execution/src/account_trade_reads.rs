@@ -115,10 +115,10 @@ impl AccountStore {
                         scope,
                         &format!("replace_cancel_{}", &intent.request_hash[..40]),
                     )?;
-                    if let Some(ref candidate) = candidate {
-                        if candidate.kind != "cancel" {
-                            return Err(StoreError::Invalid("REPLACE_CANDIDATE_KIND_MISMATCH"));
-                        }
+                    if let Some(ref candidate) = candidate
+                        && candidate.kind != "cancel"
+                    {
+                        return Err(StoreError::Invalid("REPLACE_CANDIDATE_KIND_MISMATCH"));
                     }
                     snapshot.unverified_cancel_candidate = candidate;
                 }

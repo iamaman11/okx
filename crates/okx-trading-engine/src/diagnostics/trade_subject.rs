@@ -91,13 +91,15 @@ fn project(snapshot: TradeSubjectDiagnosticSnapshot, subject: TradeDiagnosticSub
                 // command normalizes it before persisting the new intent.
                 // The original reference is not durably bound, and a forged
                 // cancel with the derived key must never become proof.
-                let candidate = unverified_cancel_candidate.map(|receipt| json!({
-                    "operation_id":receipt.operation_id,"kind":receipt.kind,
-                    "state":if receipt.result_ref == "POSTING" {"STARTED_SQL_ONLY"}
-                        else {"LOCAL_RECEIPT_ONLY"},
-                    "causal_link":"UNVERIFIED",
-                    "committed_at_ms":receipt.committed_at
-                }));
+                let candidate = unverified_cancel_candidate.map(|receipt| {
+                    json!({
+                        "operation_id":receipt.operation_id,"kind":receipt.kind,
+                        "state":if receipt.result_ref == "POSTING" {"STARTED_SQL_ONLY"}
+                            else {"LOCAL_RECEIPT_ONLY"},
+                        "causal_link":"UNVERIFIED",
+                        "committed_at_ms":receipt.committed_at
+                    })
+                });
                 json!({"state":"NOT_EVALUATED",
                     "observed_stage":"IDEMPOTENCY_KEY_INTENT_OBSERVED",
                     "first_unproven_fact":"REPLACE_COMMAND_AND_ORIGINAL_REFERENCE_BINDING",
@@ -114,11 +116,7 @@ fn project(snapshot: TradeSubjectDiagnosticSnapshot, subject: TradeDiagnosticSub
     }
 }
 
-pub(super) async fn read(
-    account: &AccountResources,
-    installation: &str,
-    reference: &str,
-) -> Value {
+pub(super) async fn read(account: &AccountResources, installation: &str, reference: &str) -> Value {
     let mut result = json!({
         "schema":"okx.operation-diagnostics/v1",
         "owner":"execution.unified_finance",
@@ -145,7 +143,8 @@ pub(super) async fn read(
         return result;
     }
     let (owner, scope) = account.execution.store.scope();
-    if owner.installation_id() != installation || scope != account.configuration.account_key.wire() {
+    if owner.installation_id() != installation || scope != account.configuration.account_key.wire()
+    {
         result["reason_code"] = "ACCOUNT_IDENTITY_MISMATCH".into();
         result["observed_stage"] = "SCOPE_CHECK".into();
         result["first_unproven_fact"] = "MATCHING_ACCOUNT_AND_INSTALLATION".into();
@@ -186,9 +185,18 @@ mod tests {
     fn subjects_are_explicit_not_request_or_intent_aliases() {
         assert_eq!(parse("request:abc"), None);
         assert_eq!(parse("intent:abc"), None);
-        assert_eq!(parse("cancel:key12345").unwrap().0, TradeDiagnosticSubject::Cancel);
-        assert_eq!(parse("close:key12345").unwrap().0, TradeDiagnosticSubject::Close);
-        assert_eq!(parse("replace:key12345").unwrap().0, TradeDiagnosticSubject::Replace);
+        assert_eq!(
+            parse("cancel:key12345").unwrap().0,
+            TradeDiagnosticSubject::Cancel
+        );
+        assert_eq!(
+            parse("close:key12345").unwrap().0,
+            TradeDiagnosticSubject::Close
+        );
+        assert_eq!(
+            parse("replace:key12345").unwrap().0,
+            TradeDiagnosticSubject::Replace
+        );
     }
 
     #[test]
@@ -206,7 +214,12 @@ mod tests {
             };
             let value = project(snapshot, subject);
             assert_eq!(value["state"], "NOT_OBSERVED");
-            assert!(value["next_action"].as_str().unwrap().ends_with("do_not_resend"));
+            assert!(
+                value["next_action"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("do_not_resend")
+            );
         }
     }
 
@@ -217,10 +230,7 @@ mod tests {
             std::future::pending(),
         )
         .await;
-        assert_eq!(
-            result,
-            Err("UNIFIED_FINANCE_DIAGNOSTIC_TIMEOUT".to_owned())
-        );
+        assert_eq!(result, Err("UNIFIED_FINANCE_DIAGNOSTIC_TIMEOUT".to_owned()));
         assert_eq!(
             super::super::native_intent::READ_BUDGET,
             Duration::from_millis(250)

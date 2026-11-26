@@ -1,7 +1,7 @@
 //! Read-only diagnostics project actual owners; they never change access or replay an intent.
 pub(crate) mod native_intent;
-mod trade_subject;
 mod protection_trace;
+mod trade_subject;
 pub(crate) use protection_trace::{
     ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
 };
