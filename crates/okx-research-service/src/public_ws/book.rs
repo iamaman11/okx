@@ -235,4 +235,106 @@ mod tests {
         .unwrap();
         assert_eq!(book.snapshot().unwrap().asks.last().unwrap().price, "21");
     }
+
+    #[test]
+    fn malformed_full_snapshots_revoke_previous_research_book_until_fresh_snapshot() {
+        let cases = [
+            (
+                "BOOK_SEQUENCE_INVALID",
+                row(
+                    -1,
+                    -1,
+                    json!([["11", "1", "0", "1"]]),
+                    json!([["9", "1", "0", "1"]]),
+                ),
+            ),
+            (
+                "BOOK_LEVEL_INVALID",
+                row(
+                    20,
+                    -1,
+                    json!([["0", "1", "0", "1"]]),
+                    json!([["9", "1", "0", "1"]]),
+                ),
+            ),
+            (
+                "BOOK_LEVEL_INVALID",
+                row(
+                    20,
+                    -1,
+                    json!([["11", "1", "0", "0"]]),
+                    json!([["9", "1", "0", "1"]]),
+                ),
+            ),
+            (
+                "BOOK_LEVEL_INVALID",
+                row(
+                    20,
+                    -1,
+                    json!([["11", "1", "0", "1"]]),
+                    json!([["9", "-1", "0", "1"]]),
+                ),
+            ),
+            (
+                "BOOK_CROSSED",
+                row(
+                    20,
+                    -1,
+                    json!([["8", "1", "0", "1"]]),
+                    json!([["9", "1", "0", "1"]]),
+                ),
+            ),
+            (
+                "BOOK_EMPTY",
+                row(20, -1, json!([["11", "1", "0", "1"]]), json!([])),
+            ),
+        ];
+        for (reason, invalid_snapshot) in cases {
+            let mut book = Book::default();
+            book.apply("snapshot", initial()).unwrap();
+            assert_eq!(book.apply("snapshot", invalid_snapshot), Err(reason));
+            assert!(
+                book.snapshot().is_none(),
+                "{reason}: stale book must be erased"
+            );
+            assert_eq!(
+                book.apply("update", row(21, 20, json!([]), json!([]))),
+                Err("BOOK_SEQUENCE_INVALID"),
+                "{reason}: an update cannot re-establish a broken snapshot",
+            );
+            book.apply("snapshot", initial()).unwrap();
+            assert_eq!(book.snapshot().unwrap().sequence, 10);
+        }
+    }
+
+    #[test]
+    fn invalid_timestamp_and_excessive_depth_reject_without_retaining_previous_book() {
+        let mut book = Book::default();
+        book.apply("snapshot", initial()).unwrap();
+        let mut timestamp = initial();
+        timestamp["ts"] = json!("1790-not-a-timestamp");
+        assert_eq!(
+            book.apply("snapshot", timestamp),
+            Err("BOOK_TIMESTAMP_INVALID")
+        );
+        assert!(book.snapshot().is_none());
+
+        book.apply("snapshot", initial()).unwrap();
+        let excessive_asks: Vec<Value> = (1..=DEPTH + 1)
+            .map(|index| json!([(index + 10).to_string(), "1", "0", "1"]))
+            .collect();
+        assert_eq!(
+            book.apply(
+                "snapshot",
+                row(
+                    20,
+                    -1,
+                    json!(excessive_asks),
+                    json!([["9", "1", "0", "1"]]),
+                ),
+            ),
+            Err("BOOK_LEVEL_INVALID"),
+        );
+        assert!(book.snapshot().is_none());
+    }
 }
