@@ -177,9 +177,7 @@ fn t02_funding_composition_rejects_non_swap_before_source_reads() {
         validate_composition_source_products(&spot, true, true).unwrap_err(),
         "composition.sources.open_interest:UNSUPPORTED_PRODUCT"
     );
-    assert!(
-        validate_composition_source_products(&["BTC-USDT-SWAP".into()], true, true).is_ok()
-    );
+    assert!(validate_composition_source_products(&["BTC-USDT-SWAP".into()], true, true).is_ok());
     assert!(validate_composition_source_products(&spot, false, false).is_ok());
 }
 
@@ -245,13 +243,9 @@ fn t06_funding_result_schema_invalidates_only_funding_jobs() {
 
     // Reproduce the exact persisted pre-T06 key for a closed historical
     // query. The new key must not replay that completed stale artifact.
-    let old = okx_research::canonical_sha256(&(
-        "market/448.2",
-        &funding,
-        &Option::<Value>::None,
-        0_i64,
-    ))
-    .unwrap();
+    let old =
+        okx_research::canonical_sha256(&("market/448.2", &funding, &Option::<Value>::None, 0_i64))
+            .unwrap();
     let new = okx_research::canonical_sha256(&(
         market_job_schema(&funding.fields),
         &funding,
@@ -275,13 +269,9 @@ fn t06_funding_result_schema_invalidates_only_funding_jobs() {
     // Reading floats with exact round-trip precision can change any
     // calculation, not just funding. Preserve completed old job IDs for
     // result/status/export reads; new requests use the new namespace.
-    let legacy_returns = okx_research::canonical_sha256(&(
-        "market/448.2",
-        &returns,
-        &Option::<Value>::None,
-        0_i64,
-    ))
-    .unwrap();
+    let legacy_returns =
+        okx_research::canonical_sha256(&("market/448.2", &returns, &Option::<Value>::None, 0_i64))
+            .unwrap();
     let current_returns = okx_research::canonical_sha256(&(
         market_job_schema(&returns.fields),
         &returns,
@@ -635,8 +625,7 @@ fn row() -> Loaded {
 fn c20_rolling_mean_reuses_existing_market_pipeline_without_new_routing() {
     let query = request(vec!["rolling_mean"]);
     assert!(query.valid());
-    let plan =
-        planner::AnalysisPlan::build(&query.fields, query.start_ms, query.end_ms).unwrap();
+    let plan = planner::AnalysisPlan::build(&query.fields, query.start_ms, query.end_ms).unwrap();
     assert_eq!(plan.sources, std::collections::BTreeSet::from(["candles"]));
     let response = compute_row(row(), &query, None).unwrap();
     assert_eq!(response["units"]["rolling_mean"], "price");
@@ -1024,8 +1013,7 @@ fn t05_composition_reuses_closed_candles_and_projects_a_distinct_ratio() {
     assert!(output["metrics"]["w1"].as_f64().unwrap().abs() < 1e-12);
     assert_eq!(output["units"]["w1"], "ratio");
     Arc::make_mut(partial_fixture.bars.as_mut().unwrap()).remove(1);
-    let partial =
-        compute_row_checked(partial_fixture, &request, None, composition, true).unwrap();
+    let partial = compute_row_checked(partial_fixture, &request, None, composition, true).unwrap();
     assert_eq!(partial["metrics"]["w1"], Value::Null);
     assert_eq!(partial["quality"], "partial");
 }
@@ -1068,8 +1056,8 @@ fn t15_public_window_extrema_share_candle_source_and_preserve_units() {
     );
     let mut partial_fixture = row();
     partial_fixture.bars = fixture.bars.clone();
-    let out = compute_row_checked(fixture, &request, None, checked.composition.as_ref(), true)
-        .unwrap();
+    let out =
+        compute_row_checked(fixture, &request, None, checked.composition.as_ref(), true).unwrap();
     assert_eq!(out["metrics"]["upper"], 110.0);
     assert_eq!(out["metrics"]["lower"], 99.0);
     assert_eq!(out["units"]["upper"], "price");
@@ -1092,17 +1080,20 @@ fn t07_event_graph_exposes_boolean_metrics_but_not_unconfirmed_future_outcomes()
     let mut query = request(vec!["returns"]);
     query.start_ms = 0;
     query.end_ms = 300_000;
-    query.composition = Some(Box::new(serde_json::from_value(json!({
-        "version":"okx.market.composition/v1",
-        "steps":[
-            {"id":"r1","op":"returns_series","input":"close"},
-            {"id":"above","op":"greater_than","input":"r1","threshold":0.0},
-            {"id":"entry","op":"rising_edge","input":"above"},
-            {"id":"previous","op":"lag","input":"close","period":1},
-            {"id":"label","op":"forward_return_label","input":"close","period":2,"when":"entry"}
-        ],
-        "result_steps":["above","entry","previous","label"]
-    })).unwrap()));
+    query.composition = Some(Box::new(
+        serde_json::from_value(json!({
+            "version":"okx.market.composition/v1",
+            "steps":[
+                {"id":"r1","op":"returns_series","input":"close"},
+                {"id":"above","op":"greater_than","input":"r1","threshold":0.0},
+                {"id":"entry","op":"rising_edge","input":"above"},
+                {"id":"previous","op":"lag","input":"close","period":1},
+                {"id":"label","op":"forward_return_label","input":"close","period":2,"when":"entry"}
+            ],
+            "result_steps":["above","entry","previous","label"]
+        }))
+        .unwrap(),
+    ));
     let mut fixture = row();
     fixture.bars = Ok(Arc::new(
         [100.0, 90.0, 95.0, 99.0, 120.0]
@@ -1142,8 +1133,7 @@ fn t07_event_graph_exposes_boolean_metrics_but_not_unconfirmed_future_outcomes()
 fn new_downside_operator_uses_existing_market_plan_and_projection() {
     let query = request(vec!["downside_volatility"]);
     assert!(query.valid());
-    let plan =
-        planner::AnalysisPlan::build(&query.fields, query.start_ms, query.end_ms).unwrap();
+    let plan = planner::AnalysisPlan::build(&query.fields, query.start_ms, query.end_ms).unwrap();
     assert_eq!(plan.sources, std::collections::BTreeSet::from(["candles"]));
     let output = compute_row(row(), &query, None).unwrap();
     assert_eq!(output["metrics"]["downside_volatility"], 0.0);

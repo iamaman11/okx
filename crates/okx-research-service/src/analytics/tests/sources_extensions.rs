@@ -501,12 +501,8 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
     .unwrap();
     let arithmetic = service.market(arithmetic_query, None, None).await.unwrap();
     let arithmetic_row = &arithmetic["rows"][0];
-    assert!(
-        (arithmetic_row["metrics"]["difference"].as_f64().unwrap() + 1. / 342.).abs() < 1e-12
-    );
-    assert!(
-        (arithmetic_row["metrics"]["relative"].as_f64().unwrap() - 18. / 19.).abs() < 1e-12
-    );
+    assert!((arithmetic_row["metrics"]["difference"].as_f64().unwrap() + 1. / 342.).abs() < 1e-12);
+    assert!((arithmetic_row["metrics"]["relative"].as_f64().unwrap() - 18. / 19.).abs() < 1e-12);
     assert_eq!(arithmetic_row["units"]["difference"], "ratio");
     assert_eq!(arithmetic_row["quality"], "complete");
     assert_candle_request(&transport);

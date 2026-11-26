@@ -32,12 +32,7 @@ fn fixture(service: &AnalyticsService, digit: char) -> (String, String) {
     (job, result)
 }
 
-fn record(
-    job: &str,
-    result: &str,
-    previous: Option<&str>,
-    hypothesis: &str,
-) -> ResearchRequest {
+fn record(job: &str, result: &str, previous: Option<&str>, hypothesis: &str) -> ResearchRequest {
     ResearchRequest::RecordDecision {
         job_id: job.into(),
         result_id: result.into(),
@@ -106,8 +101,7 @@ async fn service_decision_replay_revision_and_real_catalog_reopen_preserve_origi
     let bootstrap = service.sources.bootstrap.clone();
     drop(service);
     let scope =
-        okx_research_protocol::research_ipc::ResearchScope::new("decision-scope".into())
-            .unwrap();
+        okx_research_protocol::research_ipc::ResearchScope::new("decision-scope".into()).unwrap();
     drop(AnalyticsService::new_scoped(root.clone(), bootstrap.clone(), &scope).unwrap());
     let producer = crate::producer::Producer::new("a".repeat(64), None, None).unwrap();
     let reopened = AnalyticsService::new_existing_scoped_with_producer(

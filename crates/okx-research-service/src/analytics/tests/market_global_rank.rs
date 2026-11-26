@@ -94,11 +94,9 @@ fn t06_t07_t13_oi_provenance_is_stable_and_does_not_certify_a_signal() {
         excluded: None,
     };
     let first =
-        compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true)
-            .unwrap();
+        compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true).unwrap();
     let repeat =
-        compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true)
-            .unwrap();
+        compute_row_checked(fixture(), &query, None, checked.composition.as_ref(), true).unwrap();
     assert_eq!(first["source_captures"], repeat["source_captures"]);
     assert!(first["metrics"]["oi_return"].is_number());
     assert!(first["metrics"]["event"].is_null());
@@ -191,8 +189,7 @@ fn t02_t06_funding_events_join_price_returns_with_provenance_not_causal_signals(
     let repeated = compute_row_planned(fixture(), &query, None, &plan, true).unwrap();
     assert_eq!(first["source_captures"], repeated["source_captures"]);
     assert!(
-        (first["metrics"]["net_return"].as_f64().unwrap() - (199.0 / 198.0 - 1.0 + 0.002))
-            .abs()
+        (first["metrics"]["net_return"].as_f64().unwrap() - (199.0 / 198.0 - 1.0 + 0.002)).abs()
             < 1e-12
     );
     assert!(first["metrics"]["positive"].is_null());
@@ -491,8 +488,7 @@ fn t15_public_zscore_composes_price_deviation_into_a_causal_condition() {
     };
     let output = compute_row_planned(fixture(false), &query, None, &plan, true).unwrap();
     assert!(
-        (output["metrics"]["deviation"].as_f64().unwrap() - (1.0 / (2.0f64 / 3.0).sqrt()))
-            .abs()
+        (output["metrics"]["deviation"].as_f64().unwrap() - (1.0 / (2.0f64 / 3.0).sqrt())).abs()
             < 1e-10
     );
     assert_eq!(output["metrics"]["above"], true);
@@ -542,9 +538,7 @@ fn t02_t06_funding_and_open_interest_keep_independent_source_evidence() {
         excluded: None,
     };
     let output = compute_row_planned(loaded, &query, None, &plan, false).unwrap();
-    assert!(
-        (output["metrics"]["joint"].as_f64().unwrap() - (0.001 + 1.0 / 198.0)).abs() < 1e-12
-    );
+    assert!((output["metrics"]["joint"].as_f64().unwrap() - (0.001 + 1.0 / 198.0)).abs() < 1e-12);
     assert!(output["source_captures"]["open_interest"]["capture_hash"].is_string());
     assert!(output["source_captures"]["funding_rate"]["capture_hash"].is_string());
     assert_eq!(output["source_alignment"]["observed_oi_observations"], 100);
@@ -609,8 +603,7 @@ fn t02_t05_t06_public_ratio_divergence_uses_exact_oi_grid_and_null_denominator()
             < 1e-12
     );
     assert!(
-        (output["metrics"]["relative"].as_f64().unwrap() - price_return / oi_return).abs()
-            < 1e-12
+        (output["metrics"]["relative"].as_f64().unwrap() - price_return / oi_return).abs() < 1e-12
     );
     assert_eq!(output["units"]["difference"], "ratio");
     assert_eq!(output["source_alignment"]["expected_observations"], 100);
@@ -757,8 +750,7 @@ fn t06_public_rolling_pearson_uses_thirty_exact_return_pairs_without_oi_lookahea
     );
     query.composition.as_mut().unwrap().result_steps = vec!["signal".into()];
     let causal_plan = planner::AnalysisPlan::compile_market(&query).unwrap();
-    let rejected =
-        compute_row_planned(fixture(false), &query, None, &causal_plan, true).unwrap();
+    let rejected = compute_row_planned(fixture(false), &query, None, &causal_plan, true).unwrap();
     assert!(rejected["metrics"]["signal"].is_null());
     assert_eq!(
         rejected["composition_quality"]["signal"]["issues"][0]["reason"],
