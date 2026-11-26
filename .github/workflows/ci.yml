@@ -1274,7 +1274,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: research-ipc-cache
         with:
-          prefix-key: v0-rust
+          prefix-key: v1-rust
           shared-key: research-service-windows
           cache-workspace-crates: true
           save-if: false
@@ -1364,7 +1364,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: research-cache
         with:
-          prefix-key: v0-rust
+          prefix-key: v1-rust
           shared-key: research-service-windows
           cache-workspace-crates: true
           # PR merge-ref caches cannot warm other PRs. Only a manually seeded
@@ -1539,7 +1539,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: research-release-cache
         with:
-          prefix-key: v0-rust
+          prefix-key: v1-rust
           shared-key: research-service-windows
           cache-workspace-crates: true
           save-if: false
@@ -1931,6 +1931,9 @@ jobs:
 
   # Optional manual cache seed only. An accepted PR merge on main reuses its
   # Ready evidence and must not compile/link Engine again merely to warm cache.
+  # The Research v1 generation is a deliberate one-time rotation: cache entries
+  # are immutable. An existing exact hit cannot refresh outputs for later main
+  # trees; another explicit generation is required when a new seed is desired.
   trusted_main_cache_prime:
     name: warm-windows-cargo-cache (${{ matrix.profile }})
     needs: component_impact
@@ -1977,7 +1980,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: prime-cache
         with:
-          prefix-key: ${{ matrix.profile == 'tests' && 'v2-rust' || matrix.profile == 'release' && 'v1-rust' || 'v0-rust' }}
+          prefix-key: ${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}
           shared-key: ${{ matrix.profile == 'research' && 'research-service-windows' || format('trading-engine-{0}-windows', matrix.profile) }}
           cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}

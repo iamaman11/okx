@@ -14,7 +14,7 @@ const researchRelease = fs.readFileSync(path.join(root, '..', '..', 'scripts', '
 const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
   'okx-research-service', 'tests', 'ipc_process.rs'), 'utf8').replaceAll('\r\n', '\n');
 const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
-const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || matrix.profile == 'release' && 'v1-rust' || 'v0-rust' }}";
+const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}";
 const warmSharedKey = "${{ matrix.profile == 'research' && 'research-service-windows' || format('trading-engine-{0}-windows', matrix.profile) }}";
 // Mixed Research+Host must keep its live transport witnesses in the owner
 // runner; Research-only executes them in the separately required IPC runner.
@@ -39,9 +39,9 @@ const nativeCacheJobs = [
   ['trading_engine_isolation_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_build_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
-  ['research_ipc_windows', 'v0-rust', 'research-service-windows', 'false'],
-  ['research_service_tests_windows', 'v0-rust', 'research-service-windows', 'false'],
-  ['research_component_release_windows', 'v0-rust', 'research-service-windows', 'false'],
+  ['research_ipc_windows', 'v1-rust', 'research-service-windows', 'false'],
+  ['research_service_tests_windows', 'v1-rust', 'research-service-windows', 'false'],
+  ['research_component_release_windows', 'v1-rust', 'research-service-windows', 'false'],
   ['trusted_main_cache_prime', warmPrefix, warmSharedKey, mainCacheWriter],
 ];
 
@@ -143,7 +143,7 @@ function validate(yaml, fileNames) {
   const research = job('research_service_tests_windows');
   const researchIpc = job('research_ipc_windows');
   const researchComponent = job('research_component_release_windows');
-  assert.match(research, /prefix-key: v0-rust/);
+  assert.match(research, /prefix-key: v1-rust/);
   assert.match(research, /shared-key: research-service-windows/);
   assert.match(research, /save-if: false/,
     'PR_RESEARCH_CANNOT_WRITE_REUSABLE_ACCEPTED_MAIN_CACHE');
