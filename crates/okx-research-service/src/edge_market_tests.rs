@@ -184,10 +184,21 @@ async fn request(
     public: &IndependentOkxPublicSource,
     operation: Value,
 ) -> Result<Value, String> {
+    request_with_invocation(service, public, operation, None).await
+}
+
+async fn request_with_invocation(
+    service: &AnalyticsService,
+    public: &IndependentOkxPublicSource,
+    operation: Value,
+    invocation: Option<&str>,
+) -> Result<Value, String> {
     let frame = json!({
         "type":"request","schema":SCHEMA,"session_id":"fixture-research-session",
         "connection_generation":1,"request":{
-            "schema":"okx.agent.request/v1","request_id":"fixture-market-request","operation":operation
+            "schema":"okx.agent.request/v1",
+            "request_id":invocation.unwrap_or("fixture-market-request"),
+            "operation":operation
         }
     });
     let Some(IncomingFrame::Request { request, .. }) =
@@ -195,7 +206,11 @@ async fn request(
     else {
         panic!("expected Research request")
     };
-    dispatch(service, public, ResearchCommand::try_from(*request)?).await
+    let command = ResearchCommand::try_from(*request)?;
+    match invocation {
+        Some(id) => dispatch_with_invocation(service, public, id, command).await,
+        None => dispatch(service, public, command).await,
+    }
 }
 
 #[tokio::test]
@@ -352,7 +367,14 @@ async fn public_market_operations_work_from_research_owner_and_cursor_reads_pers
             "timeframe_ms":60000,"start_ms":60000,"end_ms":180000,"limit":1
         }
     });
-    let page = request(&service, &public, operation.clone()).await.unwrap();
+    let page = request_with_invocation(
+        &service,
+        &public,
+        operation.clone(),
+        Some("req_mcp_research_catalog_trace_001"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         page["universe_page"]["reference_generation"],
         found["reference_generation"]
@@ -395,6 +417,10 @@ async fn public_market_operations_work_from_research_owner_and_cursor_reads_pers
     assert_eq!(observed["owner"], "research_job_catalog");
     assert_eq!(observed["state"], "OBSERVED");
     assert_eq!(observed["job"]["state"], "completed");
+    assert_eq!(
+        observed["job"]["origin_invocation"],
+        "req_mcp_research_catalog_trace_001"
+    );
     assert_eq!(observed["read_only"], true);
     let response = response_for(
         "fixture-market-request",

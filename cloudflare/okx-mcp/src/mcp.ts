@@ -1,4 +1,4 @@
-import {PUBLIC_TOOLS,validTool} from './execution_tools.js';
+import {PUBLIC_TOOLS,isExecutionMutation,validTool} from './execution_tools.js';
 import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,TOOL_CONTRACT_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure,workerReleaseSourceTree} from './shared.js';
 const NORMAL_RESULT_BYTES=12_288;
 const RESEARCH_OWNER = {target_owner:'research'} as const;
@@ -52,6 +52,27 @@ function nativeEnvelope(value:Record<string,unknown>):Record<string,unknown>|und
    break;
  }
  return undefined;
+}
+/** Bind an early transport failure to the same request as the native call.
+ * Never accept a different native response identity as mutation proof.
+ */
+async function dispatchCorrelated(env:Env,request:Record<string,unknown>):Promise<Json>{
+ const expected=String(request.request_id);
+ const raw=await dispatchRuntime(env,request);
+ if(!isObject(raw))return {schema:'okx.direct-transport.result/v1',request_id:expected,
+   status:'FAILED',data:null,reason:'INVALID_RUNTIME_RESULT',retryable:false};
+ const native=nativeEnvelope(raw);
+ if((raw.request_id!==undefined&&raw.request_id!==expected)||
+    (native&&native.request_id!==expected)){
+   const research=request.target_owner==='research';
+   return {schema:'okx.direct-transport.result/v1',request_id:expected,
+     status:'UNKNOWN',data:null,reason:'RESPONSE_REQUEST_ID_MISMATCH',retryable:false,
+     scope:research?'research':'engine',
+     next_action:research?'inspect_research_job_or_idempotency_receipt':'inspect_exact_intent'};
+ }
+ // A pre-delivery DO error has no native request_id and is safe to bind.
+ // A malformed AgentResponse is already rejected by its strict mismatch.
+ return {...raw,request_id:expected} as Json;
 }
 function normalizedStatus(outer:Record<string,unknown>,frame:Record<string,unknown>,result:Record<string,unknown>|undefined):string{
  const outerStatus=stringField(outer,'status')?.toLowerCase();
@@ -161,6 +182,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
    return jsonRpcError(id,-32602,'strategy start requires expected_revision and configuration_digest from status');
  if(!published||!isObject(args)||(scopedAction!==null&&'action' in args)||
     !validTool(nativeName,nativeArgs))return jsonRpcError(id,-32602,'invalid tool action payload');
+ const edgeRequestId=requestId();
  try{
       if (name === "accounts") {
         if((args.action==="list"||args.action==="status")&&hasOnlyKeys(args,["action","account"])){
@@ -181,7 +203,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
           if(typeof args.alias!=="string"||typeof args.credential_ref!=="string"||typeof args.idempotency_key!=="string"
             ||typeof args.enabled!=="boolean"||!isObject(args.limits))return jsonRpcError(id,-32602,"invalid account connection");
           const request_digest=await sha256Hex(canonical(args));
-          const snapshot=await dispatchRuntime(env,{schema:"okx.agent.request/v1",request_id:requestId(),
+          const snapshot=await dispatchCorrelated(env,{schema:"okx.agent.request/v1",request_id:edgeRequestId,
             operation:{type:"connect_account",credential_ref:args.credential_ref,alias:args.alias,operation_id:args.idempotency_key,request_digest}});
           if(!isObject(snapshot)||snapshot.status!=="completed"||!isObject(snapshot.result)||!isObject(snapshot.result.account_key)
             ||snapshot.result.configuration_digest!==request_digest||snapshot.result.alias!==args.alias||snapshot.result.credential_ref!==args.credential_ref
@@ -315,41 +337,55 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
          pid:null,active_worker_sha256:null,installed_worker_sha256:null,process_generation:null}}}));
  }
  if(name==='market'&&args.action==='instruments'){
-   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+   return jsonRpc(id,toolResult(await dispatchCorrelated(env,{schema:'okx.agent.request/v1',request_id:edgeRequestId,
      ...RESEARCH_OWNER,
      operation:{type:'find_instruments',asset:args.asset,settle_currency:args.settle_currency??null,instrument_type:null}})));
  }
  if(name==='market'&&args.action==='snapshot'){
-   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+   return jsonRpc(id,toolResult(await dispatchCorrelated(env,{schema:'okx.agent.request/v1',request_id:edgeRequestId,
      ...RESEARCH_OWNER,
      operation:{type:'market_overview',instrument:args.instrument}})));
  }
  if(name==='market'&&args.action==='microstructure'){
-   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+   return jsonRpc(id,toolResult(await dispatchCorrelated(env,{schema:'okx.agent.request/v1',request_id:edgeRequestId,
      ...RESEARCH_OWNER,
      operation:{type:'market_microstructure',instrument:args.instrument,
        size_contracts:args.size_contracts??null}})));
  }
  if(name==='market'&&args.action==='capabilities'){
-   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+   return jsonRpc(id,toolResult(await dispatchCorrelated(env,{schema:'okx.agent.request/v1',request_id:edgeRequestId,
      ...RESEARCH_OWNER,
      operation:{type:'market_capabilities'}}),MARKET_CAPABILITIES_RESULT_BYTES));
  }
  if(name==='portfolio'&&args.action==='scenario'){
    const {action:scopedAction,...scenario}=args;
-   return jsonRpc(id,toolResult(await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:requestId(),
+   return jsonRpc(id,toolResult(await dispatchCorrelated(env,{schema:'okx.agent.request/v1',request_id:edgeRequestId,
       ...RESEARCH_OWNER,
       operation:{type:'portfolio_scenario',request:scenario}})));
  }
  const {account,...body}=nativeArgs;
  const payload=nativeName==='portfolio'?nativeArgs:nativeName==='diagnostics'?{reference:nativeArgs.reference??null,account:nativeArgs.account??null,view:nativeArgs.view??null,cycle_id:nativeArgs.cycle_id??null,limit:nativeArgs.limit??null}:body;
  const operation={type:nativeName,request:payload};
- const nativeRequestId=requestId();
+ const nativeRequestId=edgeRequestId;
  const researchRoute=nativeName==='research'||nativeName==='market'||
    (nativeName==='diagnostics'&&nativeArgs.view==='research')
    ?RESEARCH_OWNER:{};
- const reply=await dispatchRuntime(env,{schema:'okx.agent.request/v1',request_id:nativeRequestId,
+ const reply=await dispatchCorrelated(env,{schema:'okx.agent.request/v1',request_id:nativeRequestId,
    ...researchRoute,...(typeof account==='string'?{account}:{}),operation});
  return jsonRpc(id,toolResult(reply));
- }catch(error){return jsonRpc(id,toolResult(transportFailure(error instanceof Error?error.message:'transport failure')));}
+ }catch{
+   const research=nativeName==='research'||nativeName==='market'||
+     (nativeName==='diagnostics'&&nativeArgs.view==='research')||
+     (nativeName==='portfolio'&&nativeArgs.action==='scenario');
+   const mutation=isExecutionMutation(nativeName,nativeArgs.action)||
+     (nativeName==='accounts'&&!['list','status'].includes(String(nativeArgs.action)))||
+     (nativeName==='market'&&nativeArgs.action==='screen');
+   return jsonRpc(id,toolResult({schema:'okx.direct-transport.result/v1',request_id:edgeRequestId,
+     status:mutation?'UNKNOWN':'FAILED',data:null,
+     reason:mutation?(research?'RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB':
+       'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT'):'EDGE_DISPATCH_UNAVAILABLE',
+     retryable:!mutation,scope:research?'research':'engine',
+     next_action:mutation?(research?'inspect_research_job_or_idempotency_receipt':'inspect_exact_intent'):
+       'inspect_diagnostics'}));
+ }
 }};

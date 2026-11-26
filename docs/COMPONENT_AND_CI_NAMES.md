@@ -107,6 +107,30 @@ CI route**. Future changes confined to Research/Host owner-local modules can
 still use narrower routes according to the classifier; no new mandatory job
 or CI matrix cell is introduced by this diagnostic projection.
 
+### Follow an individual operation across Edge and its owner
+
+The MCP tool result already exposes `request_id`. Keep that **same exact ID**
+for transport failures before native dispatch and for native replies. A
+response carrying a different native ID is `UNKNOWN`, not an invented
+successful operation or permission to retry a mutation. The correct recovery
+is owner-specific: inspect the Engine's exact intent/ledger receipt for a
+trade, or the Research job/idempotency receipt for a Research mutation.
+
+Research Edge commands also bind that `request_id` to the existing typed
+`origin_invocation` field on **newly created** durable Research jobs. A caller
+can save the returned `job_id`, call Research `diagnostics.explain` with that
+job reference, and verify `job.origin_invocation == request_id` before
+following the bounded stage/reason evidence. An idempotent replay retains
+the original job origin; it must not rewrite durable provenance. This path
+does not need Engine, a secondary trace database or additional credentials.
+
+An Engine trade has a separate **intent reference**; its read-only
+`diagnostics.explain` remains keyed by the authorized account and that exact
+intent/protection reference, not by a guessed Research job ID. Edge transport
+failure is not evidence that an exchange POST did or did not happen. This
+release does not claim a global searchable log or fabricated final outcome:
+`request_id`, `job_id`, intent reference and owner are distinct typed facts.
+
 Do not switch production routing to the separate Research credential until
 CONTROL-owned Research startup, credential provisioning and Windows
 restart/rollback acceptance have been verified on the actual installation,

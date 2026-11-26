@@ -12,7 +12,7 @@ use okx_research_protocol::{
         AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentResponse, AgentResponseStatus, DataQuality,
         FRAME_LIMIT, IncomingFrame, OutgoingFrame, PRODUCT_CONTRACT, ResearchCommand, SCHEMA,
     },
-    research_ipc::ResearchScope,
+    research_ipc::{InvocationId, ResearchScope},
 };
 use std::{
     collections::HashSet,
@@ -492,7 +492,8 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
                             let public_data = public_data.clone();
                             requests.push(Box::pin(async move {
                                 let result = tokio::time::timeout(
-                                    REQUEST_DEADLINE, dispatch(&executor, &public_data, command)
+                                    REQUEST_DEADLINE,
+                                    dispatch_with_invocation(&executor, &public_data, &id, command)
                                 ).await.unwrap_or_else(|_| Err("RESEARCH_REQUEST_TIMEOUT".into()));
                                 (id.clone(), response_for(&id, result))
                             }));
@@ -503,6 +504,19 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
             },
         }
     }
+}
+
+/// The Edge request identity is also the durable Research job origin. An IPC
+/// invocation and an Edge invocation share the same bounded task-local scope;
+/// neither creates a finance permission, a new database or an extra process.
+async fn dispatch_with_invocation(
+    service: &AnalyticsService,
+    public_data: &IndependentOkxPublicSource,
+    request_id: &str,
+    command: ResearchCommand,
+) -> Result<serde_json::Value, String> {
+    let invocation = InvocationId::new(request_id.to_owned()).map_err(str::to_owned)?;
+    crate::invocation::scope(Some(invocation), dispatch(service, public_data, command)).await
 }
 
 async fn dispatch(
