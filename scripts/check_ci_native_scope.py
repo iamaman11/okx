@@ -339,10 +339,21 @@ def _self_test() -> None:
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
     assert "--filter-platform x86_64-pc-windows-msvc" in workflow
     protected = workflow.split("\n  required_ci:\n", 1)[1].split("\n  trading_engine_build_windows:\n", 1)[0]
-    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows]" in protected
-    for owner in ("trading_engine_acceptance_windows", "trading_engine_regressions_windows", "trading_engine_build_windows"):
+    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows]" in protected
+    for owner in ("trading_engine_acceptance_windows", "trading_engine_isolation_windows",
+                  "trading_engine_regressions_windows", "trading_engine_build_windows"):
         assert f"check_result '${{{{ needs.{owner}.result }}}}' success" in protected, f"CI_FINANCE_GATE_MISSING:{owner}"
         assert protected.count(f"check_result '${{{{ needs.{owner}.result }}}}' skipped") == 2, f"CI_SCOPE_EXCLUSION_MISSING:{owner}"
+    isolation = workflow.split("\n  trading_engine_isolation_windows:\n", 1)[1].split("\n  trading_engine_regressions_windows:\n", 1)[0]
+    finance = workflow.split("\n  trading_engine_acceptance_windows:\n", 1)[1].split("\n  trading_engine_isolation_windows:\n", 1)[0]
+    assert "name: engine-isolation-windows" in isolation, "ENGINE_ISOLATION_OWNER_NAME_REQUIRED"
+    assert "native_required != 'false'" in isolation, "FULL_ENGINE_ISOLATION_MUST_RUN"
+    for witness in ("STANDALONE_RESEARCH_MCP_WITNESS_NOT_RUN",
+                    "PROTECTION_CLEANUP_EXACT_SEVEN_TESTS_MISSING",
+                    "PROCESS_TREE_NOT_MEASURED", "MCP_NATIVE_LOAD_RECEIPT_INVALID"):
+        assert witness in isolation, f"ISOLATION_WITNESS_MISSING:{witness}"
+    assert "Mandatory current Rust financial property acceptance" in finance, "FINANCE_COLLECTOR_MUST_REMAIN"
+    assert "MCP DO WSS Native finance under isolated Research load" not in finance, "FINANCE_RUNNER_MUST_ISOLATE_CLOCKS"
     assert "['dependency-audit'].result }}\" success dependency-audit" in protected
     host = workflow.split("\n  host_controller_launcher_checks:\n", 1)[1].split("\n  trading_engine_acceptance_windows:\n", 1)[0]
     assert "needs.component_impact.outputs.component_scope == 'host-controller'" in host

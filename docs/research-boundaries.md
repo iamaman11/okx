@@ -149,6 +149,45 @@ candidate. An offline Research owner returns its own unavailable status.
 Independent Edge token registration, authenticated-session readback, clean
 restart/reboot, job compatibility, independent update and rollback evidence
 are required for installed acceptance.
+
+### P0 operator runbook: activate the independent Research Edge owner
+
+This is an explicit, one-time, typed CONTROL/accepted-release operation, not
+an automatic side effect of merging a PR. Before starting, record the installed
+Engine PID/SHA, Research SHA/process generation, CONTROL release parity, current
+Edge source tree and the accepted native/Edge contract. No exchange POST,
+Engine restart, manual EXE replacement or new process owner is authorized.
+
+1. Invoke `StopResearch` with the observed Research image SHA and generation;
+   verify Research is stopped and Engine PID/SHA are unchanged. Do not rotate
+   credentials while Research is desired or observed running.
+2. Invoke `ProvisionResearchRuntimeToken` through CONTROL. The new bearer is
+   stored only under the Research Windows Credential Manager target. Capture
+   **only** the returned `runtime_token_sha256`, never the bearer.
+3. Configure that exact 64-character lowercase SHA-256 as the protected GitHub
+   Actions **environment secret** `OKX_RESEARCH_RUNTIME_TOKEN_SHA256` in
+   `okx-succession-global-executor`; it must differ from Engine's configured
+   fingerprint. Do not commit it into `wrangler.jsonc`, echo it in logs or
+   override the Engine token. The deploy preflight and release-config generation
+   fail closed if the Research fingerprint is missing, malformed or equal.
+4. Invoke `StartResearch` with the verified installed Research image SHA and,
+   if required, its established catalog-scope fingerprint. Its
+   `RUNNING_UNVERIFIED` process status is not yet proof of an
+   authenticated session and may persist until Edge deployment completes.
+5. Only after the matching native release is accepted, explicitly dispatch
+   `cloudflare-mcp-deploy.yml` from exact `main` with
+   `initialize_clean_v2=false`. Require checked Worker tests, `/health`
+   `release_source_tree` equal to the deployed main tree and owner-authenticated
+   `/installation/inspect`. Then verify separately the **Research** WSS owner
+   is `PASS`/fresh, a read-only Research capabilities/status/result request
+   succeeds, and Engine's PID/SHA and authenticated Engine WSS remain stable.
+
+If an intermediate step fails or the fingerprint/provenance is uncertain, stop
+at that step and report the owner, code and first missing evidence. Never claim
+Research ready based only on its PID or a healthy Engine WSS. Do not deploy
+Edge-first, bypass the protected fingerprint, restart Engine to repair Research
+or use live financial operations as a connectivity probe.
+
 Separate Credential Manager targets and distinct crates are a code-level
 least-authority measure, **not** an OS security boundary when both processes
 run as the same Windows user.
