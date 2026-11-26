@@ -75,6 +75,7 @@ async fn failed_backtest_correlates_real_ipc_job_and_safe_trace() {
         worker_write,
         root.clone(),
         scope.clone(),
+        crate::producer::CompiledSource::new(None, None),
     ));
     let (host_read, host_write) = tokio::io::split(host);
     let mut writer = FramedWrite::new(host_write, codec());

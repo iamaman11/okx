@@ -202,12 +202,13 @@ pub async fn serve<R, W>(
     output: W,
     root: PathBuf,
     expected_scope: ResearchScope,
+    compiled_source: crate::producer::CompiledSource,
 ) -> Result<(), String>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    serve_with_source(input, output, root, expected_scope, None).await
+    serve_with_source(input, output, root, expected_scope, None, compiled_source).await
 }
 
 /// Serve the same typed Research commands using the public-only local source.
@@ -216,6 +217,7 @@ pub async fn serve_independent<R, W>(
     output: W,
     root: PathBuf,
     expected_scope: ResearchScope,
+    compiled_source: crate::producer::CompiledSource,
 ) -> Result<(), String>
 where
     R: AsyncRead + Unpin,
@@ -223,7 +225,15 @@ where
 {
     let provider = crate::independent_source::IndependentOkxPublicSource::new()?;
     let source = PublicSourceClient::new(Arc::new(provider));
-    serve_with_source(input, output, root, expected_scope, Some(source)).await
+    serve_with_source(
+        input,
+        output,
+        root,
+        expected_scope,
+        Some(source),
+        compiled_source,
+    )
+    .await
 }
 
 async fn serve_with_source<R, W>(
@@ -232,6 +242,7 @@ async fn serve_with_source<R, W>(
     root: PathBuf,
     expected_scope: ResearchScope,
     source: Option<PublicSourceClient>,
+    compiled_source: crate::producer::CompiledSource,
 ) -> Result<(), String>
 where
     R: AsyncRead + Unpin,
@@ -268,9 +279,11 @@ where
             permits: Semaphore::new(MAX_IN_FLIGHT),
         }))
     });
-    let producer = tokio::task::spawn_blocking(crate::producer::Producer::current)
-        .await
-        .map_err(|_| "WORKER_PRODUCER_UNAVAILABLE")??;
+    let producer = tokio::task::spawn_blocking(move || {
+        crate::producer::Producer::current_with_source(compiled_source)
+    })
+    .await
+    .map_err(|_| "WORKER_PRODUCER_UNAVAILABLE")??;
     let service = AnalyticsService::new_scoped_with_producer(
         root,
         source,
@@ -629,7 +642,17 @@ mod tests {
                 .send(bytes::Bytes::from(serde_json::to_vec(&hello).unwrap()))
                 .await
                 .unwrap();
-            assert!(serve(worker, output, root.clone(), expected).await.is_err());
+            assert!(
+                serve(
+                    worker,
+                    output,
+                    root.clone(),
+                    expected,
+                    crate::producer::CompiledSource::new(None, None),
+                )
+                .await
+                .is_err()
+            );
             assert!(!root.exists());
         }
     }
