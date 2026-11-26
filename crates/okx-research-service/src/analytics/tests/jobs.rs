@@ -798,9 +798,8 @@ fn edge_request_diagnostic_is_bounded_nonblocking_and_ambiguous_fail_closed() {
     let reader = jobs.clone();
     let request = origin.as_str().to_owned();
     let (tx, rx) = std::sync::mpsc::channel();
-    let thread = std::thread::spawn(move || {
-        tx.send(reader.diagnostic_by_invocation(&request)).unwrap()
-    });
+    let thread =
+        std::thread::spawn(move || tx.send(reader.diagnostic_by_invocation(&request)).unwrap());
     let result = rx.recv_timeout(std::time::Duration::from_millis(200));
     drop(lock);
     thread.join().unwrap();
