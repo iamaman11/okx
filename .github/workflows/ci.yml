@@ -1575,21 +1575,14 @@ jobs:
         if: github.event_name != 'pull_request'
         shell: pwsh
         run: throw 'MAIN_NATIVE_REQUIRES_EXACT_ACCEPTED_READY_ARTIFACT'
-      - name: Build only Engine against verified unchanged Windows owners
+      - name: Build standalone Engine component
         if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope == 'engine'
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          # Verify all actual installed-base bytes, not a path-only estimate.
-          # The exact changed-source set since that accepted base must be
-          # Engine-owned. Otherwise fail closed and require the full bundle.
-          & ./scripts/prepare-research-release.ps1 -VerifyOnly -EngineOnly
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $base = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') -Raw | ConvertFrom-Json
-          if ($base.scope.scope -cne 'engine' -or $base.scope.other_windows_cargo_closures_identical -ne $true -or
-              $base.current_head_sha -cne (git rev-parse HEAD).Trim()) { throw 'ENGINE_ONLY_BASE_NOT_PROVEN' }
+          # This artifact contains ONLY the Engine binary. No Research or Host
+          # binary is bundled, reused, or declared identical to an old accepted
+          # full release. A standalone owner can advance independently.
           $log = Join-Path $env:RUNNER_TEMP 'engine-only-build.log'
           cargo build --locked --release -p okx-trading-engine 2>&1 | Tee-Object -FilePath $log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1601,30 +1594,23 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or ($contract -join "`n") -cne '{"schema":"okx.engine.runtime-contract/v1","runtime_owner":"engine","research_child":false}') {
             throw 'ENGINE_COMPONENT_RUNTIME_CONTRACT_INVALID'
           }
-          $reused = [ordered]@{}
-          foreach ($name in @('okx-host-control.exe', 'okx-host-launcher.exe', 'okx-research-service.exe')) {
-            $item = $base.components.PSObject.Properties[$name].Value
-            if ($null -eq $item -or $item.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
-                $item.source_head_sha -cnotmatch '^[0-9a-f]{40}$') { throw "UNVERIFIED_REUSED_COMPONENT_$name" }
-            $reused[$name] = $item
-          }
           [ordered]@{
-            schema = 'okx.windows.engine-component/v1'
+            schema = 'okx.windows.engine-component/v2'
             repository_id = 1388071566
             source_head_sha = (git rev-parse HEAD).Trim()
             source_tree = (git rev-parse 'HEAD^{tree}').Trim()
             release_is_complete = $false
             installed_state_unchanged = $true
+            artifact_scope = 'engine_only'
+            other_windows_owners = 'NOT_EVALUATED'
             fresh_component = [ordered]@{
               name = 'okx-agent.exe'
               sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
               size = (Get-Item -LiteralPath $binary).Length
             }
-            reused_accepted_native_base_sha = $base.base_merge_sha
-            reused_verified_components = $reused
           } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $dist 'engine-component-proof.json') -Encoding utf8NoBOM
 
-      - name: Retain tested Engine-only bytes and exact unchanged component origins
+      - name: Retain independently tested Engine-only bytes
         if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope == 'engine'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

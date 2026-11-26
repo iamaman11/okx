@@ -970,20 +970,6 @@ mod tests {
         assert_eq!(result["read_only"], true);
         assert_eq!(result["central_budget"]["state"], "NOT_EVALUATED");
 
-        // A valid Edge request with no durable link must never be mistaken
-        // for an unexecuted intent or trigger a reconciliation/venue call.
-        let request_origin = make_request(
-            "operation-request-origin-read-001",
-            "fixture-a",
-            "request:req_unrecorded_trade",
-        );
-        let origin = query::dispatch(&ctx, &request_origin).await.result.unwrap();
-        assert_eq!(origin["state"], "NOT_OBSERVED");
-        assert_eq!(origin["reason_code"], "REQUEST_ORIGIN_NOT_RECORDED");
-        assert_eq!(origin["origin_request_id"], "req_unrecorded_trade");
-        assert!(origin["resolved_intent_reference"].is_null());
-        assert_eq!(origin["read_only"], true);
-
         let mismatch = make_request(
             "operation-explain-mismatch-001",
             "fixture-b",
@@ -1032,6 +1018,19 @@ mod tests {
             account.execution.store.sql_timing().observed_jobs,
             sql_before
         );
+        // Unlike the volatile protection trace above, an Engine request lookup
+        // intentionally performs a bounded read of the existing SQL owner.
+        let request_origin = make_request(
+            "operation-request-origin-read-001",
+            "fixture-a",
+            "request:req_unrecorded_trade",
+        );
+        let origin = query::dispatch(&ctx, &request_origin).await.result.unwrap();
+        assert_eq!(origin["state"], "NOT_OBSERVED");
+        assert_eq!(origin["reason_code"], "REQUEST_ORIGIN_NOT_RECORDED");
+        assert_eq!(origin["origin_request_id"], "req_unrecorded_trade");
+        assert!(origin["resolved_intent_reference"].is_null());
+        assert_eq!(origin["read_only"], true);
         let account_request = AgentRequest {
             schema: okx_ipc_contracts::AGENT_REQUEST_SCHEMA_V1.into(),
             request_id: "account-financial-explain-001".into(),
