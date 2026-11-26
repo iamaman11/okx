@@ -72,6 +72,41 @@ The independent runtime cutover has four separately provable boundaries:
    inputs remain on the complete financial route. A scope classification is
    never proof that an installed process is independently managed.
 
+### One runtime readback, separate owner evidence
+
+`CONTROL Status` (also `TransportStatus`) contains an additive
+`owner_diagnostics` object under schema `okx.host-control.owner-diagnostics/v1`,
+plus the typed `research_runtime` snapshot. This is a bounded **read-only
+overview**, not another diagnostic database, process supervisor, or authority
+over Engine/Research financial work.
+
+- `owners` reports CONTROL, Engine, Research and Edge in fixed order. Each
+  entry contains an owner, a contract version, a stable reason code, an
+  evidence state, a suggested next diagnostic action, and available image
+  provenance. `image_basis` names what was actually hashed: Engine's
+  **installed executable** is not an independent hash of its live process.
+- `first_unproven_owner`, `first_unproven_stage` and `next_action` identify
+  the first missing link; expected stopped processes are not treated as
+  failures. Bad or unreadable Research status does not hide Engine/CONTROL
+  observations.
+- The CONTROL readback **cannot authenticate Cloudflare's current session**.
+  Edge is always `NOT_EVALUATED` in this projection, and the aggregate quality
+  is `partial`. To resolve that link query Edge `diagnostics.runtime` and
+  compare owner/session/generation; do not infer a handshake from Research's
+  `RUNNING_UNVERIFIED` process phase.
+- For a failed user operation, preserve its request reference and ask the
+  **owning** Engine or Research `diagnostics.explain`/operation diagnostic.
+  Engine's finance trace and Research's bounded job-stage projection remain
+  separately owned. This overview never reads financial SQL or executes
+  exchange requests.
+
+The field is additive; existing `Status`, `StatusResearch` and Edge contracts
+remain compatible. Because the readback integration touches
+`lifecycle_executor.rs`, that PR follows the existing **full native/financial
+CI route**. Future changes confined to Research/Host owner-local modules can
+still use narrower routes according to the classifier; no new mandatory job
+or CI matrix cell is introduced by this diagnostic projection.
+
 Do not switch production routing to the separate Research credential until
 CONTROL-owned Research startup, credential provisioning and Windows
 restart/rollback acceptance have been verified on the actual installation,
