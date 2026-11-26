@@ -34,16 +34,20 @@ wall-clock reduction does **not** prove the 120-second warm owner-change target
 from #580. The four parallel regression suites all passed in the #601 run.
 The matching [main run 45724662321](https://github.com/iamaman11/okx/actions/runs/45724662321)
 reused the accepted PR artifact without recompiling Windows binaries. Separate
-post-change owner-only Ready runs (Engine, Research, Host, Cloudflare and docs)
-and mixed Research+Host need individual evidence before closing
+post-change Research, Host, Cloudflare and docs Ready runs have passed.
+Engine-only, mixed Research+Host and fail-closed shared/unknown routing still
+need individual evidence before closing
 [#599](https://github.com/iamaman11/okx/issues/599); do not infer their
 durations or safe exclusions from the full run.
 
 Optional
-`workflow_dispatch` cache warming accepts `cache_profile=tests|release|both`
-(`both` by default); the first two options request one Windows compile job,
-and `both` requests two. These jobs are not protected acceptance or release
-evidence.
+`workflow_dispatch` cache warming accepts `cache_profile=tests|release|research|both`
+(`both` by default). Each individual profile requests one Windows compiler job;
+`both` requests the two Engine jobs. `research` explicitly primes reusable
+Research-only Windows test and release dependencies after an accepted main
+Ready tree; ordinary PR and push CI never launch an extra Research seed job.
+These jobs are not protected acceptance or release evidence. Actual speedup
+must be measured on a subsequent owner-only Ready run, not inferred from the seed.
 
 ## #512 current navigation and evidence status (r15)
 

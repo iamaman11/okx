@@ -14,10 +14,11 @@ const researchRelease = fs.readFileSync(path.join(root, '..', '..', 'scripts', '
 const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
   'okx-research-service', 'tests', 'ipc_process.rs'), 'utf8').replaceAll('\r\n', '\n');
 const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
-const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}";
+const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || matrix.profile == 'release' && 'v1-rust' || 'v0-rust' }}";
+const warmSharedKey = "${{ matrix.profile == 'research' && 'research-service-windows' || format('trading-engine-{0}-windows', matrix.profile) }}";
 // Unknown/missing manual choices produce an empty matrix (hard CI failure),
 // never an implicit two-runner cache warmup.
-const selectedCacheMatrix = "        profile: ${{ fromJSON(inputs.cache_profile == 'tests' && '[\"tests\"]' || inputs.cache_profile == 'release' && '[\"release\"]' || inputs.cache_profile == 'both' && '[\"tests\",\"release\"]' || '[]') }}";
+const selectedCacheMatrix = "        profile: ${{ fromJSON(inputs.cache_profile == 'tests' && '[\"tests\"]' || inputs.cache_profile == 'release' && '[\"release\"]' || inputs.cache_profile == 'research' && '[\"research\"]' || inputs.cache_profile == 'both' && '[\"tests\",\"release\"]' || '[]') }}";
 // Windows Clippy runs on the existing host regression runner. It is not a
 // separately accepted matrix result, but it remains a required -D warnings
 // command inside the host cell.
@@ -33,7 +34,8 @@ const nativeCacheJobs = [
   ['trading_engine_acceptance_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_build_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
-  ['trusted_main_cache_prime', warmPrefix, 'trading-engine-${{ matrix.profile }}-windows', mainCacheWriter],
+  ['research_service_tests_windows', 'v0-rust', 'research-service-windows', 'false'],
+  ['trusted_main_cache_prime', warmPrefix, warmSharedKey, mainCacheWriter],
 ];
 
 function validate(yaml, fileNames) {
@@ -50,8 +52,8 @@ function validate(yaml, fileNames) {
   assert.match(header, /^  workflow_dispatch:$/m);
   assert.match(header, /^      prime_windows_cargo_cache:$/m);
   assert.match(header, /^        default: true$/m);
-  assert.match(header, /^      cache_profile:\n        description: 'Select which trusted main Windows Cargo cache to warm'\n        required: true\n        type: choice\n        options: \[tests, release, both\]\n        default: both$/m,
-    'MANUAL_CACHE_MUST_EXPOSE_ONE_OR_BOTH_PROFILES_WITH_SAFE_BOTH_DEFAULT');
+  assert.match(header, /^      cache_profile:\n        description: 'Select which trusted main Windows Cargo cache to warm'\n        required: true\n        type: choice\n        options: \[tests, release, research, both\]\n        default: both$/m,
+    'MANUAL_CACHE_MUST_EXPOSE_ALL_PROFILES_WITH_SAFE_BOTH_DEFAULT');
   assert.doesNotMatch(header, /^  contents: write$/m);
   assert.match(header, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 
@@ -85,7 +87,7 @@ function validate(yaml, fileNames) {
     assert.ok(step.split('\n').includes(`          save-if: ${save}`), `SCOPED_CACHE_WRITER:${id}`);
     assert.match(step, /^          cache-on-failure: false$/m);
     if (['trading_engine_acceptance_windows', 'trading_engine_regressions_windows',
-      'trading_engine_build_windows'].includes(id)) {
+      'trading_engine_build_windows', 'research_service_tests_windows'].includes(id)) {
       for (const profile of ['DEV', 'TEST'])
         assert.match(block, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
     }
@@ -123,6 +125,10 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(draft, /check_p0\.py --base|fetch-depth: 0/);
   assert.match(job('dependency-audit'), /if: \(github.event_name != 'pull_request' \|\| github.event.pull_request.draft != true\)/);
   const research = job('research_service_tests_windows');
+  assert.match(research, /prefix-key: v0-rust/);
+  assert.match(research, /shared-key: research-service-windows/);
+  assert.match(research, /save-if: false/,
+    'PR_RESEARCH_CANNOT_WRITE_REUSABLE_ACCEPTED_MAIN_CACHE');
   assert.match(research, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true'/,
     'MAIN_MUST_NOT_BUILD_UNREVIEWED_RESEARCH_ORIGIN');
   assert.match(research, /research_component_sha256: \$\{\{ steps\.package\.outputs\.research_component_sha256 \}\}/);
@@ -366,6 +372,12 @@ function validate(yaml, fileNames) {
       'CACHE_PRIME_MUST_NOT_PROVIDE_AN_EMPTY_PROFILE_ENV_ON_RELEASE');
   }
   assert.match(prime, /cache-on-failure: false/);
+  assert.match(prime, /matrix.profile != 'release' && 'clippy' \|\| ''/);
+  assert.match(prime, /matrix.profile == 'research' && steps.prime-cache.outputs.cache-hit != 'true'/,
+    'RESEARCH_PR_CACHE_REQUIRES_EXPLICIT_TRUSTED_MAIN_SEED');
+  assert.match(prime, /cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings/);
+  assert.match(prime, /cargo test --locked --no-run -p okx-research-service --lib --bins --test causal_release_smoke --test ipc_process/);
+  assert.match(prime, /cargo build --locked --release -p okx-research-service --bin okx-research-service/);
   assert.match(prime, /cargo test --locked --no-run --all-targets/);
   assert.match(prime, /cargo build --locked -p okx-native-finance-check/);
   assert.match(prime, /matrix.profile == 'release' && steps.prime-cache.outputs.cache-hit != 'true'/);
@@ -684,8 +696,8 @@ assert.throws(() => validate(source.replace('      - name: Test portable crates'
 assert.throws(() => validate(source.replace('      - name: Test portable crates',
   '      - run: npm ci --ignore-scripts --no-audit --no-fund\n      - name: Test portable crates'), workflows));
 assert.throws(() => validate(source.replace('        default: true', '        default: false'), workflows));
-assert.throws(() => validate(source.replace('options: [tests, release, both]', 'options: [tests, release]'), workflows),
-  'MANUAL_CACHE_INPUT_MUST_RETAIN_BOTH_CHOICE');
+assert.throws(() => validate(source.replace('options: [tests, release, research, both]', 'options: [tests, release, both]'), workflows),
+  'MANUAL_CACHE_INPUT_MUST_RETAIN_RESEARCH_CHOICE');
 assert.throws(() => validate(source.replace('        default: both', '        default: tests'), workflows),
   'MANUAL_CACHE_PROFILE_DEFAULT_MUST_WARM_BOTH');
 assert.throws(() => validate(source.replace(selectedCacheMatrix,
@@ -695,10 +707,21 @@ assert.throws(() => validate(source.replace("inputs.cache_profile == 'tests' && 
   'MANUAL_TESTS_CACHE_PROFILE_MUST_NOT_BE_IGNORED');
 assert.throws(() => validate(source.replace("inputs.cache_profile == 'release' && '[\"release\"]'", 'false'), workflows),
   'MANUAL_RELEASE_CACHE_PROFILE_MUST_NOT_BE_IGNORED');
+assert.throws(() => validate(source.replace("inputs.cache_profile == 'research' && '[\"research\"]'", 'false'), workflows),
+  'MANUAL_RESEARCH_CACHE_PROFILE_MUST_NOT_BE_IGNORED');
 assert.throws(() => validate(source.replace("inputs.cache_profile == 'both' && '[\"tests\",\"release\"]'", 'false'), workflows),
   'MANUAL_BOTH_CACHE_PROFILE_MUST_INCLUDE_RELEASE');
 assert.throws(() => validate(source.replace("|| '[]') }}", "|| '[\"tests\",\"release\"]') }}"), workflows),
   'UNKNOWN_MANUAL_CACHE_PROFILE_MUST_NOT_START_WINDOWS_RUNNERS');
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  '          save-if: false', '          save-if: true'), workflows),
+  'RESEARCH_PR_CACHE_MUST_REMAIN_READ_ONLY');
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  '          shared-key: research-service-windows', '          shared-key: trading-engine-tests-windows'), workflows),
+  'RESEARCH_PR_MUST_RESTORE_ITS_OWN_TRUSTED_MAIN_CACHE');
+assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
+  "matrix.profile == 'research' && steps.prime-cache.outputs.cache-hit != 'true'", 'false'), workflows),
+  'RESEARCH_CACHE_PRIME_MUST_NOT_BE_SILENTLY_DISABLED');
 assert.throws(() => validate(source.replace('BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED',
   'WE_DID_NOT_VERIFY_THE_TWO_TESTS'), workflows));
 assert.throws(() => validate(source.replace('NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS',
@@ -960,7 +983,7 @@ function changeJobInput(yaml, id, before, after) {
 }
 for (const [id, prefix, , save] of nativeCacheJobs) {
   for (const [before, after] of [
-    [`prefix-key: ${prefix}`, 'prefix-key: v0-rust'],
+    [`prefix-key: ${prefix}`, `prefix-key: ${prefix === 'v0-rust' ? 'v1-rust' : 'v0-rust'}`],
     ['cache-workspace-crates: true', 'cache-workspace-crates: false'],
     [`save-if: ${save}`, 'save-if: true'],
   ]) {

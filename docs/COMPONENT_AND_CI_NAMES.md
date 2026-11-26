@@ -230,7 +230,7 @@ protection and accepted-artifact verification use the **displayed names**.
 | `research-windows` | Fresh Research-only or mixed Host+Research PR, Windows: Research owner/IPC/WSS tests and scoped Research release evidence; no Engine build on Research-only |
 | `ci` | Non-Draft, Ubuntu: **single required branch-protection status**; direct fail-closed evaluation of all applicable owner and portable/architecture/audit/Edge results; no compilation |
 | `trading-engine-build-windows` | Fresh Full/Engine route, Windows: Engine-only or full four-EXE release artifact with exact SHA/tree |
-| `warm-windows-cargo-cache (profile)` | **Manual** accepted-main cache seed (`trusted_main_cache_prime` YAML ID); choose `tests`, `release` (one Windows runner) or `both` (two runners, default). Compilation only, never acceptance/publish |
+| `warm-windows-cargo-cache (profile)` | **Manual** accepted-main cache seed (`trusted_main_cache_prime` YAML ID); choose `tests`, `release`, `research` (one Windows runner) or `both` (two Engine runners, default). The `research` option primes Research-only Clippy/tests/release without Engine compilation; no automatic Research cache job. Compilation only, never acceptance/publish |
 | `publish-accepted-windows-release` | Accepted Full main tree, isolated write permission: publish immutable verified four-EXE PR artifact without rebuilding or installing |
 | `publish-accepted-research-component` | Accepted Research-only main tree, isolated write permission: publish exact three-file Research artifact and origin/readback without rebuilding |
 
