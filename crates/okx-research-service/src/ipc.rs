@@ -225,7 +225,15 @@ where
 {
     let provider = crate::independent_source::IndependentOkxPublicSource::new()?;
     let source = PublicSourceClient::new(Arc::new(provider));
-    serve_with_source(input, output, root, expected_scope, Some(source), compiled_source).await
+    serve_with_source(
+        input,
+        output,
+        root,
+        expected_scope,
+        Some(source),
+        compiled_source,
+    )
+    .await
 }
 
 async fn serve_with_source<R, W>(
