@@ -452,17 +452,17 @@ fn restart_truncated_request_projection_never_invents_origin_or_retry_history() 
             .unwrap();
         assert!(fresh);
         assert_eq!(created.id, id);
-        jobs.update(&id, JobState::Failed, None, Some("CANDLE_RANGE_UNAVAILABLE".into()))
-            .unwrap();
+        jobs.update(
+            &id,
+            JobState::Failed,
+            None,
+            Some("CANDLE_RANGE_UNAVAILABLE".into()),
+        )
+        .unwrap();
         if n == 0 || n == 129 {
             let retry = InvocationId::new(format!("req_retained_retry_{n}")).unwrap();
             let (same, fresh, _) = jobs
-                .enqueue_semantic_with_origin(
-                    key,
-                    id.clone(),
-                    format!("semantic-{n}"),
-                    Some(retry),
-                )
+                .enqueue_semantic_with_origin(key, id.clone(), format!("semantic-{n}"), Some(retry))
                 .unwrap();
             assert!(!fresh);
             assert_eq!(same.id, id);
