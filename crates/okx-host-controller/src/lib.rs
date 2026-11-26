@@ -9,6 +9,7 @@ pub mod desired;
 pub mod job;
 pub mod legacy_bootstrap;
 pub mod lifecycle_executor;
+pub mod owner_diagnostics;
 pub mod provenance;
 pub mod research_supervisor;
 pub mod root_migration;
