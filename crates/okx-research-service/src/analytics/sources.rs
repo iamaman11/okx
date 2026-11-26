@@ -335,6 +335,45 @@ mod extension_tests {
         );
     }
 
+    #[tokio::test]
+    async fn p7_missing_closed_dataset_reports_owner_reason_without_creating_a_job() {
+        // The recorded public endpoint returns an empty, successful page.
+        // This is a real source-owner failure, not a fabricated job/error row.
+        let transport = recorded_candles(vec![]);
+        let (root, service) = service_with_source(transport.client());
+        let request: ResearchRequest = serde_json::from_value(json!({
+            "action":"validate", "instruments":["BTC-USDT"],
+            "timeframe_ms":CANDLE_INTERVAL_MS,
+            "start_ms":CANDLE_START_MS, "end_ms":CANDLE_END_MS,
+            "range_mode":"strict", "strategy_id":"ema_momentum_confirm_v1",
+            "parameters":{"fast":1,"slow":2},
+            "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,
+                "funding_mode":"zero_assumption"},
+            "data_mode":"counterfactual"
+        }))
+        .unwrap();
+        let response = service.research(request).await.unwrap();
+        assert_eq!(response["schema"], "okx.research.validation/v1");
+        assert_eq!(response["status"], "blocked");
+        assert_eq!(response["quality"], "partial");
+        assert_eq!(response["side_effects"], "none");
+        assert_eq!(response["job_created"], false);
+        assert_eq!(response["source_coverage"][0]["instrument"], "BTC-USDT");
+        assert_eq!(response["source_coverage"][0]["coverage"], "unavailable");
+        assert_eq!(
+            response["source_coverage"][0]["reason_code"],
+            "CANDLE_RANGE_UNAVAILABLE"
+        );
+        assert!(service.jobs.snapshot().is_empty());
+        let unknown = service.jobs.diagnostic_by_invocation("req_no_job_for_missing_dataset");
+        assert_eq!(unknown["state"], "NOT_OBSERVED");
+        assert_eq!(unknown["reason_code"], "UNKNOWN_NOT_RETAINED");
+        assert!(unknown.get("matched_request_id").is_none());
+        assert_candle_request(&transport);
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn raw_candle(index: u64, confirm: &str) -> serde_json::Value {
         let close = (index + 1) as f64;
         json!([

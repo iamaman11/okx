@@ -585,6 +585,85 @@ mod tests {
         }
     }
     #[test]
+    fn p7_missing_dataset_job_diagnostic_survives_retry_and_restart_without_inventing_result() {
+        use okx_research_protocol::research_ipc::{IdempotencyKey, InvocationId};
+
+        let (jobs, file) = jobs("p7-missing-dataset");
+        let original = InvocationId::new("req_missing_dataset_original".into()).unwrap();
+        let retry = InvocationId::new("req_missing_dataset_retry".into()).unwrap();
+        let key = IdempotencyKey::new("missing-dataset-owner-key".into()).unwrap();
+        let id = "f".repeat(64);
+        let (created, fresh, _) = jobs
+            .enqueue_semantic_with_origin(
+                key.clone(),
+                id.clone(),
+                "p7-dataset-semantic".into(),
+                Some(original.clone()),
+            )
+            .unwrap();
+        assert!(fresh);
+        jobs.update(&id, JobState::Running, None, None).unwrap();
+        jobs.update(
+            &id,
+            JobState::Failed,
+            None,
+            Some("CANDLE_RANGE_UNAVAILABLE".into()),
+        )
+        .unwrap();
+        let (replayed, fresh, _) = jobs
+            .enqueue_semantic_with_origin(
+                key,
+                id.clone(),
+                "p7-dataset-semantic".into(),
+                Some(retry.clone()),
+            )
+            .unwrap();
+        assert!(!fresh);
+        assert_eq!(replayed.id, created.id);
+        assert_eq!(jobs.snapshot().len(), 1);
+
+        for reference in [original.as_str(), retry.as_str()] {
+            let observation = jobs.diagnostic_by_invocation(reference);
+            assert_eq!(observation["state"], "OBSERVED");
+            assert_eq!(observation["reference_kind"], "request_id");
+            assert_eq!(observation["matched_request_id"], reference);
+            assert_eq!(observation["job"]["id"], id);
+            assert_eq!(observation["job"]["state"], "failed");
+            assert_eq!(
+                observation["job"]["error_code"],
+                "CANDLE_RANGE_UNAVAILABLE"
+            );
+            assert!(observation["job"]["result_ref"].is_null());
+            assert_eq!(observation["history"], "UNKNOWN");
+            assert_eq!(observation["next_action"], "inspect_job_snapshot");
+        }
+        assert_eq!(
+            jobs.diagnostic_by_invocation("req_missing_dataset_unrelated")["state"],
+            "NOT_OBSERVED"
+        );
+        assert_eq!(jobs.snapshot().len(), 1);
+
+        drop(jobs);
+        let restored = Jobs::open(file).unwrap();
+        assert_eq!(restored.get(&id).unwrap().state, JobState::Failed);
+        assert_eq!(restored.snapshot().len(), 1);
+        for reference in [original.as_str(), retry.as_str()] {
+            let observation = restored.diagnostic_by_invocation(reference);
+            assert_eq!(observation["matched_request_id"], reference);
+            assert_eq!(observation["job"]["id"], id);
+            assert_eq!(observation["job"]["origin"], "durable_startup_subset");
+            assert_eq!(
+                observation["job"]["error_code"],
+                "CANDLE_RANGE_UNAVAILABLE"
+            );
+            assert!(observation["job"]["result_ref"].is_null());
+        }
+        let missing = restored.diagnostic_by_invocation("req_missing_dataset_unrelated");
+        assert_eq!(missing["reason_code"], "UNKNOWN_NOT_RETAINED");
+        assert!(missing.get("matched_request_id").is_none());
+        assert_eq!(restored.snapshot().len(), 1);
+    }
+    #[test]
     fn failed_startup_seed_is_explicit_and_does_not_invent_missing_history() {
         let db = Connection::open_in_memory().unwrap();
         let projection = Projection::default();
