@@ -538,6 +538,13 @@ async fn dispatch(
             if id == "deployment" {
                 return Err("RESEARCH_DEPLOYMENT_NOT_SUPERVISED".into());
             }
+            if let Some(origin) = id.strip_prefix("request:") {
+                // Reject invalid/empty caller-provided origins before looking
+                // through the bounded Research projection. No SQL or Engine.
+                InvocationId::new(origin.to_owned())
+                    .map_err(|_| "INVALID_RESEARCH_REQUEST_REFERENCE")?;
+                return Ok(service.diagnostic_request(origin));
+            }
             if id.len() != 64
                 || !id
                     .bytes()
@@ -804,6 +811,13 @@ mod tests {
         assert!(matches!(
             ResearchCommand::try_from(diagnostics(None::<&str>)),
             Ok(ResearchCommand::ExplainJob(Some(id))) if id == "job_123"
+        ));
+        assert!(matches!(
+            ResearchCommand::try_from(request(json!({"type":"diagnostics","request":{
+                "reference":"request:req_edge_original_01","view":"research",
+                "account":null,"cycle_id":null,"limit":null
+            }}))),
+            Ok(ResearchCommand::ExplainJob(Some(id))) if id == "request:req_edge_original_01"
         ));
         assert!(matches!(
             ResearchCommand::try_from(diagnostics(Some("account"))),

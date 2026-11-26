@@ -105,6 +105,10 @@ impl AnalyticsService {
     pub fn diagnostic_job(&self, id: &str) -> Value {
         self.jobs.diagnostic_readback(id)
     }
+    /// Read-only Edge request lookup; unknown outside the retained job window.
+    pub fn diagnostic_request(&self, invocation: &str) -> Value {
+        self.jobs.diagnostic_by_invocation(invocation)
+    }
     #[cfg(test)]
     pub fn new(
         root: PathBuf,

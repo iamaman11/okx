@@ -1,6 +1,36 @@
-import {mcpApi,projectNativeResponse} from './mcp.js';
+import {mcpApi,operationTrace,projectNativeResponse} from './mcp.js';
 import {payloadFixtures} from './execution_tools.test.js';
 const ctx={auth:{scope:['mcp:use']}};
+const originJob='a'.repeat(64);
+const researchTrace=operationTrace('research','request:req_original_01',{
+ request_id:'req_diagnostic_02',status:'partial',data:{schema:'okx.research-job-diagnostics/v1',
+  state:'OBSERVED',reason_code:'JOB_SNAPSHOT',job:{id:originJob,state:'completed',
+   origin_invocation:'req_original_01',result_ref:'b'.repeat(64)}}
+});
+if(researchTrace.state!=='OBSERVED'||researchTrace.job_id!==originJob||
+ researchTrace.origin_request_id!=='req_original_01'||
+ researchTrace.diagnostic_request_id!=='req_diagnostic_02'||
+ researchTrace.next_action!=='research.result'||researchTrace.read_only!==true)
+ throw Error('correlated Research job has no readable operation trace');
+const forgedTrace=operationTrace('research','request:req_different',{
+ request_id:'req_diagnostic_02',status:'partial',data:{schema:'okx.research-job-diagnostics/v1',
+  state:'OBSERVED',job:{id:originJob,state:'completed',origin_invocation:'req_original_01'}}
+});
+if(forgedTrace.state!=='NOT_EVALUATED'||forgedTrace.job_id!==null)
+ throw Error('foreign Research origin incorrectly promoted to observed job');
+const nativeIntentTrace=operationTrace('operation','intent:abc',{
+ request_id:'req_read',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
+  reference:'intent:abc',state:'posting',stage:'posting',
+  missing_evidence:['AUTHORITATIVE_ORDER_READBACK'],next_action:'trade.status'}
+});
+if(nativeIntentTrace.state!=='OBSERVED'||nativeIntentTrace.first_unproven_fact!==
+ 'AUTHORITATIVE_ORDER_READBACK'||nativeIntentTrace.next_action!=='trade.status')
+ throw Error('Engine native intent stage was lost');
+if(operationTrace('operation','intent:wrong',{
+ request_id:'req_read',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
+ reference:'intent:abc',state:'posting',stage:'posting'}}).state!=='NOT_EVALUATED')
+ throw Error('foreign Engine intent incorrectly promoted to observed');
+console.log('read_only_operation_trace_reference_binding PASS');
 for(const unauthorized of [{}, {auth:{scope:['research:read']}}, {auth:{scope:[]}}]){
  const forbidden=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
   jsonrpc:'2.0',id:101,method:'tools/call',params:{name:'research',arguments:{action:'benchmark',idempotency_key:'test_auth_deny_01'}}
@@ -254,6 +284,18 @@ const researchRoutes:[string,any,string,boolean][]=[
  ['portfolio',payloadFixtures.find(f=>f.tool==='portfolio'&&f.action==='summary')!.positive,'portfolio',false],
  ['trade',{action:'status',account:'demo',reference:'intent_fixture'},'trade',false],
 ];
+const fullTrace=await mcpResponse('diagnostics',
+ {action:'explain',view:'research',reference:'request:req_original_01'},
+ {status:'completed',data:{schema:'okx.research-job-diagnostics/v1',
+  state:'OBSERVED',reason_code:'JOB_SNAPSHOT',job:{id:originJob,state:'running',
+   origin_invocation:'req_original_01'}}});
+if(fullTrace?.operation_trace?.state!=='OBSERVED'||
+ fullTrace.operation_trace.next_action!=='research.status'||
+ fullTrace.operation_trace.first_unproven_fact!=='TERMINAL_RESEARCH_OUTCOME'||
+ fullTrace.operation_trace.reference_kind!=='request_id'||
+ fullTrace.data.job.id!==originJob)
+ throw Error('public diagnostics.explain lost Research operation summary');
+console.log('diagnostics_explain_research_request_id PASS');
 for(const configured of [false,true]){
  const seen:any[]=[];
  const routeEnv:any={...(configured?{RESEARCH_RUNTIME_TOKEN_SHA256:'f'.repeat(64)}:{}),
