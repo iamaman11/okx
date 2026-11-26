@@ -1244,6 +1244,92 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  research_ipc_windows:
+    # The ten real Windows child-process tests and the ignored live MCP/DO/WSS
+    # witness run in parallel with the Research owner unit tests and release.
+    # Research+Host retains the original single owner runner for accepted v3
+    # mixed-component evidence; this job is only for a strict Research-only diff.
+    name: research-ipc-windows
+    needs: component_impact
+    if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'
+    runs-on: windows-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Require exact immutable PR HEAD for Research IPC
+        shell: pwsh
+        run: |
+          $expected = '${{ github.event.pull_request.head.sha }}'
+          if ($expected -cnotmatch '^[0-9a-f]{40}$' -or
+              (git rev-parse HEAD).Trim() -cne $expected) {
+            throw 'RESEARCH_IPC_NOT_EXACT_PR_HEAD'
+          }
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: research-ipc-cache
+        with:
+          prefix-key: v0-rust
+          shared-key: research-service-windows
+          cache-workspace-crates: true
+          save-if: false
+          cache-on-failure: false
+      - name: Prefer cached offline Cargo sources when complete
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & cargo fetch --locked --offline 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            "CARGO_NET_OFFLINE=true" >> $env:GITHUB_ENV
+            "Research IPC Cargo registry: complete local cache; offline" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            "Research IPC Cargo registry: incomplete cache; ordinary online fallback" >> $env:GITHUB_STEP_SUMMARY
+            # GitHub's pwsh wrapper exits with LASTEXITCODE after this step.
+            # The offline *probe* is optional; only the real build is gated.
+            $global:LASTEXITCODE = 0
+          }
+      - name: All ten real Research child IPC process tests
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
+          "Research IPC Cargo cache exact hit: ${{ steps.research-ipc-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          # The existing 10-second Hello/command deadlines are unchanged. A
+          # failing, skipped or filtered Windows IPC witness blocks Ready.
+          $ipcOutput = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $ipcOutput | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+            throw 'RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED'
+          }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: cloudflare/okx-mcp/.node-version
+          cache: npm
+          cache-dependency-path: cloudflare/okx-mcp/package-lock.json
+      - name: Install isolated Research MCP/DO/WSS fixture dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Research owner live loopback MCP DO WSS without Engine
+        shell: pwsh
+        run: |
+          # This witness is #[ignore] by default. Require the actual loopback
+          # Miniflare DO/WebSocket test to run, never a skipped Rust summary.
+          $output = & cargo test --locked -p okx-research-service --lib edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 1 passed; 0 failed;') {
+            throw 'RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED'
+          }
+
   research_service_tests_windows:
     name: research-windows
     needs: component_impact
@@ -1285,6 +1371,18 @@ jobs:
           # accepted-main cache can supply a reusable Research compiler cache.
           save-if: false
           cache-on-failure: false
+      - name: Prefer cached offline Cargo sources when complete
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & cargo fetch --locked --offline 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            "CARGO_NET_OFFLINE=true" >> $env:GITHUB_ENV
+            "Research owner Cargo registry: complete local cache; offline" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            "Research owner Cargo registry: incomplete cache; ordinary online fallback" >> $env:GITHUB_STEP_SUMMARY
+            $global:LASTEXITCODE = 0
+          }
       - name: Fresh Strategy Core, Research and Worker owner checks
         shell: pwsh
         run: |
@@ -1312,12 +1410,16 @@ jobs:
           cargo test --locked -p okx-research-service --test causal_release_smoke 2>&1 |
             Tee-Object -FilePath $ownerLog -Append
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $ipcOutput = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
-          $code = $LASTEXITCODE
-          $ipcOutput | Tee-Object -FilePath $ownerLog -Append
-          if ($code -ne 0) { exit $code }
-          if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
-            throw 'RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED'
+          # Mixed Research+Host retains all ten Windows IPC witnesses here;
+          # Research-only runs the exact command in research-ipc-windows.
+          if ('${{ needs.component_impact.outputs.component_scope }}' -eq 'research-host') {
+            $ipcOutput = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
+            $code = $LASTEXITCODE
+            $ipcOutput | Tee-Object -FilePath $ownerLog -Append
+            if ($code -ne 0) { exit $code }
+            if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+              throw 'RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED'
+            }
           }
           cargo test --locked -p okx-research-service --doc 2>&1 |
             Tee-Object -FilePath $ownerLog -Append
@@ -1336,19 +1438,19 @@ jobs:
           }
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host'
+        if: needs.component_impact.outputs.component_scope == 'research-host'
         with:
           node-version-file: cloudflare/okx-mcp/.node-version
           cache: npm
           cache-dependency-path: cloudflare/okx-mcp/package-lock.json
       - name: Install isolated Research MCP/DO/WSS fixture dependencies
-        if: needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host'
+        if: needs.component_impact.outputs.component_scope == 'research-host'
         shell: pwsh
         run: |
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Research owner live loopback MCP DO WSS without Engine
-        if: needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host'
+        if: needs.component_impact.outputs.component_scope == 'research-host'
         shell: pwsh
         run: |
           # This witness is #[ignore] by default. Explicitly count one actual
@@ -1442,6 +1544,18 @@ jobs:
           cache-workspace-crates: true
           save-if: false
           cache-on-failure: false
+      - name: Prefer cached offline Cargo sources when complete
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & cargo fetch --locked --offline 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            "CARGO_NET_OFFLINE=true" >> $env:GITHUB_ENV
+            "Research release Cargo registry: complete local cache; offline" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            "Research release Cargo registry: incomplete cache; ordinary online fallback" >> $env:GITHUB_STEP_SUMMARY
+            $global:LASTEXITCODE = 0
+          }
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: cloudflare/okx-mcp/.node-version
@@ -1468,9 +1582,13 @@ jobs:
           # Engine bytes or compiles Agent/CONTROL/Launcher. GitHub provenance
           # and exact main-tree promotion are independently verified by CONTROL.
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
-          cargo build --locked --release -p okx-research-service --bin okx-research-service 2>&1 |
+          # Cargo timing report is diagnostic only, not part of the trusted
+          # three-file component ZIP or its exact SHA-256 release provenance.
+          cargo build --locked --release -p okx-research-service --bin okx-research-service --timings 2>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'research-only-build.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $timingReports = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'cargo-timings') -Filter '*.html' -File -ErrorAction SilentlyContinue)
+          if ($timingReports.Count -lt 1) { throw 'RESEARCH_CARGO_TIMING_EVIDENCE_MISSING' }
           Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'release\okx-research-service.exe') (Join-Path $dist 'okx-research-service.exe')
           Copy-Item 'Cargo.lock' (Join-Path $dist 'Cargo.lock')
           [ordered]@{
@@ -1505,6 +1623,7 @@ jobs:
           path: |
             ${{ runner.temp }}\research-component-proof.json
             ${{ runner.temp }}\research-only-build.log
+            target/cargo-timings/*.html
           if-no-files-found: error
           retention-days: 14
 
@@ -1521,7 +1640,7 @@ jobs:
     # The sole required status checks owner jobs directly. A skipped job may
     # satisfy a GitHub branch rule, so require each expected result explicitly.
     name: ci
-    needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows, research_component_release_windows]
+    needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_ipc_windows, research_service_tests_windows, research_component_release_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1556,6 +1675,7 @@ jobs:
               '${{ needs.trading_engine_isolation_windows.result }}' \
               '${{ needs.trading_engine_regressions_windows.result }}' \
               '${{ needs.trading_engine_build_windows.result }}' \
+              '${{ needs.research_ipc_windows.result }}' \
               '${{ needs.research_service_tests_windows.result }}' \
               '${{ needs.research_component_release_windows.result }}'; do
               check_result "$item" skipped accepted-main-reuse
@@ -1581,6 +1701,7 @@ jobs:
               test '${{ needs.component_impact.outputs.native_proof }}' = COMPONENT_SCOPED_UNCHANGED_NATIVE
               check_result '${{ needs.rust_tests_linux.result }}' skipped portable-rust
               check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
+              check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows
               check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
               check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
               check_result '${{ needs.trading_engine_acceptance_windows.result }}' skipped engine-windows
@@ -1598,6 +1719,7 @@ jobs:
                 research)
                   test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_OWNER_ONLY
                   [[ '${{ needs.research_component_release_windows.outputs.research_component_sha256 }}' =~ ^[0-9a-f]{64}$ ]]
+                  check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows
                   check_result '${{ needs.research_service_tests_windows.result }}' success research-windows
                   check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows
                   check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
@@ -1605,12 +1727,14 @@ jobs:
                 research-host)
                   test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_HOST_OWNER_CHECKS
                   [[ '${{ needs.research_service_tests_windows.outputs.mixed_base_head }}' =~ ^[0-9a-f]{40}$ ]]
+                  check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows
                   check_result '${{ needs.research_service_tests_windows.result }}' success research-windows
                   check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
                   check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows
                   ;;
                 *)
                   test '${{ needs.component_impact.outputs.native_proof }}' = HOST_WINDOWS_OWNER_AND_CONSUMER
+                  check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows
                   check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
                   check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
                   check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows
@@ -1623,6 +1747,7 @@ jobs:
               check_result '${{ needs.trading_engine_isolation_windows.result }}' success engine-isolation-windows
               check_result '${{ needs.trading_engine_regressions_windows.result }}' success engine-regressions
               check_result '${{ needs.trading_engine_build_windows.result }}' success engine-build
+              check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows
               check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
               check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
               check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows

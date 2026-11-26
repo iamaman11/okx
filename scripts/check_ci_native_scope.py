@@ -339,7 +339,9 @@ def _self_test() -> None:
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
     assert "--filter-platform x86_64-pc-windows-msvc" in workflow
     protected = workflow.split("\n  required_ci:\n", 1)[1].split("\n  trading_engine_build_windows:\n", 1)[0]
-    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows, research_component_release_windows]" in protected
+    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_ipc_windows, research_service_tests_windows, research_component_release_windows]" in protected
+    assert "check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows" in protected
+    assert protected.count("check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows") == 4
     for owner in ("trading_engine_acceptance_windows", "trading_engine_isolation_windows",
                   "trading_engine_regressions_windows", "trading_engine_build_windows"):
         assert f"check_result '${{{{ needs.{owner}.result }}}}' success" in protected, f"CI_FINANCE_GATE_MISSING:{owner}"
@@ -370,9 +372,19 @@ def _self_test() -> None:
     assert "standalone_research_status_is_typed_and_does_not_claim_edge_online" in host, "HOST_RESEARCH_STATUS_TYPED_WITNESS_REQUIRED"
     assert "research_token_provision_command_has_no_bearer_fields" in host, "HOST_RESEARCH_SECRET_WIRE_WITNESS_REQUIRED"
     assert "control_bridge_denies_research_mutations_before_network" in host, "HOST_BRIDGE_MUTATION_DENIAL_WITNESS_REQUIRED"
+    research_ipc = workflow.split("\n  research_ipc_windows:\n", 1)[1].split("\n  research_service_tests_windows:\n", 1)[0]
     research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  research_component_release_windows:\n", 1)[0]
     research_release = workflow.split("\n  research_component_release_windows:\n", 1)[1].split("\n  required_ci:\n", 1)[0]
     assert "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
+    assert "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'" in research_ipc
+    assert "RESEARCH_IPC_NOT_EXACT_PR_HEAD" in research_ipc
+    assert "cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1" in research_ipc
+    assert "RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED" in research_ipc
+    assert "Research owner live loopback MCP DO WSS without Engine" in research_ipc
+    assert "RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED" in research_ipc
+    assert "if ('${{ needs.component_impact.outputs.component_scope }}' -eq 'research-host')" in research
+    assert "RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED" in research
+    assert "if: needs.component_impact.outputs.component_scope == 'research-host'" in research
     assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research_release
     assert "name: research-component-windows" in research_release
     assert "needs.component_impact.outputs.research_only == 'true'" in research_release

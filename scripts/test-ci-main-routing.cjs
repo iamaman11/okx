@@ -16,10 +16,9 @@ const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
 const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
 const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || matrix.profile == 'release' && 'v1-rust' || 'v0-rust' }}";
 const warmSharedKey = "${{ matrix.profile == 'research' && 'research-service-windows' || format('trading-engine-{0}-windows', matrix.profile) }}";
-// Adding Host changes must not reduce Research's mandatory MCP/DO/WSS
-// coverage. This condition belongs to the transport checks only: standalone
-// Research component packaging must remain Research-only.
-const researchTransportCondition = "needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host'";
+// Mixed Research+Host must keep its live transport witnesses in the owner
+// runner; Research-only executes them in the separately required IPC runner.
+const researchTransportCondition = "needs.component_impact.outputs.component_scope == 'research-host'";
 // Unknown/missing manual choices produce an empty matrix (hard CI failure),
 // never an implicit two-runner cache warmup.
 const selectedCacheMatrix = "        profile: ${{ fromJSON(inputs.cache_profile == 'tests' && '[\"tests\"]' || inputs.cache_profile == 'release' && '[\"release\"]' || inputs.cache_profile == 'research' && '[\"research\"]' || inputs.cache_profile == 'both' && '[\"tests\",\"release\"]' || '[]') }}";
@@ -40,6 +39,7 @@ const nativeCacheJobs = [
   ['trading_engine_isolation_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_build_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
+  ['research_ipc_windows', 'v0-rust', 'research-service-windows', 'false'],
   ['research_service_tests_windows', 'v0-rust', 'research-service-windows', 'false'],
   ['research_component_release_windows', 'v0-rust', 'research-service-windows', 'false'],
   ['trusted_main_cache_prime', warmPrefix, warmSharedKey, mainCacheWriter],
@@ -70,7 +70,7 @@ function validate(yaml, fileNames) {
   assert.equal(map.size, entries.length, 'DUPLICATE_JOB_ID');
   // Finance, independent regressions and release share a single workflow.
   // The only cache-only job primes exact accepted main, outside the PR gate.
-  assert.ok(map.size <= 17, 'OBSOLETE_JOB_GRAPH_REGRESSION');
+  assert.ok(map.size <= 18, 'OBSOLETE_JOB_GRAPH_REGRESSION');
   for (const unused of ['required_classify', 'research_package_proof', 'draft-trading-migration-512',
     'draft-riskbook-migration-510', 'trading_safety_acceptance_windows', 'cloudflare_deploy', 'readonly_observer',
     'production_recovery_promote', 'named_validate', 'all26_windows_targeted', 'required_linux', 'required_windows']) {
@@ -95,7 +95,7 @@ function validate(yaml, fileNames) {
     assert.match(step, /^          cache-on-failure: false$/m);
     if (['host_controller_launcher_checks', 'trading_engine_acceptance_windows', 'trading_engine_isolation_windows',
       'trading_engine_regressions_windows',
-      'trading_engine_build_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) {
+      'trading_engine_build_windows', 'research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) {
       for (const profile of ['DEV', 'TEST'])
         assert.match(block, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
     }
@@ -141,6 +141,7 @@ function validate(yaml, fileNames) {
     'AUDIT_REQUIRED_FOR_FRESH_READY_AND_UNVERIFIED_MAIN_ONLY');
   assert.match(audit, /!contains\(fromJSON\('\["docs","cloudflare"\]'\), needs\.component_impact\.outputs\.component_scope\)/);
   const research = job('research_service_tests_windows');
+  const researchIpc = job('research_ipc_windows');
   const researchComponent = job('research_component_release_windows');
   assert.match(research, /prefix-key: v0-rust/);
   assert.match(research, /shared-key: research-service-windows/);
@@ -148,6 +149,12 @@ function validate(yaml, fileNames) {
     'PR_RESEARCH_CANNOT_WRITE_REUSABLE_ACCEPTED_MAIN_CACHE');
   assert.match(research, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true'/,
     'MAIN_MUST_NOT_BUILD_UNREVIEWED_RESEARCH_ORIGIN');
+  assert.match(researchIpc, /if: github\.event_name == 'pull_request' && needs\.component_impact\.outputs\.build_required == 'true' && needs\.component_impact\.outputs\.research_only == 'true'/,
+    'SCOPED_IPC_JOB_CANNOT_COMPILE_FOR_OTHER_OWNERS_OR_MAIN');
+  assert.match(researchIpc, /RESEARCH_IPC_NOT_EXACT_PR_HEAD/,
+    'IPC_MUST_REQUIRE_EXACT_IMMUTABLE_PR_HEAD');
+  assert.match(researchIpc, /save-if: false/);
+  assert.match(researchIpc, /shared-key: research-service-windows/);
   assert.match(researchComponent, /research_component_sha256: \$\{\{ steps\.package\.outputs\.research_component_sha256 \}\}/);
   assert.match(researchComponent, /RESEARCH_READY_STATUS_POLICY=okx\.github\.actions\.research-ready\/v3/,
     'RESEARCH_READY_V3_POLICY_REQUIRED_AFTER_CONTROL_MIGRATION');
@@ -163,8 +170,15 @@ function validate(yaml, fileNames) {
   assert.match(researchComponent, /RESEARCH_COMPONENT_EXACT_THREE_FILE_PROOF_FAILED/);
   assert.match(researchComponent, /name: okx-research-component-\$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
   assert.doesNotMatch(researchComponent, /cargo build --locked --release -p okx-trading-engine|actions\/attest/);
-  assert.match(research, /edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture --test-threads 1/);
-  assert.match(research, /RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED/);
+  for (const block of [research, researchIpc]) {
+    assert.match(block, /edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture --test-threads 1/);
+    assert.match(block, /RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED/);
+    assert.match(block, /cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1/);
+    assert.ok(block.includes(windowsIpcSummary), 'RESEARCH_WINDOWS_IPC_EXACT_TEN_ZERO_IGNORED_REQUIRED');
+    assert.match(block, /RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED/);
+  }
+  assert.ok(research.includes("if ('${{ needs.component_impact.outputs.component_scope }}' -eq 'research-host')"),
+    'MIXED_OWNER_MUST_RETAIN_TEN_IPC_PROCESS_TESTS');
   for (const marker of [
     'uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
     'name: Install isolated Research MCP/DO/WSS fixture dependencies',
@@ -177,8 +191,39 @@ function validate(yaml, fileNames) {
     assert.ok(step.includes('if: ' + researchTransportCondition),
       'MIXED_RESEARCH_HOST_TRANSPORT_NOT_REQUIRED:' + marker);
   }
-  assert.equal(research.split('if: ' + researchTransportCondition).length - 1, 3,
-    'ONLY_THREE_MCP_TRANSPORT_STEPS_EXPANDED_FOR_MIXED_RESEARCH_HOST');
+  // Three transport steps plus two mixed-owner provenance steps share the
+  // exact condition. Every missing step is also checked by its own marker.
+  assert.equal(research.split('if: ' + researchTransportCondition).length - 1, 5,
+    'MIXED_RESEARCH_HOST_TRANSPORT_AND_PROVENANCE_SCOPE_DRIFT');
+  for (const marker of [
+    'uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
+    'name: Install isolated Research MCP/DO/WSS fixture dependencies',
+    'name: Research owner live loopback MCP DO WSS without Engine',
+  ]) assert.ok(researchIpc.includes(marker), 'RESEARCH_IPC_OWNER_TRANSPORT_MISSING:' + marker);
+  for (const header of [
+    '      - name: All ten real Research child IPC process tests',
+    '      - name: Install isolated Research MCP/DO/WSS fixture dependencies',
+    '      - name: Research owner live loopback MCP DO WSS without Engine',
+  ]) {
+    const start = researchIpc.indexOf(header);
+    assert.ok(start >= 0, 'RESEARCH_IPC_REQUIRED_STEP_MISSING:' + header);
+    const end = researchIpc.indexOf('\n      - ', start + header.length);
+    const step = researchIpc.slice(start, end < 0 ? undefined : end);
+    assert.doesNotMatch(step, /^        if:/m, 'RESEARCH_IPC_WITNESS_MUST_NOT_BE_CONDITIONALLY_SKIPPED');
+  }
+  assert.match(researchIpc, /npm ci --prefix cloudflare\/okx-mcp --ignore-scripts --no-audit --no-fund/,
+    'RESEARCH_IPC_MUST_INSTALL_REAL_MINIFLARE_FIXTURE');
+  assert.doesNotMatch(researchIpc, /if: needs\.component_impact\.outputs\.component_scope == 'research-host'/,
+    'RESEARCH_ONLY_IPC_TRANSPORT_CANNOT_BE_SKIPPED');
+  for (const block of [research, researchIpc, researchComponent]) {
+    assert.match(block, /cargo fetch --locked --offline/,
+      'RESEARCH_CACHE_COMPLETENESS_MUST_BE_PROBED');
+    assert.match(block, /if \(\$LASTEXITCODE -eq 0\) \{/);
+    assert.match(block, /CARGO_NET_OFFLINE=true/);
+    assert.match(block, /ordinary online fallback/);
+    assert.match(block, /\$global:LASTEXITCODE = 0/,
+      'GITHUB_PWSH_MUST_NOT_FAIL_THE_OPTIONAL_OFFLINE_CACHE_PROBE');
+  }
   assert.match(researchComponent, /if: github\.event_name == 'pull_request' && needs\.component_impact\.outputs\.build_required == 'true' && needs\.component_impact\.outputs\.research_only == 'true'/);
   assert.doesNotMatch(research, /Build self-contained Research-only Windows component/);
   assert.match(researchComponent, /RESEARCH_COMPONENT_NOT_EXACT_PR_HEAD/);
@@ -186,6 +231,12 @@ function validate(yaml, fileNames) {
   assert.match(researchComponent, /node scripts\/test-research-component-artifact\.cjs/);
   assert.match(researchComponent, /CARGO_PROFILE_DEV_DEBUG: 0/);
   assert.match(researchComponent, /CARGO_PROFILE_TEST_DEBUG: 0/);
+  assert.match(researchComponent, /cargo build --locked --release -p okx-research-service --bin okx-research-service --timings/,
+    'RESEARCH_RELEASE_TIMING_REPORT_EXPECTED');
+  assert.match(researchComponent, /target\/cargo-timings\/\*\.html/,
+    'RESEARCH_RELEASE_TIMING_EVIDENCE_UPLOAD_EXPECTED');
+  assert.match(researchComponent, /RESEARCH_CARGO_TIMING_EVIDENCE_MISSING/,
+    'RESEARCH_RELEASE_MUST_REFUSE_MISSING_TIMING_REPORT');
   assert.ok(researchComponent.includes("needs.component_impact.outputs.research_only == 'true'"),
     'MIXED_MUST_NOT_MINT_A_STANDALONE_RESEARCH_COMPONENT');
   // Research-only changes must not resurrect the four real-child IPC timeouts
@@ -221,6 +272,7 @@ function validate(yaml, fileNames) {
     trading_engine_isolation_windows: 'engine-isolation-windows',
     trading_engine_build_windows: 'trading-engine-build-windows',
     research_service_tests_windows: 'research-windows',
+    research_ipc_windows: 'research-ipc-windows',
     research_component_release_windows: 'research-component-windows',
     host_controller_launcher_checks: 'host-windows',
     cloudflare_mcp_contracts: 'cloudflare-mcp',
@@ -487,7 +539,7 @@ function validate(yaml, fileNames) {
   const directOwners = ['component_impact', 'dependency-audit', 'architecture_contracts',
     'rust_tests_linux', 'cloudflare_mcp_contracts', 'host_controller_launcher_checks',
     'trading_engine_acceptance_windows', 'trading_engine_isolation_windows', 'trading_engine_regressions_windows',
-    'trading_engine_build_windows', 'research_service_tests_windows', 'research_component_release_windows'];
+    'trading_engine_build_windows', 'research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'];
   assert.ok(requiredCi.includes('needs: [' + directOwners.join(', ') + ']'),
     'CI_MUST_WAIT_FOR_EVERY_OWNER_DIRECTLY');
   assert.ok(requiredCi.includes("if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)"));
@@ -507,6 +559,8 @@ function validate(yaml, fileNames) {
     "check_result '${{ needs.trading_engine_build_windows.result }}' success engine-build",
     "check_result '${{ needs.trading_engine_build_windows.result }}' skipped engine-build",
     "check_result '${{ needs.research_service_tests_windows.result }}' success research-windows",
+    "check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows",
+    "check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows",
     "check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows",
     "check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows",
     "check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows",
@@ -526,6 +580,8 @@ function validate(yaml, fileNames) {
     ['trading_engine_isolation_windows', 'success', 1],
     ['research_service_tests_windows', 'success', 2],
     ['research_service_tests_windows', 'skipped', 3],
+    ['research_ipc_windows', 'success', 1],
+    ['research_ipc_windows', 'skipped', 4],
     ['research_component_release_windows', 'success', 1],
     ['research_component_release_windows', 'skipped', 4],
     ['host_controller_launcher_checks', 'success', 2],
@@ -753,9 +809,13 @@ assert.throws(() => validate(changeJobInput(source, 'required_ci',
   'needs: [component_impact, architecture_contracts,'), workflows),
   'SINGLE_CI_CANNOT_DROP_AUDIT_DEPENDENCY');
 assert.throws(() => validate(changeJobInput(source, 'required_ci',
-  'trading_engine_build_windows, research_service_tests_windows, research_component_release_windows]',
-  'trading_engine_build_windows, research_service_tests_windows]'), workflows),
+  'trading_engine_build_windows, research_ipc_windows, research_service_tests_windows, research_component_release_windows]',
+  'trading_engine_build_windows, research_ipc_windows, research_service_tests_windows]'), workflows),
   'SINGLE_CI_MUST_WAIT_FOR_RESEARCH_RELEASE_AND_TESTS');
+assert.throws(() => validate(changeJobInput(source, 'required_ci',
+  'trading_engine_build_windows, research_ipc_windows, research_service_tests_windows, research_component_release_windows]',
+  'trading_engine_build_windows, research_service_tests_windows, research_component_release_windows]'), workflows),
+  'SINGLE_CI_MUST_WAIT_FOR_ACTUAL_RESEARCH_IPC_RUNNER');
 assert.throws(() => validate(changeJobInput(source, 'dependency-audit',
   "needs.component_impact.outputs.build_required == 'true' &&",
   'true &&'), workflows),
@@ -784,6 +844,8 @@ for (const [old, replacement, reason] of [
     'true', 'SKIPPED_REGRESSIONS'],
   ["check_result '${{ needs.research_service_tests_windows.result }}' success research-windows",
     'true', 'RESEARCH_OWNER'],
+  ["check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows",
+    'true', 'RESEARCH_IPC_OWNER'],
   ["check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows",
     'true', 'RESEARCH_RELEASE_OWNER'],
   ["check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows",
@@ -873,6 +935,51 @@ assert.throws(() => validate(changeJobInput(source, 'research_component_release_
   "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'",
   "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (" + researchTransportCondition + ")"), workflows),
   'MIXED_MUST_NOT_PUBLISH_A_STANDALONE_RESEARCH_ARTIFACT');
+assert.throws(() => validate(changeJobInput(source, 'research_component_release_windows',
+  'RESEARCH_CARGO_TIMING_EVIDENCE_MISSING', 'TIMING_NOT_REQUIRED'), workflows),
+  'RESEARCH_COMPONENT_RELEASE_CANNOT_SILENTLY_DROP_CARGO_TIMINGS');
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
+  "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'",
+  "if: github.event_name == 'pull_request'"), workflows),
+  'RESEARCH_IPC_RUNNER_CANNOT_RUN_FOR_FOREIGN_OWNERS');
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
+  'RESEARCH_IPC_NOT_EXACT_PR_HEAD', 'RESEARCH_IPC_UNVERIFIED_HEAD'), workflows),
+  'RESEARCH_IPC_RUNNER_MUST_CHECK_IMMUTABLE_HEAD');
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
+  'RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED', 'SKIPPED_REAL_RESEARCH_WSS'), workflows),
+  'RESEARCH_IPC_RUNNER_CANNOT_CLAIM_REAL_WSS_WITHOUT_RESULT');
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
+  'edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket',
+  'echo skipped-miniflare'), workflows),
+  'RESEARCH_IPC_RUNNER_CANNOT_SKIP_MINIFLARE');
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
+  'npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund',
+  'echo skipped-miniflare-dependencies'), workflows),
+  'RESEARCH_IPC_MUST_INSTALL_REAL_MINIFLARE_DEPENDENCIES');
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
+  '      - name: Research owner live loopback MCP DO WSS without Engine\n        shell: pwsh',
+  '      - name: Research owner live loopback MCP DO WSS without Engine\n        if: false\n        shell: pwsh'), workflows),
+  'RESEARCH_IPC_WSS_STEP_CANNOT_BE_CONDITIONALLY_SKIPPED');
+for (const owner of ['research_ipc_windows', 'research_service_tests_windows',
+  'research_component_release_windows']) {
+  assert.throws(() => validate(changeJobInput(source, owner,
+    'cargo fetch --locked --offline', 'echo skipped-cargo-cache-probe'), workflows),
+  'RESEARCH_CARGO_CACHE_MUST_NOT_ASSUME_COMPLETE:' + owner);
+  assert.throws(() => validate(changeJobInput(source, owner,
+    'if ($LASTEXITCODE -eq 0) {', 'if ($true) {'), workflows),
+  'OFFLINE_CARGO_MUST_FALL_BACK_ON_INCOMPLETE_CACHE:' + owner);
+  assert.throws(() => validate(changeJobInput(source, owner,
+    '$global:LASTEXITCODE = 0', '$global:LASTEXITCODE = 1'), workflows),
+  'CARGO_OFFLINE_PROBE_MISS_CANNOT_FAIL_GITHUB_PWSH_WRAPPER:' + owner);
+}
+assert.throws(() => validate(changeJobInput(source, 'required_ci',
+  "check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows",
+  'true'), workflows),
+  'SINGLE_CI_CANNOT_IGNORE_ACTUAL_RESEARCH_IPC_RESULT');
+assert.throws(() => validate(changeJobInput(source, 'required_ci',
+  "check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows",
+  'true'), workflows),
+  'SINGLE_CI_MUST_REQUIRE_IPC_SKIP_ON_OTHER_SCOPES');
 assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
   "matrix.profile == 'research' && steps.prime-cache.outputs.cache-hit != 'true'", 'false'), workflows),
   'RESEARCH_CACHE_PRIME_MUST_NOT_BE_SILENTLY_DISABLED');
@@ -1185,19 +1292,19 @@ for (const [id, prefix, , save] of nativeCacheJobs) {
     assert.throws(() => validate(changeJobInput(source, id, before, after), workflows));
   }
 }
-assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
   'ipc_process -- --nocapture --test-threads 1',
   'ipc_process -- --nocapture --test-threads 8'), workflows));
-assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
   windowsIpcSummary, String.raw`test result: ok\. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`), workflows),
   'WINDOWS_RESEARCH_IPC_STALE_NINE_MUST_FAIL');
-assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
   windowsIpcSummary, String.raw`test result: ok\. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`), workflows),
   'WINDOWS_RESEARCH_IPC_INVENTED_ELEVEN_MUST_FAIL');
-assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
   windowsIpcSummary, String.raw`test result: ok\. 10 passed; 0 failed;`), workflows),
   'WINDOWS_RESEARCH_IPC_IGNORED_OR_FILTERED_NOT_ACCEPTED');
-assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
   'RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED', 'RESEARCH_IPC_ALL_NINE_TESTS_REQUIRED'), workflows),
   'WINDOWS_RESEARCH_IPC_FAILURE_CODE_CANNOT_DRIFT');
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
