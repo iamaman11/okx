@@ -108,17 +108,24 @@ async fn nav(owner: &UnifiedFinanceHandle, at: i64) {
 }
 
 pub(super) async fn setup() -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
-    setup_inner(true, false).await
+    setup_inner(true, false, None).await
+}
+
+pub(super) async fn setup_with_origin(
+    request_id: &str,
+) -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
+    setup_inner(true, false, Some(request_id)).await
 }
 
 pub(super) async fn setup_before_reserve_attempt()
 -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
-    setup_inner(false, false).await
+    setup_inner(false, false, None).await
 }
 
 async fn setup_inner(
     mark_attempt: bool,
     deny_order_limit: bool,
+    request_id: Option<&str>,
 ) -> (PathBuf, UnifiedFinanceHandle, NativeReserveRequest) {
     let (root, owner) = fresh().await;
     let started = owner
@@ -193,7 +200,7 @@ async fn setup_inner(
         .unwrap();
     let at = now();
     let stored = owner
-        .prepare_admission(
+        .prepare_admission_with_invocation(
             deadline(),
             account(),
             Decision {
@@ -237,6 +244,8 @@ async fn setup_inner(
                 risk_increase: true,
                 instrument_id: "BTC-USDT-SWAP".into(),
             },
+            None,
+            request_id.map(str::to_owned),
         )
         .await
         .unwrap();
@@ -519,7 +528,7 @@ pub(super) async fn cleanup(root: PathBuf, owner: UnifiedFinanceHandle) {
 }
 #[tokio::test]
 async fn risk_book_contract_first_denial_survives_replay_reopen_and_rejects_corruption() {
-    let (root, owner, request) = setup_inner(true, true).await;
+    let (root, owner, request) = setup_inner(true, true, None).await;
     let before = serde_json::to_value(owner.campaign_summary(campaign()).await.unwrap()).unwrap();
     let NativeReserveDecision::Denied { reason } = owner
         .reserve_reported(campaign(), request.clone(), reserve_census(&request))

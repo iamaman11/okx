@@ -397,11 +397,13 @@ function validate(yaml, fileNames) {
   assert.match(build, /PACKAGED_ENGINE_RUNTIME_CONTRACT_INVALID/);
   assert.match(build, /name: okx-windows-bundle-\$\{\{ github.event.pull_request.head.sha \}\}/);
   assert.match(build, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.component_scope != 'engine'\n        uses: actions\/upload-artifact/);
-  assert.match(build, /Build only Engine against verified unchanged Windows owners/);
-  assert.match(build, /prepare-research-release\.ps1 -VerifyOnly -EngineOnly/);
+  assert.match(build, /Build standalone Engine component/);
+  assert.doesNotMatch(build, /prepare-research-release\.ps1 -VerifyOnly -EngineOnly/);
   assert.match(build, /cargo build --locked --release -p okx-trading-engine/);
-  assert.match(build, /okx.windows.engine-component\/v1/);
-  assert.match(build, /reused_verified_components = \$reused/);
+  assert.match(build, /okx.windows.engine-component\/v2/);
+  assert.match(build, /artifact_scope = 'engine_only'/);
+  assert.match(build, /other_windows_owners = 'NOT_EVALUATED'/);
+  assert.doesNotMatch(build, /reused_verified_components|reused_accepted_native_base_sha/);
   assert.match(build, /release_is_complete = \$false/);
   assert.match(build, /ENGINE_COMPONENT_RUNTIME_CONTRACT_INVALID/);
   assert.match(build, /MAIN_NATIVE_REQUIRES_EXACT_ACCEPTED_READY_ARTIFACT/);

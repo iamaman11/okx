@@ -909,7 +909,17 @@ impl TradeService {
                     operation: TradeOperation::Replace,
                     ..
                 } => self.replace(&r, request, governance).await,
-                TradeRequest::Execute { .. } => self.execute(&r, request, governance).await,
+                TradeRequest::Execute { .. } => {
+                    self.execute(
+                        &r,
+                        request,
+                        governance,
+                        invocation
+                            .filter(|v| v.origin == "agent_request.trade")
+                            .map(|v| v.request_id),
+                    )
+                    .await
+                }
             }
         }))
     }

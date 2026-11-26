@@ -164,7 +164,11 @@ export function operationTrace(view:'operation'|'research',reference:string|unde
  const bound=view==='research'?data?.state!=='OBSERVED'||
    (job&&typeof job.id==='string'&&job.id.length===64&&/^[a-f0-9]+$/.test(job.id)&&
     (reference?.startsWith('request:')?job.origin_invocation===reference.slice(8):job.id===reference)):
-   data?.reference===reference;
+   !!data&&data.reference===reference&&(!reference?.startsWith('request:')||
+    (data.origin_request_id===reference.slice(8)&&
+     (data.state==='NOT_OBSERVED'||
+      (typeof data.resolved_intent_reference==='string'&&
+       /^intent:[a-zA-Z0-9_-]{1,128}$/.test(data.resolved_intent_reference)))));
  const trusted=!['unknown','failed','rejected'].includes(String(projected.status))&&
    data?.schema===(view==='research'
    ?'okx.research-job-diagnostics/v1':'okx.operation-diagnostics/v1')&&!!bound;
@@ -199,9 +203,10 @@ export function operationTrace(view:'operation'|'research',reference:string|unde
  }
  return {schema:'okx.operation-trace-summary/v1',owner,
    reference_kind:view==='research'?(reference?.startsWith('request:')?'request_id':'job_id'):
-     reference?.startsWith('intent:')?'trade_intent':reference?.startsWith('terminal_release:')?'terminal_release':'protection_operation',
+     reference?.startsWith('request:')?'request_id':reference?.startsWith('intent:')?'trade_intent':reference?.startsWith('terminal_release:')?'terminal_release':'protection_operation',
    diagnostic_request_id:projected.request_id,
-   origin_request_id:trusted&&view==='research'&&job?job.origin_invocation??null:null,
+   origin_request_id:trusted&&observed&&view==='research'&&job?job.origin_invocation??null:
+     trusted&&observed&&view==='operation'&&reference?.startsWith('request:')?reference.slice(8):null,
    job_id:trusted&&view==='research'&&job?job.id:null,
    state:observed?'OBSERVED':'NOT_EVALUATED',observed_stage:stage,
    first_unproven_fact:firstMissing,reason_code:trusted?nativeReason:reason,

@@ -81,7 +81,7 @@ impl TradeService {
             definition_version: instance.definition_version.clone(),
             opening_claim: None,
         });
-        self.execute_inner(r, &command, governance, Some(bound_hash), strategy)
+        self.execute_inner(r, &command, governance, Some(bound_hash), strategy, None)
             .await
     }
 }

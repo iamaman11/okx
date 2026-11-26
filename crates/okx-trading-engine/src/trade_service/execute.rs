@@ -695,8 +695,10 @@ impl TradeService {
         r: &Arc<AccountResources>,
         request: &TradeRequest,
         supplied: Option<&CentralGovernanceSnapshot>,
+        request_id: Option<&str>,
     ) -> Result<Value, String> {
-        self.execute_bound(r, request, supplied, None).await
+        self.execute_inner(r, request, supplied, None, None, request_id)
+            .await
     }
     pub(super) async fn execute_bound(
         &self,
@@ -705,7 +707,7 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
     ) -> Result<Value, String> {
-        self.execute_inner(r, request, supplied, bound_hash, None)
+        self.execute_inner(r, request, supplied, bound_hash, None, None)
             .await
     }
     pub(super) async fn execute_inner(
@@ -715,6 +717,7 @@ impl TradeService {
         supplied: Option<&CentralGovernanceSnapshot>,
         bound_hash: Option<String>,
         strategy: Option<StrategyDispatch>,
+        request_id: Option<&str>,
     ) -> Result<Value, String> {
         let (activation_revision, expected_definition, claimed_decision) = match strategy {
             Some(strategy) => (
@@ -939,12 +942,21 @@ impl TradeService {
                 let (owner, account) = r.execution.store.scope();
 
                 owner
-                    .prepare_admission_with_activation(
+                    .prepare_admission_with_invocation(
                         until,
                         account.to_owned(),
                         decision,
                         intent,
                         activation_revision,
+                        request_id
+                            .filter(|id| {
+                                !id.is_empty()
+                                    && id.len() <= 120
+                                    && id.bytes().all(|b| {
+                                        b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+                                    })
+                            })
+                            .map(str::to_owned),
                     )
                     .await
                     .map_err(err)?

@@ -61,19 +61,6 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
         "causal_history":"NOT_RECONSTRUCTED",
         "next_action":"retry_read_only_diagnostic"
     });
-    let Some(id) = reference.strip_prefix("intent:").filter(|id| {
-        !id.is_empty()
-            && id.len() <= 128
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    }) else {
-        result["reason_code"] = "INVALID_INTENT_REFERENCE".into();
-        result["stage"] = "REFERENCE_VALIDATION".into();
-        result["missing_evidence"] = json!(["VALID_INTENT_REFERENCE"]);
-        result["next_action"] = "supply_original_intent_reference".into();
-        return result;
-    };
     let (owner, scope) = account.execution.store.scope();
     if owner.installation_id() != installation || scope != key {
         result["reason_code"] = "ACCOUNT_IDENTITY_MISMATCH".into();
@@ -83,9 +70,62 @@ pub(crate) async fn read(account: &AccountResources, installation: &str, referen
         return result;
     }
     let until = Instant::now() + READ_BUDGET;
+    let id = if let Some(request_id) = reference.strip_prefix("request:") {
+        if request_id.is_empty()
+            || request_id.len() > 120
+            || !request_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            result["reason_code"] = "INVALID_EDGE_REQUEST_ORIGIN".into();
+            result["stage"] = "REFERENCE_VALIDATION".into();
+            result["missing_evidence"] = json!(["VALID_EDGE_REQUEST_REFERENCE"]);
+            result["next_action"] = "supply_original_request_reference".into();
+            return result;
+        }
+        result["origin_request_id"] = request_id.into();
+        let resolved = bounded_snapshot(
+            until,
+            owner.resolve_request_intent(until, scope.into(), request_id.into()),
+        )
+        .await;
+        match resolved {
+            Ok(Some(id)) => {
+                result["resolved_intent_reference"] = format!("intent:{id}").into();
+                id
+            }
+            Ok(None) => {
+                result["state"] = "NOT_OBSERVED".into();
+                result["stage"] = "REQUEST_ORIGIN_LOOKUP".into();
+                result["reason_code"] = "REQUEST_ORIGIN_NOT_RECORDED".into();
+                result["missing_evidence"] = json!(["DURABLE_REQUEST_TO_INTENT_RECEIPT"]);
+                result["next_action"] = "inspect_original_idempotency_receipt_do_not_resend".into();
+                return result;
+            }
+            Err(error) => {
+                result["reason_code"] = error.into();
+                result["missing_evidence"] = json!(["ACCOUNT_SCOPED_REQUEST_ORIGIN_SNAPSHOT"]);
+                return result;
+            }
+        }
+    } else if let Some(id) = reference.strip_prefix("intent:").filter(|id| {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }) {
+        id.to_owned()
+    } else {
+        result["reason_code"] = "INVALID_INTENT_REFERENCE".into();
+        result["stage"] = "REFERENCE_VALIDATION".into();
+        result["missing_evidence"] = json!(["VALID_INTENT_REFERENCE"]);
+        result["next_action"] = "supply_original_intent_reference".into();
+        return result;
+    };
     let snapshot = bounded_snapshot(
         until,
-        owner.inspect_intent_operation(until, scope.into(), id.into()),
+        owner.inspect_intent_operation(until, scope.into(), id),
     )
     .await;
     let snapshot = match snapshot {
