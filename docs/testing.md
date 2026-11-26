@@ -23,9 +23,23 @@ Compatible CONTROL verifies Research v3's six exact Ready statuses; legacy
 v1/v2 archives retain their seven-status provenance policy.
 Automatic accepted-`main` pushes reuse exact already-tested PR source trees
 and artifacts without rebuilding Engine or claiming fresh financial tests.
-The reduced
-matrix removes one Windows runner setup, but any wall-clock improvement
-remains unmeasured until comparable Ready CI runs complete. Optional
+The accepted #599 CI refactor removed the two redundant `linux-core` and
+`windows-native` aggregate jobs, while retaining independent Rust tests and
+the four Native regression suites. A comparable full Ready measurement now
+exists: [#601 Ready run 45723725108](https://github.com/iamaman11/okx/actions/runs/45723725108)
+finished its jobs in **404 seconds**, versus **425 seconds** for the prior
+[#598 full run 45713166028](https://github.com/iamaman11/okx/actions/runs/45713166028).
+Both consumed about **28.4 successful runner-minutes**; the 21-second observed
+wall-clock reduction does **not** prove the 120-second warm owner-change target
+from #580. The four parallel regression suites all passed in the #601 run.
+The matching [main run 45724662321](https://github.com/iamaman11/okx/actions/runs/45724662321)
+reused the accepted PR artifact without recompiling Windows binaries. Separate
+post-change owner-only Ready runs (Engine, Research, Host, Cloudflare and docs)
+and mixed Research+Host need individual evidence before closing
+[#599](https://github.com/iamaman11/okx/issues/599); do not infer their
+durations or safe exclusions from the full run.
+
+Optional
 `workflow_dispatch` cache warming accepts `cache_profile=tests|release|both`
 (`both` by default); the first two options request one Windows compile job,
 and `both` requests two. These jobs are not protected acceptance or release
