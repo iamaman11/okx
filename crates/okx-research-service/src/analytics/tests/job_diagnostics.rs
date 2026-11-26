@@ -432,3 +432,52 @@ fn job_diagnostic_retention_and_indexed_startup_are_bounded() {
         JobState::Failed
     );
 }
+
+#[test]
+fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
+    use okx_research_protocol::research_ipc::InvocationId;
+
+    // Simulate a damaged/replayed bounded projection, not a permitted catalog
+    // write: two different jobs claim the same external request identity.
+    let shared = InvocationId::new("req_ambiguous_replayed_origin".into()).unwrap();
+    let unrelated = InvocationId::new("req_other_job_original".into()).unwrap();
+    let original_job = "a".repeat(64);
+    let second_job = "b".repeat(64);
+    let snapshot = |id: &str, origin: InvocationId, aliases: Vec<InvocationId>| Snapshot {
+        id: id.to_owned(),
+        state: "failed".into(),
+        progress: 0,
+        candidate_progress: None,
+        origin_invocation: Some(origin),
+        retry_invocations: aliases,
+        producer: None,
+        result_ref: None,
+        error_code: Some("CANDLE_RANGE_UNAVAILABLE".into()),
+        pinned: false,
+        observed_at_ms: 0,
+        generation: 0,
+        origin: "catalog_commit",
+    };
+    let projection = Projection::default();
+    projection.publish(snapshot(&original_job, shared.clone(), vec![]));
+    // Republishing the same job is an update, never a second conflicting job.
+    projection.publish(snapshot(&original_job, shared.clone(), vec![]));
+    let unambiguous = projection.read_by_invocation(shared.as_str());
+    assert_eq!(unambiguous["state"], "OBSERVED");
+    assert_eq!(unambiguous["matched_request_id"], shared.as_str());
+    assert_eq!(unambiguous["retained"], 1);
+
+    projection.publish(snapshot(&second_job, unrelated, vec![shared.clone()]));
+    let collision = projection.read_by_invocation(shared.as_str());
+    assert_eq!(collision["state"], "NOT_EVALUATED");
+    assert_eq!(collision["reason_code"], "AMBIGUOUS_REQUEST_ORIGIN");
+    assert_eq!(collision["next_action"], "supply_exact_job_id");
+    assert_eq!(collision["history"], "UNKNOWN");
+    assert_eq!(collision["retained"], 2);
+    assert!(collision.get("matched_request_id").is_none());
+    assert!(collision["job"].is_null());
+    // The exact local job IDs remain individually readable without exposing
+    // an arbitrary winner for the colliding external request identity.
+    assert_eq!(projection.read(&original_job)["job"]["id"], original_job);
+    assert_eq!(projection.read(&second_job)["job"]["id"], second_job);
+}
