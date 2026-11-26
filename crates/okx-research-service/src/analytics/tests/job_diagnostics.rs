@@ -434,6 +434,75 @@ fn job_diagnostic_retention_and_indexed_startup_are_bounded() {
 }
 
 #[test]
+fn restart_truncated_request_projection_never_invents_origin_or_retry_history() {
+    use okx_research_protocol::research_ipc::{IdempotencyKey, InvocationId};
+
+    let (jobs, file) = jobs("bounded-request-aliases");
+    for n in 0..130 {
+        let id = format!("{n:064x}");
+        let key = IdempotencyKey::new(format!("retention-key-{n}")).unwrap();
+        let origin = InvocationId::new(format!("req_retained_origin_{n}")).unwrap();
+        let (created, fresh, _) = jobs
+            .enqueue_semantic_with_origin(
+                key.clone(),
+                id.clone(),
+                format!("semantic-{n}"),
+                Some(origin),
+            )
+            .unwrap();
+        assert!(fresh);
+        assert_eq!(created.id, id);
+        jobs.update(&id, JobState::Failed, None, Some("CANDLE_RANGE_UNAVAILABLE".into()))
+            .unwrap();
+        if n == 0 || n == 129 {
+            let retry = InvocationId::new(format!("req_retained_retry_{n}")).unwrap();
+            let (same, fresh, _) = jobs
+                .enqueue_semantic_with_origin(
+                    key,
+                    id.clone(),
+                    format!("semantic-{n}"),
+                    Some(retry),
+                )
+                .unwrap();
+            assert!(!fresh);
+            assert_eq!(same.id, id);
+        }
+    }
+    drop(jobs);
+    let restored = Jobs::open(file).unwrap();
+    // The durable catalog still owns the old job, but the bounded, read-only
+    // startup trace cannot claim to remember an evicted request or its retry.
+    for reference in [
+        "req_retained_origin_0",
+        "req_retained_retry_0",
+        "req_never_seen_by_research",
+    ] {
+        let missing = restored.diagnostic_by_invocation(reference);
+        assert_eq!(missing["state"], "NOT_OBSERVED");
+        assert_eq!(missing["reason_code"], "UNKNOWN_NOT_RETAINED");
+        assert_eq!(missing["quality"], "partial");
+        assert_eq!(missing["startup_subset_truncated"], true);
+        assert_eq!(missing["history"], "UNKNOWN");
+        assert_eq!(missing["next_action"], "retry_read_only_diagnostic");
+        assert!(missing.get("matched_request_id").is_none());
+        assert!(missing["job"].is_null());
+    }
+    for reference in ["req_retained_origin_129", "req_retained_retry_129"] {
+        let observed = restored.diagnostic_by_invocation(reference);
+        assert_eq!(observed["state"], "OBSERVED");
+        assert_eq!(observed["matched_request_id"], reference);
+        assert_eq!(observed["job"]["id"], format!("{:064x}", 129));
+        assert_eq!(observed["job"]["origin"], "durable_startup_subset");
+        assert_eq!(observed["job"]["error_code"], "CANDLE_RANGE_UNAVAILABLE");
+        assert!(observed["job"]["result_ref"].is_null());
+    }
+    assert_eq!(
+        restored.get(&format!("{:064x}", 0)).unwrap().state,
+        JobState::Failed
+    );
+}
+
+#[test]
 fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
     use okx_research_protocol::research_ipc::InvocationId;
 
