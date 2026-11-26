@@ -313,6 +313,50 @@ if(fullTrace?.operation_trace?.state!=='OBSERVED'||
  fullTrace.data.job.id!==originJob)
  throw Error('public diagnostics.explain lost Research operation summary');
 console.log('diagnostics_explain_research_request_id PASS');
+// A lost-response retry has a distinct request ID but the same durable job.
+// Research now explicitly attests the *queried* invocation on an OBSERVED
+// bounded lookup. Edge must not mistake the old origin ID for a retry match.
+const retriedRequest='req_retry_after_lost_reply_02';
+const retryJob={id:originJob,state:'completed',origin_invocation:'req_original_01',
+ result_ref:`sha256:${'a'.repeat(64)}`};
+const aliasTrace=await mcpResponse('diagnostics',
+ {action:'explain',view:'research',reference:`request:${retriedRequest}`},
+ {status:'partial',data:{schema:'okx.research-job-diagnostics/v1',
+  state:'OBSERVED',reason_code:'JOB_SNAPSHOT',reference_kind:'request_id',
+  matched_request_id:retriedRequest,job:retryJob}});
+if(aliasTrace?.operation_trace?.state!=='OBSERVED'||
+ aliasTrace.operation_trace.job_id!==originJob||
+ aliasTrace.operation_trace.origin_request_id!=='req_original_01'||
+ aliasTrace.operation_trace.next_action!=='research.result')
+ throw Error('Research retry request was not bound to its durable job');
+for(const [label,changed] of [
+ ['missing owner match',{}],
+ ['wrong match',{matched_request_id:'req_unrelated_03'}],
+ ['wrong kind',{reference_kind:'job_id',matched_request_id:retriedRequest}],
+ ['spoofed origin',{matched_request_id:'req_unrelated_03',job:{...retryJob,origin_invocation:retriedRequest}}],
+ ['invalid job',{matched_request_id:retriedRequest,job:{...retryJob,id:'not-a-job'}}],
+] as const){
+ const trace=await mcpResponse('diagnostics',
+  {action:'explain',view:'research',reference:`request:${retriedRequest}`},
+  {status:'partial',data:{schema:'okx.research-job-diagnostics/v1',
+   state:'OBSERVED',reason_code:'JOB_SNAPSHOT',reference_kind:'request_id',
+   job:retryJob,...changed}});
+ if(trace?.operation_trace?.state!=='NOT_EVALUATED'||trace.operation_trace.job_id!==null)
+  throw Error(`unproven Research retry was promoted: ${label}`);
+}
+for(const [state,reason] of [
+ ['NOT_OBSERVED','UNKNOWN_NOT_RETAINED'],
+ ['NOT_EVALUATED','AMBIGUOUS_REQUEST_ORIGIN'],
+] as const){
+ const trace=await mcpResponse('diagnostics',
+  {action:'explain',view:'research',reference:`request:${retriedRequest}`},
+  {status:'partial',data:{schema:'okx.research-job-diagnostics/v1',
+   state,reason_code:reason,reference_kind:'request_id',
+   matched_request_id:retriedRequest,job:null}});
+ if(trace?.operation_trace?.state!=='NOT_EVALUATED'||trace.operation_trace.job_id!==null)
+  throw Error(`unobserved Research request was promoted: ${reason}`);
+}
+console.log('diagnostics_explain_research_retry_owner_match_fail_closed PASS');
 for(const configured of [false,true]){
  const seen:any[]=[];
  const routeEnv:any={...(configured?{RESEARCH_RUNTIME_TOKEN_SHA256:'f'.repeat(64)}:{}),
