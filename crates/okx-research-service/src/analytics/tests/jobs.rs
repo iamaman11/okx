@@ -836,14 +836,18 @@ fn edge_request_diagnostic_is_bounded_nonblocking_and_ambiguous_fail_closed() {
         restored.diagnostic_by_invocation("req_never_observed")["reason_code"],
         "UNKNOWN_NOT_RETAINED"
     );
-    assert!(restored
-        .diagnostic_by_invocation("req_never_observed")
-        .get("matched_request_id")
-        .is_none());
-    assert!(restored
-        .diagnostic_by_invocation("req/invalid")
-        .get("matched_request_id")
-        .is_none());
+    assert!(
+        restored
+            .diagnostic_by_invocation("req_never_observed")
+            .get("matched_request_id")
+            .is_none()
+    );
+    assert!(
+        restored
+            .diagnostic_by_invocation("req/invalid")
+            .get("matched_request_id")
+            .is_none()
+    );
 }
 
 #[test]
@@ -888,10 +892,11 @@ fn idempotent_retry_links_each_observed_request_without_rewriting_job_origin() {
     assert_eq!(retried_trace["reference_kind"], "request_id");
     assert_eq!(retried_trace["matched_request_id"], retry.as_str());
     assert_eq!(retried_trace["job"]["origin_invocation"], first.as_str());
-    assert!(jobs
-        .diagnostic_readback(&original.id)
-        .get("matched_request_id")
-        .is_none());
+    assert!(
+        jobs.diagnostic_readback(&original.id)
+            .get("matched_request_id")
+            .is_none()
+    );
     assert!(matches!(
         jobs.enqueue_semantic_with_origin(
             key,
@@ -905,10 +910,11 @@ fn idempotent_retry_links_each_observed_request_without_rewriting_job_origin() {
         jobs.diagnostic_by_invocation(unrelated.as_str())["reason_code"],
         "UNKNOWN_NOT_RETAINED"
     );
-    assert!(jobs
-        .diagnostic_by_invocation(unrelated.as_str())
-        .get("matched_request_id")
-        .is_none());
+    assert!(
+        jobs.diagnostic_by_invocation(unrelated.as_str())
+            .get("matched_request_id")
+            .is_none()
+    );
     drop(jobs);
     let reopened = Jobs::open(file).unwrap();
     assert_eq!(

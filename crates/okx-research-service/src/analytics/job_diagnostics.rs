@@ -320,7 +320,10 @@ impl Projection {
             "startup_restore_failed":self.restore_failed.load(Ordering::Relaxed),"read_only":true,
             "reference_kind":if by_invocation {"request_id"}else{"job_id"},
             "next_action":if ambiguous {"supply_exact_job_id"}else if observed {"inspect_job_snapshot"}else{"retry_read_only_diagnostic"}});
-        if by_invocation && observed && let Some(invocation) = verified_invocation {
+        if by_invocation
+            && observed
+            && let Some(invocation) = verified_invocation
+        {
             result["matched_request_id"] = json!(invocation.as_str());
         }
         result
