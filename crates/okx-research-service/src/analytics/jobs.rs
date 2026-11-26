@@ -523,30 +523,28 @@ impl Jobs {
             .map_err(|e| e.to_string())?;
             true
         };
-        if verified_retry {
-            if let Some(invocation) = &origin {
-                // The idempotency key and semantic hash were verified under
-                // this same IMMEDIATE transaction. This maps an observed
-                // retry to its *existing* job without rewriting the original
-                // request ID or manufacturing links for rejected requests.
-                // REPLACE refreshes the rowid of a repeated invocation so
-                // the bounded window tracks the most recently observed IDs.
-                tx.execute(
-                    "INSERT OR REPLACE INTO research_invocation_links(invocation,job_id)
+        if verified_retry && let Some(invocation) = &origin {
+            // The idempotency key and semantic hash were verified under
+            // this same IMMEDIATE transaction. This maps an observed
+            // retry to its *existing* job without rewriting the original
+            // request ID or manufacturing links for rejected requests.
+            // REPLACE refreshes the rowid of a repeated invocation so
+            // the bounded window tracks the most recently observed IDs.
+            tx.execute(
+                "INSERT OR REPLACE INTO research_invocation_links(invocation,job_id)
                      VALUES(?1,?2)",
-                    params![invocation.as_str(), hash],
-                )
-                .map_err(|e| e.to_string())?;
-                tx.execute(
-                    "DELETE FROM research_invocation_links WHERE job_id=?1
+                params![invocation.as_str(), hash],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM research_invocation_links WHERE job_id=?1
                      AND rowid NOT IN (
                        SELECT rowid FROM research_invocation_links WHERE job_id=?1
                        ORDER BY rowid DESC LIMIT ?2
                      )",
-                    params![hash, MAX_ORIGIN_ALIASES_PER_JOB],
-                )
-                .map_err(|e| e.to_string())?;
-            }
+                params![hash, MAX_ORIGIN_ALIASES_PER_JOB],
+            )
+            .map_err(|e| e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
         let job = Self::read(&db, &hash)?.ok_or("JOB_NOT_FOUND")?;
