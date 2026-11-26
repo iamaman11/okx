@@ -179,11 +179,8 @@ impl UnifiedFinanceHandle {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
             AccountStore::verify_source_account_sql(&tx, &installation, &account)?;
             let scope = Some((installation.as_str(), account.as_str()));
-            let receipt = AccountStore::operation_sql(
-                &tx,
-                scope,
-                &format!("edge-request:{request_id}"),
-            )?;
+            let receipt =
+                AccountStore::operation_sql(&tx, scope, &format!("edge-request:{request_id}"))?;
             let result = match receipt {
                 None => None,
                 Some(receipt) => {

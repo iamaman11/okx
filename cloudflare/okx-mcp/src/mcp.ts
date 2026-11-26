@@ -164,7 +164,7 @@ export function operationTrace(view:'operation'|'research',reference:string|unde
  const bound=view==='research'?data?.state!=='OBSERVED'||
    (job&&typeof job.id==='string'&&job.id.length===64&&/^[a-f0-9]+$/.test(job.id)&&
     (reference?.startsWith('request:')?job.origin_invocation===reference.slice(8):job.id===reference)):
-   data?.reference===reference&&(!reference?.startsWith('request:')||
+   !!data&&data.reference===reference&&(!reference?.startsWith('request:')||
     (data.origin_request_id===reference.slice(8)&&
      (data.state==='NOT_OBSERVED'||
       (typeof data.resolved_intent_reference==='string'&&

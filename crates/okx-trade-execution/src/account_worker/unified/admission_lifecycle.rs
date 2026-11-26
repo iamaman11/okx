@@ -27,7 +27,12 @@ impl UnifiedFinanceHandle {
         activation_revision: Option<i64>,
     ) -> StoreResult<StoredIntent> {
         self.prepare_admission_with_invocation(
-            deadline, account, decision, intent, activation_revision, None,
+            deadline,
+            account,
+            decision,
+            intent,
+            activation_revision,
+            None,
         )
         .await
     }
