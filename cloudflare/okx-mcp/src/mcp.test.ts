@@ -38,9 +38,54 @@ if(unconfirmedStart.error?.code!==-32602||!unconfirmedStart.error.message.includ
 console.log(`tools_list_actual_serialized PASS 13 tools ${bytes} bytes`);
 
 const fixture=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='execute')!;
-const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json({status:'FAILED',reason:'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT',retryable:false})})}};
+let earlyRequestId='';
+const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
+ earlyRequestId=JSON.parse(String(init.body)).request_id;
+ return Response.json({status:'FAILED',reason:'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT',retryable:false});
+}})}};
 const unknown:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:2,method:'tools/call',params:publicArgs('trade',fixture.positive)})}),env,ctx)).json();
-if(unknown.result.structuredContent.status!=='unknown'||unknown.result.structuredContent.retryable!==false||!unknown.result.structuredContent.request_id||!unknown.result.structuredContent.as_of_ms)throw Error('unknown outcome common shell');
+if(unknown.result.structuredContent.status!=='unknown'||unknown.result.structuredContent.retryable!==false||
+ unknown.result.structuredContent.request_id!==earlyRequestId||!unknown.result.structuredContent.as_of_ms)
+ throw Error('pre-delivery UNKNOWN lost the exact native request_id');
+for(const [tool,args,scope,next] of [
+ ['research',{action:'capabilities'},'research','inspect_research_job_or_idempotency_receipt'],
+ ['trade',fixture.positive,'engine','inspect_exact_intent']
+] as const){
+ let sentId='';
+ const mismatchEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
+  sentId=JSON.parse(String(init.body)).request_id;
+  return Response.json({schema:'okx.agent.response/v1',request_id:'req_different_native',
+   status:'completed',quality:'FRESH',warnings:[],result:{state:'completed'}});
+ }})}};
+ const actual:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:3,method:'tools/call',params:publicArgs(tool,args)})}),mismatchEnv,ctx)).json();
+ const projected=actual.result?.structuredContent;
+ if(projected?.status!=='unknown'||projected?.request_id!==sentId||
+   projected?.reason_code!=='RESPONSE_REQUEST_ID_MISMATCH'||projected?.retryable!==false||
+   projected?.next_action!==next||projected?.scope!==scope||projected?.data!==null)
+  throw Error('mismatched native reply falsely claimed operation success '+tool);
+}
+console.log('mcp_exact_request_identity_fail_closed PASS');
+for(const [tool,args,expectedStatus,expectedReason] of [
+ ['trade',fixture.positive,'unknown','MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT'],
+ ['research',{action:'benchmark',idempotency_key:'research_benchmark_01'},'unknown',
+  'RESEARCH_MUTATION_OUTCOME_UNKNOWN_CHECK_JOB'],
+ ['research',{action:'capabilities'},'failed','EDGE_DISPATCH_UNAVAILABLE']
+] as const){
+ let sentId='';
+ const interrupted:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
+  sentId=JSON.parse(String(init.body)).request_id;
+  throw Error('private transport detail must not escape');
+ }})}};
+ const actual:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:4,method:'tools/call',params:publicArgs(tool,args)})}),interrupted,ctx)).json();
+ const projected=actual.result?.structuredContent;
+ if(projected?.request_id!==sentId||projected?.status!==expectedStatus||
+   projected?.reason_code!==expectedReason||projected?.data!==null||
+   JSON.stringify(projected).includes('private transport detail'))
+  throw Error('transport exception lost correlation or leaked internals '+tool);
+}
+console.log('mcp_interrupted_dispatch_tracks_original_request PASS');
 
 const nestedUnknown:any=projectNativeResponse({schema:'okx.agent.response/v1',request_id:'req_native_unknown',status:'completed',quality:'FRESH',warnings:['native_warning'],result:{status:'UNKNOWN',reason_code:'POSTING_UNKNOWN',intent_id:'intent_398'}});
 if(nestedUnknown.status!=='unknown'||nestedUnknown.reason_code!=='POSTING_UNKNOWN'||nestedUnknown.retryable!==false||nestedUnknown.data.intent_id!=='intent_398'||nestedUnknown.warnings[0]!=='native_warning')throw Error('nested UNKNOWN must not become completed');
@@ -146,7 +191,7 @@ if(markedPartial.status!=='partial')throw Error('P0.2 authoritative partial qual
 console.log('mcp_finance_manual_is_account_capital_without_false_partial PASS');
 
 const oversized='x'.repeat(13_000);
-const budgetEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json({schema:'okx.agent.response/v1',request_id:'req_native_large',status:'completed',quality:'FRESH',warnings:[],result:{rows:[oversized]}})})}};
+const budgetEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>Response.json({schema:'okx.agent.response/v1',request_id:JSON.parse(String(init.body)).request_id,status:'completed',quality:'FRESH',warnings:[],result:{rows:[oversized]}})})}};
 const budget:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:3,method:'tools/call',params:{name:'market',arguments:payloadFixtures.find(x=>x.tool==='market')!.positive}})}),budgetEnv,ctx)).json();
 const budgetResult=budget.result.structuredContent;
 if(budgetResult.status!=='failed'||budgetResult.reason_code!=='RESPONSE_TOO_LARGE'||budgetResult.data.response_budget_bytes!==12_288||budgetResult.data.response_bytes<=12_288)throw Error('oversized native result must terminalize as bounded MCP failure');
@@ -155,8 +200,8 @@ if(budgetResult.status!=='failed'||budgetResult.reason_code!=='RESPONSE_TOO_LARG
 // decision packet. Keep every descriptor while retaining a finite bound and
 // preserving the ordinary 12 KiB limit established above.
 const catalogCall=async(padding:number):Promise<any>=>{
- const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json({
-  schema:'okx.agent.response/v1',request_id:'req_native_catalog',status:'completed',quality:'FRESH',warnings:[],
+ const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>Response.json({
+  schema:'okx.agent.response/v1',request_id:JSON.parse(String(init.body)).request_id,status:'completed',quality:'FRESH',warnings:[],
   result:{schema:'okx.market.capabilities/v1',operators:[{name:'returns',version:1,unit:'ratio'}],
    composition:{operations:[{op:'rolling_range',version:1,input_unit:'price'}]},details:'x'.repeat(padding)}
  })})}};
@@ -175,7 +220,15 @@ if(oversizedCatalog.status!=='failed'||oversizedCatalog.reason_code!=='RESPONSE_
  throw Error('catalogue exception must still terminate above its own finite 20 KiB bound');
 console.log('market_capabilities_20k_only_preserves_descriptors_and_finite_bound PASS');
 
-const nativeResponse=(response:unknown):any=>({RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>Response.json(response)})}});
+const nativeResponse=(response:unknown):any=>({RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
+ const id=JSON.parse(String(init.body)).request_id;
+ const isNative=(value:any)=>value?.schema==='okx.agent.response/v1';
+ const align=(value:any):any=>isNative(value)?{...value,request_id:id}:value;
+ const fixed=align(response&&typeof response==='object'?{...response}:response);
+ if(fixed?.data&&isNative(fixed.data))fixed.data=align(fixed.data);
+ if(fixed?.result&&isNative(fixed.result))fixed.result=align(fixed.result);
+ return Response.json(fixed);
+}})}});
 const mcpResponse=async(tool:string,args:unknown,response:unknown,releaseTree?:string):Promise<any>=>{
  const env={...nativeResponse(response),RELEASE_SOURCE_TREE:releaseTree};
  const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
@@ -279,10 +332,10 @@ console.log('P0_mcp_three_graphs_forwarded_and_distinct PASS');
 // Exercise the real Worker MCP projection/dispatch for 100 independent read-only
 // requests. The Durable Object is a deterministic fixture, not a physical network SLA.
 let inFlightRead=0,maxInFlightRead=0,nativeReadCount=0;
-const readOnlyEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>{
+const readOnlyEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
  nativeReadCount++;inFlightRead++;maxInFlightRead=Math.max(maxInFlightRead,inFlightRead);
  await Promise.resolve();inFlightRead--;
- return Response.json({schema:'okx.agent.response/v1',request_id:'fake_readonly_native',
+ return Response.json({schema:'okx.agent.response/v1',request_id:JSON.parse(String(init.body)).request_id,
    status:'completed',quality:'FRESH',warnings:[],
    result:{schema:'okx.research.capabilities/v1',strategy_ids:['ema_cross_v1']}});
 }})}};
@@ -328,7 +381,7 @@ for(const [tool,action] of fakeMutationActions){
    }
    if(path==='/account-governance')return Response.json({status:'CONFIGURED',revision:0,accounts:[]});
    if(path==='/dispatch')return Response.json({schema:'okx.agent.response/v1',
-    request_id:'fake_mutation_native',status:'completed',quality:'FRESH',warnings:[],
+    request_id:request.request_id,status:'completed',quality:'FRESH',warnings:[],
     result:{schema:'okx.fake-venue.fixture/v1',venue:'fake',exchange_post_count:0}});
    return Response.json({status:'completed',data:{venue:'fake',exchange_post_count:0}});
   };
@@ -440,7 +493,7 @@ const nativeNotFound=await mcpResponse('research',{action:'status',job_id:'missi
  {status:'completed',data:rawFailure('JOB_NOT_FOUND')});
 if(nativeNotFound.status!=='rejected'||nativeNotFound.reason_code!=='JOB_NOT_FOUND'||
  nativeNotFound.data!==null||nativeNotFound.retryable!==false||
- nativeNotFound.request_id!=='native_fail_398')throw Error('DO wrapped JOB_NOT_FOUND code lost');
+ !nativeNotFound.request_id.startsWith('req_mcp_'))throw Error('DO wrapped JOB_NOT_FOUND code lost');
 console.log('native_failure_code_passthrough PASS');
 
 const previewFixture=payloadFixtures.find(x=>x.tool==='trade'&&x.action==='preview')!;
