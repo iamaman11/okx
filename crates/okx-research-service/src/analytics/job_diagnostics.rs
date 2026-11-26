@@ -258,11 +258,16 @@ impl Projection {
         }
     }
     pub(super) fn read(&self, id: &str) -> Value {
-        self.read_matching(|snapshot| snapshot.id == id, false)
+        self.read_matching(|snapshot| snapshot.id == id, false, None)
     }
     /// Search only the same bounded, read-only projection as read(job_id).
     /// A miss cannot prove that the Edge invocation never created a job.
     pub(super) fn read_by_invocation(&self, invocation: &str) -> Value {
+        // Echo the exact queried identity only after a unique, observed match.
+        // The Edge can then distinguish a proven retry alias from a foreign
+        // original invocation without exposing the persisted alias roster.
+        let verified_invocation =
+            okx_research_protocol::research_ipc::InvocationId::new(invocation.to_owned()).ok();
         self.read_matching(
             |snapshot| {
                 snapshot
@@ -275,9 +280,15 @@ impl Projection {
                         .any(|origin| origin.as_str() == invocation)
             },
             true,
+            verified_invocation.as_ref(),
         )
     }
-    fn read_matching(&self, matches: impl Fn(&Snapshot) -> bool, by_invocation: bool) -> Value {
+    fn read_matching(
+        &self,
+        matches: impl Fn(&Snapshot) -> bool,
+        by_invocation: bool,
+        verified_invocation: Option<&okx_research_protocol::research_ipc::InvocationId>,
+    ) -> Value {
         let dropped = self.dropped.load(Ordering::Relaxed);
         let partial = self.restore_partial.load(Ordering::Relaxed);
         let lock = self.state.try_read();
@@ -298,7 +309,7 @@ impl Projection {
         let ambiguous = by_invocation && matching.next().is_some();
         let snapshot = if ambiguous { None } else { first };
         let observed = snapshot.is_some();
-        json!({"schema":"okx.research-job-diagnostics/v1","owner":"research_job_catalog",
+        let mut result = json!({"schema":"okx.research-job-diagnostics/v1","owner":"research_job_catalog",
             "state":if ambiguous {"NOT_EVALUATED"}else if observed {"OBSERVED"}else{"NOT_OBSERVED"},
             "reason_code":if ambiguous {"AMBIGUOUS_REQUEST_ORIGIN"}else if observed {"JOB_SNAPSHOT"}else{"UNKNOWN_NOT_RETAINED"},
             "quality":"partial","history":"UNKNOWN","job":snapshot,
@@ -308,7 +319,11 @@ impl Projection {
             "startup_subset_selection":"latest_created_ms_then_id",
             "startup_restore_failed":self.restore_failed.load(Ordering::Relaxed),"read_only":true,
             "reference_kind":if by_invocation {"request_id"}else{"job_id"},
-            "next_action":if ambiguous {"supply_exact_job_id"}else if observed {"inspect_job_snapshot"}else{"retry_read_only_diagnostic"}})
+            "next_action":if ambiguous {"supply_exact_job_id"}else if observed {"inspect_job_snapshot"}else{"retry_read_only_diagnostic"}});
+        if by_invocation && observed && let Some(invocation) = verified_invocation {
+            result["matched_request_id"] = json!(invocation.as_str());
+        }
+        result
     }
 }
 
