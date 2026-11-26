@@ -1,12 +1,39 @@
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const output = mkdtempSync(join(tmpdir(), "okx-mcp-tool-result-"));
 const tsc = resolve("node_modules/typescript/bin/tsc");
+// The three historical Cloudflare-finance tests are retained as source
+// archaeology, not as passing tests for the current Native finance owner.
+// Every other *.test.ts must execute; a new/renamed test cannot silently be
+// typechecked and omitted from the actual CI test process roster.
+const retiredTests = Object.freeze([
+  "acceptance_composed.test.js",
+  "legacy_finance_cutover.test.js",
+  "risk_book.test.js",
+]);
+const activeTests = Object.freeze([
+  "auth.test.js",
+  "shared.test.js",
+  "execution_tools.test.js",
+  "account_governance.test.js",
+  "account_governance_store.test.js",
+  "risk_authority.test.js",
+  "runtime_session.test.js",
+  "runtime_backpressure.test.js",
+  "mcp.test.js",
+]);
+const discoveredTests = readdirSync(resolve("src"), { recursive: true })
+  .map(file => file.replaceAll("\\", "/"))
+  .filter(file => file.endsWith(".test.ts"))
+  .map(file => file.slice(0, -3) + ".js")
+  .sort();
+assert.deepEqual([...activeTests, ...retiredTests].sort(), discoveredTests,
+  "Cloudflare test inventory must run every non-retired source test");
 
 
 try {
@@ -20,7 +47,7 @@ try {
   // FINANCIAL_WITNESS_RETIREMENT.md and the Native finance owner suite.
   console.log("RETIRED financial witnesses (not PASS): risk_book.test, legacy_finance_cutover.test, acceptance_composed.test; old financial cases of risk_authority.test replaced by retirement denial checks");
   let executed=0;
-  for (const file of ["auth.test.js", "shared.test.js", "execution_tools.test.js", "account_governance.test.js", "account_governance_store.test.js", "risk_authority.test.js", "runtime_session.test.js", "runtime_backpressure.test.js", "mcp.test.js"]) {
+  for (const file of activeTests) {
     execFileSync(process.execPath, [join(output, file)], {
       stdio: "inherit",
     });
@@ -115,8 +142,8 @@ try {
   mkdirSync("contracts",{recursive:true});
   writeFileSync("contracts/tools.schema.json",JSON.stringify({tools:PUBLIC_TOOLS},null,2)+"\n");
   writeFileSync("contracts/action-fixtures.json",JSON.stringify(payloadFixtures,null,2)+"\n");
-  if(executed===0)throw new Error("empty Worker test suite");
-  console.log(`Worker test files passed: ${executed}`);
+  assert.equal(executed, activeTests.length, "complete current Worker test roster executed");
+  console.log(`Worker test files passed: ${executed}; explicitly retired: ${retiredTests.length}`);
 } finally {
   rmSync(output, { recursive: true, force: true });
 }
