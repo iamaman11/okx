@@ -764,6 +764,77 @@ fn producer_and_origin_survive_replay_failure_and_reopen() {
 }
 
 #[test]
+fn edge_request_diagnostic_is_bounded_nonblocking_and_ambiguous_fail_closed() {
+    let file = path("edge-request-diagnostic");
+    let origin =
+        okx_research_protocol::research_ipc::InvocationId::new("req_edge_original_01".into())
+            .unwrap();
+    let jobs = Jobs::open(file.clone()).unwrap();
+    let key = IdempotencyKey::new("origin-first".into()).unwrap();
+    let (first, _, _) = jobs
+        .enqueue_semantic_with_origin(
+            key,
+            "a".repeat(64),
+            "semantic-1".into(),
+            Some(origin.clone()),
+        )
+        .unwrap();
+    jobs.update(
+        &first.id,
+        State::Failed,
+        None,
+        Some("secret=DO_NOT_DISCLOSE".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        jobs.diagnostic_by_invocation(origin.as_str())["job"]["id"],
+        first.id
+    );
+    assert_eq!(
+        jobs.diagnostic_by_invocation(origin.as_str())["job"]["error_code"],
+        "UNCLASSIFIED_RESEARCH_ERROR"
+    );
+    let lock = jobs.db.lock().unwrap();
+    let reader = jobs.clone();
+    let request = origin.as_str().to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        tx.send(reader.diagnostic_by_invocation(&request)).unwrap()
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_millis(200));
+    drop(lock);
+    thread.join().unwrap();
+    assert_eq!(result.unwrap()["state"], "OBSERVED");
+
+    // A request may have produced more than one job: no guessed winner.
+    let (second, _, _) = jobs
+        .enqueue_semantic_with_origin(
+            IdempotencyKey::new("origin-second".into()).unwrap(),
+            "b".repeat(64),
+            "semantic-2".into(),
+            Some(origin.clone()),
+        )
+        .unwrap();
+    let ambiguous = jobs.diagnostic_by_invocation(origin.as_str());
+    assert_eq!(ambiguous["state"], "NOT_EVALUATED");
+    assert_eq!(ambiguous["reason_code"], "AMBIGUOUS_REQUEST_ORIGIN");
+    assert!(ambiguous["job"].is_null());
+    assert_eq!(ambiguous["next_action"], "supply_exact_job_id");
+    assert!(!ambiguous.to_string().contains("DO_NOT_DISCLOSE"));
+    assert_eq!(jobs.diagnostic_readback(&second.id)["state"], "OBSERVED");
+    drop(jobs);
+    let restored = Jobs::open(file).unwrap();
+    assert_eq!(
+        restored.diagnostic_by_invocation(origin.as_str())["reason_code"],
+        "AMBIGUOUS_REQUEST_ORIGIN"
+    );
+    assert_eq!(
+        restored.diagnostic_by_invocation("req_never_observed")["reason_code"],
+        "UNKNOWN_NOT_RETAINED"
+    );
+}
+
+#[test]
 fn historical_rows_keep_unknown_producer_on_replay() {
     let file = path("legacy-producer");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();

@@ -100,6 +100,9 @@ over Engine/Research financial work.
   separately owned. This overview never reads financial SQL or executes
   exchange requests.
 
+The operator-facing reference formats and bounded cross-owner summary are
+documented in [Operation diagnostics](OPERATION_DIAGNOSTICS.md).
+
 The field is additive; existing `Status`, `StatusResearch` and Edge contracts
 remain compatible. Because the readback integration touches
 `lifecycle_executor.rs`, that PR follows the existing **full native/financial

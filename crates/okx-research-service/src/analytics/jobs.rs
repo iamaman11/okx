@@ -586,6 +586,10 @@ impl Jobs {
     pub fn diagnostic_readback(&self, id: &str) -> serde_json::Value {
         self.diagnostic.read(id)
     }
+    /// A bounded invocation lookup uses the exact same non-blocking projection.
+    pub fn diagnostic_by_invocation(&self, invocation: &str) -> serde_json::Value {
+        self.diagnostic.read_by_invocation(invocation)
+    }
     pub fn update(
         &self,
         id: &str,

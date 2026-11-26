@@ -187,6 +187,22 @@ impl Projection {
         }
     }
     pub(super) fn read(&self, id: &str) -> Value {
+        self.read_matching(|snapshot| snapshot.id == id, false)
+    }
+    /// Search only the same bounded, read-only projection as read(job_id).
+    /// A miss cannot prove that the Edge invocation never created a job.
+    pub(super) fn read_by_invocation(&self, invocation: &str) -> Value {
+        self.read_matching(
+            |snapshot| {
+                snapshot
+                    .origin_invocation
+                    .as_ref()
+                    .is_some_and(|origin| origin.as_str() == invocation)
+            },
+            true,
+        )
+    }
+    fn read_matching(&self, matches: impl Fn(&Snapshot) -> bool, by_invocation: bool) -> Value {
         let dropped = self.dropped.load(Ordering::Relaxed);
         let partial = self.restore_partial.load(Ordering::Relaxed);
         let lock = self.state.try_read();
@@ -201,17 +217,23 @@ impl Projection {
                 "dropped_events":dropped,"read_only":true});
         }
         let state = lock.expect("projection read lock checked above");
-        let snapshot = state.entries.iter().find(|snapshot| snapshot.id == id);
+        let mut matching = state.entries.iter().filter(|snapshot| matches(snapshot));
+        let first = matching.next();
+        // Multiple jobs may share one invocation. Never select a winner.
+        let ambiguous = by_invocation && matching.next().is_some();
+        let snapshot = if ambiguous { None } else { first };
+        let observed = snapshot.is_some();
         json!({"schema":"okx.research-job-diagnostics/v1","owner":"research_job_catalog",
-            "state":if snapshot.is_some(){"OBSERVED"}else{"NOT_OBSERVED"},
-            "reason_code":if snapshot.is_some(){"JOB_SNAPSHOT"}else{"UNKNOWN_NOT_RETAINED"},
+            "state":if ambiguous {"NOT_EVALUATED"}else if observed {"OBSERVED"}else{"NOT_OBSERVED"},
+            "reason_code":if ambiguous {"AMBIGUOUS_REQUEST_ORIGIN"}else if observed {"JOB_SNAPSHOT"}else{"UNKNOWN_NOT_RETAINED"},
             "quality":"partial","history":"UNKNOWN","job":snapshot,
             "age_ms":snapshot.map(|s|jiff::Timestamp::now().as_millisecond().saturating_sub(s.observed_at_ms).max(0)),
             "retained":state.entries.len(),"retention_limit":LIMIT,"evicted":state.evicted,
             "dropped_events":dropped,"startup_subset_truncated":partial,
             "startup_subset_selection":"latest_created_ms_then_id",
             "startup_restore_failed":self.restore_failed.load(Ordering::Relaxed),"read_only":true,
-            "next_action":if snapshot.is_some(){"inspect_job_snapshot"}else{"retry_read_only_diagnostic"}})
+            "reference_kind":if by_invocation {"request_id"}else{"job_id"},
+            "next_action":if ambiguous {"supply_exact_job_id"}else if observed {"inspect_job_snapshot"}else{"retry_read_only_diagnostic"}})
     }
 }
 

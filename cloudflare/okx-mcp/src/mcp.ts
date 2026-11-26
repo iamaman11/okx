@@ -153,8 +153,65 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
  if(artifact)projected.artifact_id=artifact;
  return projected;
 }
-function toolResult(value:Json,resultBudgetBytes=NORMAL_RESULT_BYTES):Json{
+/** One read-only summary over owner evidence, never a reconstructed history.
+ * Foreign/failed envelopes must not be promoted to an observed operation.
+ */
+export function operationTrace(view:'operation'|'research',reference:string|undefined,
+ projected:Record<string,Json>):Record<string,Json>{
+ const owner=view==='research'?'research_job_catalog':'trading_engine';
+ const data=isObject(projected.data)?projected.data:undefined;
+ const job=data&&isObject(data.job)?data.job:undefined;
+ const bound=view==='research'?data?.state!=='OBSERVED'||
+   (job&&typeof job.id==='string'&&job.id.length===64&&/^[a-f0-9]+$/.test(job.id)&&
+    (reference?.startsWith('request:')?job.origin_invocation===reference.slice(8):job.id===reference)):
+   data?.reference===reference;
+ const trusted=!['unknown','failed','rejected'].includes(String(projected.status))&&
+   data?.schema===(view==='research'
+   ?'okx.research-job-diagnostics/v1':'okx.operation-diagnostics/v1')&&!!bound;
+ const observed=trusted&&view==='research'?data.state==='OBSERVED':
+   trusted&&data?.state!==undefined&&!['NOT_EVALUATED','NOT_OBSERVED','NOT_FOUND'].includes(String(data.state));
+ const reason=typeof projected.reason_code==='string'&&/^[A-Z0-9_]{1,96}$/.test(projected.reason_code)
+   ?projected.reason_code:'OWNER_EVIDENCE_UNAVAILABLE';
+ const nativeReason=typeof data?.reason_code==='string'&&/^[A-Z0-9_]{1,96}$/.test(data.reason_code)
+   ?data.reason_code:'NOT_RECONSTRUCTED';
+ const validNext=(v:unknown)=>typeof v==='string'&&/^[a-z_.]{1,80}$/.test(v)?v:undefined;
+ let firstMissing='CORRELATED_OWNER_DIAGNOSTIC';
+ let nextAction=view==='research'?'retry_read_only_diagnostic':'trade.status';
+ let stage='NOT_EVALUATED';
+ if(trusted&&data){
+   if(view==='research'){
+     const jobStage=job?jobState(job):undefined;
+     stage=observed?(jobStage??'JOB_SNAPSHOT'):'NOT_EVALUATED';
+     firstMissing=observed?(jobStage==='queued'||jobStage==='running'
+       ?'TERMINAL_RESEARCH_OUTCOME':'FULL_CAUSAL_HISTORY'):'RETAINED_JOB_SNAPSHOT';
+     nextAction=observed?(jobStage==='completed'?'research.result':
+       jobStage==='queued'||jobStage==='running'?'research.status':
+       'inspect_research_job_snapshot'):
+       data.reason_code==='AMBIGUOUS_REQUEST_ORIGIN'?'supply_exact_job_id':'retry_read_only_diagnostic';
+   }else{
+     stage=typeof data.stage==='string'&&data.stage.length<=64?data.stage:
+       observed?'OPERATION_SNAPSHOT':'NOT_EVALUATED';
+     const missing=Array.isArray(data.missing_evidence)?data.missing_evidence:[];
+     firstMissing=typeof missing[0]==='string'&&/^[A-Z0-9_]{1,96}$/.test(missing[0])
+       ?missing[0]:observed?'FULL_CAUSAL_HISTORY':'ACCOUNT_OPERATION_SNAPSHOT';
+     nextAction=validNext(data.next_action)??'trade.status';
+   }
+ }
+ return {schema:'okx.operation-trace-summary/v1',owner,
+   reference_kind:view==='research'?(reference?.startsWith('request:')?'request_id':'job_id'):
+     reference?.startsWith('intent:')?'trade_intent':reference?.startsWith('terminal_release:')?'terminal_release':'protection_operation',
+   diagnostic_request_id:projected.request_id,
+   origin_request_id:trusted&&view==='research'&&job?job.origin_invocation??null:null,
+   job_id:trusted&&view==='research'&&job?job.id:null,
+   state:observed?'OBSERVED':'NOT_EVALUATED',observed_stage:stage,
+   first_unproven_fact:firstMissing,reason_code:trusted?nativeReason:reason,
+   quality:'partial',history:'UNKNOWN',read_only:true,
+   next_action:nextAction};
+}
+function toolResult(value:Json,resultBudgetBytes=NORMAL_RESULT_BYTES,
+ trace?:{view:'operation'|'research';reference?:string}):Json{
  const projected=projectNativeResponse(value);
+ if(trace)projected.operation_trace=operationTrace(trace.view,trace.reference,projected);
  if(bytes(projected)<=resultBudgetBytes)return baseToolResult(projected);
  const status=projected.status==='unknown'?'unknown':'failed';
  return baseToolResult({request_id:projected.request_id,status,as_of_ms:Date.now(),data:{response_bytes:bytes(projected),response_budget_bytes:resultBudgetBytes},quality:{state:'partial'},warnings:['RESPONSE_BUDGET_EXCEEDED'],reason_code:'RESPONSE_TOO_LARGE',scope:'response',retryable:false,next_action:status==='unknown'?'inspect_exact_intent':'inspect_diagnostics'});
@@ -372,7 +429,10 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
    ?RESEARCH_OWNER:{};
  const reply=await dispatchCorrelated(env,{schema:'okx.agent.request/v1',request_id:nativeRequestId,
    ...researchRoute,...(typeof account==='string'?{account}:{}),operation});
- return jsonRpc(id,toolResult(reply));
+ return jsonRpc(id,toolResult(reply,NORMAL_RESULT_BYTES,
+   nativeName==='diagnostics'&&nativeArgs.action==='explain'&&
+   (nativeArgs.view==='research'||nativeArgs.view==='operation')
+     ?{view:nativeArgs.view,reference:nativeArgs.reference}:undefined));
  }catch{
    const research=nativeName==='research'||nativeName==='market'||
      (nativeName==='diagnostics'&&nativeArgs.view==='research')||
