@@ -33,6 +33,11 @@ pub(super) fn matches_durable_ack(
     result.request_id == request_id
         && result.status == HostControlStatus::Pass
         && operation_matches
+        // A PASS with a failure payload or an invalid nested command must
+        // never authorize a durable controller/launcher handoff. The generic
+        // result validator checks the result envelope, not its operation.
+        && result.failure.is_none()
+        && result.operation.validate().is_ok()
         && result.validate().is_ok()
 }
 
@@ -133,6 +138,50 @@ mod tests {
         assert!(matches_durable_ack(
             OWNER_USER_ID,
             &body,
+            request,
+            AckOperation::InstallLauncherRoot
+        ));
+
+        // A valid PASS envelope is not enough: the nested operation must
+        // still carry a complete immutable release identity.
+        for invalid in [
+            HostControlOperation::InstallLauncherRoot {
+                run_id: 0,
+                artifact_id: 2,
+                expected_source_tree: "a".repeat(40),
+            },
+            HostControlOperation::InstallLauncherRoot {
+                run_id: 1,
+                artifact_id: 0,
+                expected_source_tree: "a".repeat(40),
+            },
+            HostControlOperation::InstallLauncherRoot {
+                run_id: 1,
+                artifact_id: 2,
+                expected_source_tree: "unverified".to_owned(),
+            },
+        ] {
+            result.operation = invalid;
+            assert!(!matches_durable_ack(
+                OWNER_USER_ID,
+                &serde_json::to_string(&result).unwrap(),
+                request,
+                AckOperation::InstallLauncherRoot
+            ));
+        }
+
+        result.operation = HostControlOperation::InstallLauncherRoot {
+            run_id: 1,
+            artifact_id: 2,
+            expected_source_tree: "a".repeat(40),
+        };
+        result.failure = Some(okx_host_protocol::HostControlFailure {
+            code: "CONTRADICTORY_PASS".to_owned(),
+            message: "A passed handoff must not carry a failure".to_owned(),
+        });
+        assert!(!matches_durable_ack(
+            OWNER_USER_ID,
+            &serde_json::to_string(&result).unwrap(),
             request,
             AckOperation::InstallLauncherRoot
         ));
