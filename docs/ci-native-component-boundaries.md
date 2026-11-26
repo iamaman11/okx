@@ -83,9 +83,14 @@ installs or restarts the Trading Engine.
 The accepted `main` run reuses the exact successful Ready PR artifact without
 compiling Engine again. Only a manual `workflow_dispatch` on accepted `main`
 with `prime_windows_cargo_cache=true` starts cache warming. The
-`cache_profile=tests|release|both` choice starts one or two Windows profile
-runners (default `both`); each compiles only on a cache miss. Their results
-sit outside the protected acceptance and publication gates. Test builds omit debug
+`cache_profile=tests|release|research|both` choice starts one Windows profile
+runner for an individual profile, or two Engine runners for `both` (default);
+each compiles only on a cache miss. The independent `research` profile seeds
+Research-only Clippy, test and release outputs with the same Cargo debug and
+cache fingerprint as the `research-windows` PR runner. That PR runner is
+read-only for the reusable cache; GitHub PR merge-ref caches do not warm sibling
+PRs. Cache-prime results sit outside the protected acceptance and publication
+gates. Test builds omit debug
 symbols while preserving debug assertions. The release build retains its
 Cargo profile. PR jobs restore caches from trusted main and compile their
 own source tree with Cargo.

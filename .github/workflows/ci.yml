@@ -19,7 +19,7 @@ on:
         description: 'Select which trusted main Windows Cargo cache to warm'
         required: true
         type: choice
-        options: [tests, release, both]
+        options: [tests, release, research, both]
         default: both
 
 concurrency:
@@ -1173,6 +1173,11 @@ jobs:
     # fallback must stay red; it cannot manufacture a substitute origin.
     if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')
     runs-on: windows-latest
+    env:
+      # Match the explicit trusted-main Research cache prime's Cargo profile.
+      # No debug symbols are needed for CI; debug assertions stay enabled.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     outputs:
       research_component_sha256: ${{ steps.package.outputs.research_component_sha256 }}
       mixed_base_head: ${{ steps.mixed_evidence.outputs.base_head }}
@@ -1195,8 +1200,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: research-cache
         with:
+          prefix-key: v0-rust
           shared-key: research-service-windows
           cache-workspace-crates: true
+          # PR merge-ref caches cannot warm other PRs. Only a manually seeded
+          # accepted-main cache can supply a reusable Research compiler cache.
+          save-if: false
+          cache-on-failure: false
       - name: Fresh Strategy Core, Research and Worker owner checks
         shell: pwsh
         run: |
@@ -1697,7 +1707,7 @@ jobs:
         # runners here so a single profile does not launch the other runner.
         # An invalid dispatcher value must fail matrix expansion, not launch
         # both expensive Windows profiles as an accidental fallback.
-        profile: ${{ fromJSON(inputs.cache_profile == 'tests' && '["tests"]' || inputs.cache_profile == 'release' && '["release"]' || inputs.cache_profile == 'both' && '["tests","release"]' || '[]') }}
+        profile: ${{ fromJSON(inputs.cache_profile == 'tests' && '["tests"]' || inputs.cache_profile == 'release' && '["release"]' || inputs.cache_profile == 'research' && '["research"]' || inputs.cache_profile == 'both' && '["tests","release"]' || '[]') }}
     runs-on: windows-latest
     env:
       # Cargo rejects an empty profile debug value, even during `--release`.
@@ -1721,12 +1731,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
         with:
           toolchain: 1.100.0
-          components: ${{ matrix.profile == 'tests' && 'clippy' || '' }}
+          components: ${{ matrix.profile != 'release' && 'clippy' || '' }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: prime-cache
         with:
-          prefix-key: ${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}
-          shared-key: trading-engine-${{ matrix.profile }}-windows
+          prefix-key: ${{ matrix.profile == 'tests' && 'v2-rust' || matrix.profile == 'release' && 'v1-rust' || 'v0-rust' }}
+          shared-key: ${{ matrix.profile == 'research' && 'research-service-windows' || format('trading-engine-{0}-windows', matrix.profile) }}
           cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: false
@@ -1752,6 +1762,22 @@ jobs:
         run: |
           cargo build --locked --release -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-research-service
           if ($LASTEXITCODE -ne 0) { throw 'CACHE_SEED_RELEASE_BUILD_FAILED' }
+      - name: Seed only missing Research Windows tests and release from trusted main
+        if: matrix.profile == 'research' && steps.prime-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          # Reproduce the Research owner's Clippy, test and release compilation
+          # without executing tests, packaging an artifact or accepting a PR.
+          # The single research-windows runner can restore both profiles.
+          $ErrorActionPreference = 'Stop'
+          cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_CACHE_SEED_CLIPPY_FAILED' }
+          cargo test --locked --no-run -p okx-strategy-core -p okx-research -p okx-analysis
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_CACHE_SEED_OWNER_TEST_BUILD_FAILED' }
+          cargo test --locked --no-run -p okx-research-service --lib --bins --test causal_release_smoke --test ipc_process
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_CACHE_SEED_IPC_TEST_BUILD_FAILED' }
+          cargo build --locked --release -p okx-research-service --bin okx-research-service
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_CACHE_SEED_RELEASE_BUILD_FAILED' }
       - name: Record non-acceptance cache evidence
         shell: pwsh
         run: |
