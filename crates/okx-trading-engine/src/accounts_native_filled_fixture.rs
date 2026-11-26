@@ -289,13 +289,19 @@ pub(super) async fn opened_market_with_public_client(
             // within its unchanged two-second lookup deadline under Windows
             // test-runner contention; the public error covers other SQL owner
             // failures too, so it never constitutes a readiness proof.
-            // Only these two precise transient refusals may retry against the
-            // SAME original finance owner inside this existing eight-second
-            // fixture window; no financial readiness condition is relaxed.
+            // The authenticated whole-account census is captured separately
+            // from six historical source frontiers. Its NAV read floor may
+            // briefly precede the opening cutoff, even when those frontiers
+            // are complete. Retry that exact strict census refusal too; the
+            // production RiskBook still rejects every incomplete opening.
+            // All retries use the SAME original finance owner within the
+            // unchanged eight-second fixture window.
             Err(reason)
                 if matches!(
                     reason.as_str(),
-                    "ENTRY_BASELINE_CAPTURE_PENDING" | "FINANCE_CAMPAIGN_IDENTITY_UNAVAILABLE"
+                    "ENTRY_BASELINE_CAPTURE_PENDING"
+                        | "FINANCE_CAMPAIGN_IDENTITY_UNAVAILABLE"
+                        | "COMPLETE_ACCOUNT_CENSUS_UNPROVEN"
                 ) =>
             {
                 assert!(
