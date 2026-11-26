@@ -206,10 +206,11 @@ pub async fn run(
     root: PathBuf,
     scope: ResearchScope,
     existing_catalog: bool,
+    compiled_source: crate::producer::CompiledSource,
 ) -> Result<(), String> {
     let config = EdgeRuntimeConfig::from_environment()?;
     let source = Arc::new(IndependentOkxPublicSource::new()?);
-    let producer = Producer::current()?;
+    let producer = Producer::current_with_source(compiled_source)?;
     let constructor = if existing_catalog {
         AnalyticsService::new_existing_scoped_with_producer
     } else {

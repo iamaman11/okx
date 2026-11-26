@@ -4,6 +4,16 @@ use okx_research_protocol::{
 };
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
+
+// Source provenance belongs to this small shipping binary, not the 25k-line
+// Research service library. Every accepted PR still embeds its exact HEAD and
+// tree in the executable, while unchanged library code remains cacheable.
+const COMPILED_SOURCE: okx_research_service::producer::CompiledSource =
+    okx_research_service::producer::CompiledSource::new(
+        option_env!("OKX_BUILD_SOURCE_HEAD"),
+        option_env!("OKX_BUILD_SOURCE_TREE"),
+    );
+
 #[tokio::main]
 async fn main() {
     if tracing_subscriber::fmt()
@@ -120,20 +130,27 @@ async fn run() -> Result<(), String> {
     let root = root.ok_or("MISSING_ROOT")?;
     let scope = scope.ok_or("MISSING_SCOPE")?;
     if edge_runtime {
-        return okx_research_service::edge_runtime::run(root, scope, existing_catalog).await;
+        return okx_research_service::edge_runtime::run(
+            root,
+            scope,
+            existing_catalog,
+            COMPILED_SOURCE,
+        )
+        .await;
     }
     if market_request {
         if independent_source {
             return Err("INVALID_ARGUMENT".into());
         }
-        return run_market_request(root, scope).await;
+        return run_market_request(root, scope, COMPILED_SOURCE).await;
     }
     let input = tokio::io::stdin();
     let output = tokio::io::stdout();
     if independent_source {
-        okx_research_service::ipc::serve_independent(input, output, root, scope).await
+        okx_research_service::ipc::serve_independent(input, output, root, scope, COMPILED_SOURCE)
+            .await
     } else {
-        okx_research_service::ipc::serve(input, output, root, scope).await
+        okx_research_service::ipc::serve(input, output, root, scope, COMPILED_SOURCE).await
     }
 }
 
@@ -162,7 +179,11 @@ fn provision_research_edge_token() -> Result<(), String> {
 }
 
 /// Read one MarketRequest as JSON from stdin and write the Research result.
-async fn run_market_request(root: PathBuf, scope: ResearchScope) -> Result<(), String> {
+async fn run_market_request(
+    root: PathBuf,
+    scope: ResearchScope,
+    compiled_source: okx_research_service::producer::CompiledSource,
+) -> Result<(), String> {
     let mut bytes = Vec::new();
     tokio::io::stdin()
         .take(MAX_FRAME_BYTES as u64 + 1)
@@ -184,7 +205,7 @@ async fn run_market_request(root: PathBuf, scope: ResearchScope) -> Result<(), S
     let source = okx_research_service::source_api::PublicSourceClient::new(std::sync::Arc::new(
         okx_research_service::independent_source::IndependentOkxPublicSource::new()?,
     ));
-    let producer = okx_research_service::producer::Producer::current()?;
+    let producer = okx_research_service::producer::Producer::current_with_source(compiled_source)?;
     let service = okx_research_service::analytics::AnalyticsService::new_scoped_with_producer(
         root, source, &scope, producer,
     )?;
