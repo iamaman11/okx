@@ -629,10 +629,7 @@ mod tests {
             assert_eq!(observation["matched_request_id"], reference);
             assert_eq!(observation["job"]["id"], id);
             assert_eq!(observation["job"]["state"], "failed");
-            assert_eq!(
-                observation["job"]["error_code"],
-                "CANDLE_RANGE_UNAVAILABLE"
-            );
+            assert_eq!(observation["job"]["error_code"], "CANDLE_RANGE_UNAVAILABLE");
             assert!(observation["job"]["result_ref"].is_null());
             assert_eq!(observation["history"], "UNKNOWN");
             assert_eq!(observation["next_action"], "inspect_job_snapshot");
@@ -652,10 +649,7 @@ mod tests {
             assert_eq!(observation["matched_request_id"], reference);
             assert_eq!(observation["job"]["id"], id);
             assert_eq!(observation["job"]["origin"], "durable_startup_subset");
-            assert_eq!(
-                observation["job"]["error_code"],
-                "CANDLE_RANGE_UNAVAILABLE"
-            );
+            assert_eq!(observation["job"]["error_code"], "CANDLE_RANGE_UNAVAILABLE");
             assert!(observation["job"]["result_ref"].is_null());
         }
         let missing = restored.diagnostic_by_invocation("req_missing_dataset_unrelated");

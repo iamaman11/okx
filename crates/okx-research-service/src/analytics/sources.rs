@@ -365,7 +365,9 @@ mod extension_tests {
             "CANDLE_RANGE_UNAVAILABLE"
         );
         assert!(service.jobs.snapshot().is_empty());
-        let unknown = service.jobs.diagnostic_by_invocation("req_no_job_for_missing_dataset");
+        let unknown = service
+            .jobs
+            .diagnostic_by_invocation("req_no_job_for_missing_dataset");
         assert_eq!(unknown["state"], "NOT_OBSERVED");
         assert_eq!(unknown["reason_code"], "UNKNOWN_NOT_RETAINED");
         assert!(unknown.get("matched_request_id").is_none());
