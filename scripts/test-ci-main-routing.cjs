@@ -16,6 +16,10 @@ const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
 const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
 const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || matrix.profile == 'release' && 'v1-rust' || 'v0-rust' }}";
 const warmSharedKey = "${{ matrix.profile == 'research' && 'research-service-windows' || format('trading-engine-{0}-windows', matrix.profile) }}";
+// Adding Host changes must not reduce Research's mandatory MCP/DO/WSS
+// coverage. This condition belongs to the transport checks only: standalone
+// Research component packaging must remain Research-only.
+const researchTransportCondition = "needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host'";
 // Unknown/missing manual choices produce an empty matrix (hard CI failure),
 // never an implicit two-runner cache warmup.
 const selectedCacheMatrix = "        profile: ${{ fromJSON(inputs.cache_profile == 'tests' && '[\"tests\"]' || inputs.cache_profile == 'release' && '[\"release\"]' || inputs.cache_profile == 'research' && '[\"research\"]' || inputs.cache_profile == 'both' && '[\"tests\",\"release\"]' || '[]') }}";
@@ -114,7 +118,11 @@ function validate(yaml, fileNames) {
     'UNREVIEWED_RERUN_CANNOT_AUTHORIZE_MAIN_REUSE');
   assert.ok(classify.includes('index("ci") != null and index("select-checks") != null'),
     'MAIN_REUSE_MUST_REQUIRE_CI_AND_EXACT_SELECTOR');
-  assert.match(classify, /host-controller\|host-launcher\) edge_required="\$\{\{ steps\.file_scope\.outputs\.edge_changed \}\}"/);
+  assert.match(classify, /engine\|host-controller\|host-launcher\) edge_required="\$\{\{ steps\.file_scope\.outputs\.edge_changed \}\}"/);
+  assert.match(classify, /research\|research-host\) edge_required=true/,
+    'MIXED_RESEARCH_HOST_MUST_KEEP_CLOUDFLARE_MCP_REQUIRED');
+  assert.doesNotMatch(classify, /engine\|research-host\|host-controller\|host-launcher\)/,
+    'ADDING_HOST_CANNOT_DISABLE_RESEARCH_MCP_CONTRACTS');
   assert.doesNotMatch(classify, /pulls\/\$PR_NUMBER\/files|prepare-research-release\.ps1/);
   assert.match(classify, /"research_only=true" >> "\$GITHUB_OUTPUT"/);
   assert.match(classify, /native_proof=RESEARCH_OWNER_ONLY/);
@@ -153,6 +161,24 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(research, /cargo build --locked --release -p okx-trading-engine|actions\/attest/);
   assert.match(research, /edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture --test-threads 1/);
   assert.match(research, /RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED/);
+  for (const marker of [
+    'uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
+    'name: Install isolated Research MCP/DO/WSS fixture dependencies',
+    'name: Research owner live loopback MCP DO WSS without Engine',
+  ]) {
+    const start = research.indexOf(marker);
+    assert.ok(start >= 0, 'RESEARCH_TRANSPORT_STEP_MISSING:' + marker);
+    const end = research.indexOf('\n      - ', start + marker.length);
+    const step = research.slice(start, end < 0 ? undefined : end);
+    assert.ok(step.includes('if: ' + researchTransportCondition),
+      'MIXED_RESEARCH_HOST_TRANSPORT_NOT_REQUIRED:' + marker);
+  }
+  assert.equal(research.split('if: ' + researchTransportCondition).length - 1, 3,
+    'ONLY_THREE_MCP_TRANSPORT_STEPS_EXPANDED_FOR_MIXED_RESEARCH_HOST');
+  const standalonePackage = research.split('name: Build self-contained Research-only Windows component\n', 2)[1]
+    ?.split('\n      - ', 1)[0];
+  assert.ok(standalonePackage?.includes("if: needs.component_impact.outputs.research_only == 'true'"),
+    'MIXED_MUST_NOT_MINT_A_STANDALONE_RESEARCH_COMPONENT');
   // Research-only changes must not resurrect the four real-child IPC timeouts
   // previously observed when the Windows processes started in parallel. The
   // dedicated harness retains the original 10s receive deadline. One test is
@@ -264,6 +290,25 @@ function validate(yaml, fileNames) {
     ['K9 worker two-heavy cancellation latency evidence', "matrix.suite == 'research'"],
     ['Upload K9 native latency evidence', "matrix.suite == 'research'"],
   ]) assert.ok(regression.includes(`      - name: ${name}\n        if: ${scope}\n`), `NATIVE_REGRESSION_SUITE:${name}`);
+  const packageRegression = regression.split('      - name: Remaining native regression tests for this suite\n')[1]
+    ?.split('      - name: Serial native account catalog and writer-termination regressions\n')[0];
+  assert.ok(packageRegression, 'REMAINING_REGRESSION_PACKAGE_STEP_REQUIRED');
+  assert.match(packageRegression, /\$passedByTarget = \[System\.Collections\.Generic\.List\[int\]\]::new\(\)/,
+    'NATIVE_REGRESSION_MUST_COUNT_ACTUALLY_EXECUTED_TESTS');
+  assert.match(packageRegression, /\$line -cmatch '\^test result: ok\\\. \(\[0-9\]\+\) passed; 0 failed;'/,
+    'NATIVE_REGRESSION_MUST_PARSE_SUCCESSFUL_TEST_TARGETS');
+  assert.match(packageRegression, /\$passedByTarget\.Add\(\[int\]\$Matches\[1\]\)/,
+    'NATIVE_REGRESSION_MUST_COLLECT_EACH_TARGET_RESULT');
+  assert.match(packageRegression, /if \(@\(\$passedByTarget \| Where-Object \{ \$_ -gt 0 \}\)\.Count -eq 0\)/,
+    'NATIVE_REGRESSION_MUST_REQUIRE_POSITIVE_TEST_COUNT_PER_PACKAGE');
+  assert.match(packageRegression, /NATIVE_REGRESSION_PACKAGE_ZERO_EXECUTED_TESTS_\$package/,
+    'NATIVE_REGRESSION_MUST_DENY_ZERO_EXECUTED_PACKAGE');
+  const fullIpc = regression.split('      - name: Worker library regression and actual IPC child\n')[1]
+    ?.split('      - name: Engine rejects Research owner attempts to mutate Native finance\n')[0];
+  assert.ok(fullIpc, 'FULL_RESEARCH_IPC_STEP_REQUIRED');
+  assert.ok(fullIpc.includes(windowsIpcSummary), 'FULL_WINDOWS_IPC_REQUIRES_ALL_TEN_UNFILTERED_TESTS');
+  assert.match(fullIpc, /WORKER_IPC_ALL_TEN_TESTS_REQUIRED/,
+    'FULL_WINDOWS_IPC_MUST_FAIL_ON_INCOMPLETE_RUN');
   assert.match(regression,
     /cargo clippy --locked -p okx-trading-engine -p okx-host-controller -p okx-host-launcher -p okx-trade-execution --all-targets -- -D warnings/,
     'WINDOWS_CLIPPY_MUST_RETAIN_ALL_NATIVE_OWNERS_AND_DENY_WARNINGS');
@@ -746,6 +791,27 @@ assert.throws(() => validate(changeJobInput(source, 'research_service_tests_wind
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
   '          shared-key: research-service-windows', '          shared-key: trading-engine-tests-windows'), workflows),
   'RESEARCH_PR_MUST_RESTORE_ITS_OWN_TRUSTED_MAIN_CACHE');
+assert.throws(() => validate(changeJobInput(source, 'component_impact',
+  'research|research-host) edge_required=true', 'research) edge_required=true'), workflows),
+  'ADDING_HOST_CANNOT_DROP_RESEARCH_EDGE_CONTRACTS');
+assert.throws(() => validate(changeJobInput(source, 'component_impact',
+  'engine|host-controller|host-launcher) edge_required=',
+  'engine|research-host|host-controller|host-launcher) edge_required='), workflows),
+  'MIXED_RESEARCH_HOST_CANNOT_BECOME_EDGE_OPTIONAL');
+for (const stepHeader of [
+  '      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0',
+  '      - name: Install isolated Research MCP/DO/WSS fixture dependencies',
+  '      - name: Research owner live loopback MCP DO WSS without Engine',
+]) {
+  assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+    stepHeader + '\n        if: ' + researchTransportCondition,
+    stepHeader + "\n        if: needs.component_impact.outputs.research_only == 'true'"), workflows),
+  'ADDING_HOST_CANNOT_BYPASS_RESEARCH_TRANSPORT:' + stepHeader);
+}
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  "      - name: Build self-contained Research-only Windows component\n        id: package\n        if: needs.component_impact.outputs.research_only == 'true'",
+  '      - name: Build self-contained Research-only Windows component\n        id: package\n        if: ' + researchTransportCondition), workflows),
+  'MIXED_MUST_NOT_PUBLISH_A_STANDALONE_RESEARCH_ARTIFACT');
 assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
   "matrix.profile == 'research' && steps.prime-cache.outputs.cache-hit != 'true'", 'false'), workflows),
   'RESEARCH_CACHE_PRIME_MUST_NOT_BE_SILENTLY_DISABLED');
@@ -939,6 +1005,18 @@ assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_
   "$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = (Resolve-Path 'target/debug/okx-research-load-fixture.exe').Path",
   '$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = $null'), workflows),
   'ENGINE_REGRESSION_TESTS_MUST_USE_REAL_FIXTURE_PATH');
+for (const [before, after, reason] of [
+  ['NATIVE_REGRESSION_PACKAGE_ZERO_EXECUTED_TESTS_$package', 'NATIVE_REGRESSION_ZERO_TESTS_ALLOWED', 'ZERO_TEST_PACKAGE_MUST_NOT_GO_GREEN'],
+  ['Where-Object { $_ -gt 0 }', 'Where-Object { $_ -ge 0 }', 'ZERO_TEST_TARGETS_MUST_NOT_COUNT_AS_COVERAGE'],
+  ['$passedByTarget.Add([int]$Matches[1])', 'Write-Host "ignoring passed count"', 'PACKAGE_TEST_COUNTER_CANNOT_BE_SKIPPED'],
+  [windowsIpcSummary, String.raw`test result: ok\. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`, 'FULL_WINDOWS_IPC_NINE_CANNOT_PASS'],
+  [windowsIpcSummary, String.raw`test result: ok\. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`, 'FULL_WINDOWS_IPC_ELEVEN_CANNOT_PASS'],
+  [windowsIpcSummary, String.raw`test result: ok\. [1-9][0-9]* passed;`, 'FULL_WINDOWS_IPC_VAGUE_COUNT_CANNOT_PASS'],
+]) {
+  const mutated = changeJobInput(source, 'trading_engine_regressions_windows', before, after);
+  assert.notEqual(mutated, source, `MISSING_REGRESSION_MUTATION:${reason}`);
+  assert.throws(() => validate(mutated, workflows), reason);
+}
 // Apply each mutation *before* asserting failure: a stale `before` substring
 // must not count as a successfully exercised negative control.
 function rejectFinanceDenialMutation(before, after, reason) {

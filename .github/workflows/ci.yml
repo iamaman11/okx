@@ -261,7 +261,10 @@ jobs:
           scope="${{ steps.proven_scope.outputs.scope }}"
           case "$scope" in
             docs) edge_required=false ;;
-            engine|research-host|host-controller|host-launcher) edge_required="${{ steps.file_scope.outputs.edge_changed }}" ;;
+            engine|host-controller|host-launcher) edge_required="${{ steps.file_scope.outputs.edge_changed }}" ;;
+            # A Research change must not lose its MCP/DO/WSS witnesses merely
+            # because the same PR also edits Host/Launcher source.
+            research|research-host) edge_required=true ;;
             *) edge_required=true ;;
           esac
           echo "edge_required=$edge_required" >> "$GITHUB_OUTPUT"
@@ -1023,9 +1026,16 @@ jobs:
             foreach ($witness in @($covered | Where-Object package -eq $package)) { $testArgs += @('--skip',$witness.test) }
             Write-Host "Remaining regression: $package; financial witnesses routed to full collector: $(@($covered | Where-Object package -eq $package).Count)"
             $failedTests = [System.Collections.Generic.List[string]]::new()
+            # Several bin/doc targets legitimately have zero tests. Require
+            # at least one real passing test target per selected Rust package;
+            # a successful Cargo process with every target filtered is not CI.
+            $passedByTarget = [System.Collections.Generic.List[int]]::new()
             & cargo test --locked -p $package -- @testArgs 2>&1 | ForEach-Object {
               $line = "$_"
               Write-Host $line
+              if ($line -cmatch '^test result: ok\. ([0-9]+) passed; 0 failed;') {
+                $passedByTarget.Add([int]$Matches[1])
+              }
               if ($line -cmatch '^test ([A-Za-z0-9_:]+) \.\.\. FAILED$') {
                 $failedTests.Add($Matches[1])
               }
@@ -1042,6 +1052,9 @@ jobs:
                 Write-Host "::error title=Windows regression in ${package}::$testName"
               }
               exit $exitCode
+            }
+            if (@($passedByTarget | Where-Object { $_ -gt 0 }).Count -eq 0) {
+              throw "NATIVE_REGRESSION_PACKAGE_ZERO_EXECUTED_TESTS_$package"
             }
           }
           if ($env:NATIVE_REGRESSION_SUITE -eq 'host') {
@@ -1133,7 +1146,9 @@ jobs:
           $code = $LASTEXITCODE
           $output | Out-Host
           if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed;') { throw 'WORKER_IPC_TESTS_MISSING' }
+          if (($output -join "`n") -notmatch 'test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+            throw 'WORKER_IPC_ALL_TEN_TESTS_REQUIRED'
+          }
 
       - name: Engine rejects Research owner attempts to mutate Native finance
         if: matrix.suite == 'engine'
@@ -1276,19 +1291,19 @@ jobs:
           }
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: needs.component_impact.outputs.research_only == 'true'
+        if: needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host'
         with:
           node-version-file: cloudflare/okx-mcp/.node-version
           cache: npm
           cache-dependency-path: cloudflare/okx-mcp/package-lock.json
       - name: Install isolated Research MCP/DO/WSS fixture dependencies
-        if: needs.component_impact.outputs.research_only == 'true'
+        if: needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host'
         shell: pwsh
         run: |
           npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Research-only live loopback MCP DO WSS without Engine
-        if: needs.component_impact.outputs.research_only == 'true'
+      - name: Research owner live loopback MCP DO WSS without Engine
+        if: needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host'
         shell: pwsh
         run: |
           # This witness is #[ignore] by default. Explicitly count one actual
