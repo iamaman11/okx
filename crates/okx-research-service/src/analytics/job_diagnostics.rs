@@ -89,7 +89,10 @@ fn valid_result_reference(value: &str) -> bool {
     // use the explicit sha256: form; require its canonical lowercase digest.
     // A malformed or oversized reference must never escape the projection.
     let hex = if let Some(hex) = value.strip_prefix("sha256:") {
-        if !hex.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        if !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return false;
         }
         hex
@@ -461,20 +464,16 @@ mod tests {
         let interrupted = "f".repeat(64);
         jobs.enqueue("incomplete-result".into(), interrupted.clone())
             .unwrap();
-        jobs.update(
-            &interrupted,
-            JobState::Running,
-            Some(result.clone()),
-            None,
-        )
-        .unwrap();
-        assert!(
-            jobs.diagnostic_readback(&interrupted)["job"]["result_ref"].is_null()
-        );
+        jobs.update(&interrupted, JobState::Running, Some(result.clone()), None)
+            .unwrap();
+        assert!(jobs.diagnostic_readback(&interrupted)["job"]["result_ref"].is_null());
 
         drop(jobs);
         let restored = Jobs::open(file).unwrap();
-        assert_eq!(restored.get(&completed).unwrap().artifact, Some(result.clone()));
+        assert_eq!(
+            restored.get(&completed).unwrap().artifact,
+            Some(result.clone())
+        );
         let proof = restored.diagnostic_readback(&completed);
         assert_eq!(proof["job"]["origin"], "durable_startup_subset");
         assert_eq!(proof["job"]["result_ref"], result);
