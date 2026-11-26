@@ -12,6 +12,10 @@ use std::{
     },
 };
 
+// Retry request IDs may legitimately differ after a lost Edge response. Keep
+// only a bounded, durable alias window for each independently owned job.
+const MAX_ORIGIN_ALIASES_PER_JOB: i64 = 16;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -217,6 +221,13 @@ impl Jobs {
                     cancel_key TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL REFERENCES research_jobs(id)
                  ) STRICT;
+                 CREATE TABLE IF NOT EXISTS research_invocation_links(
+                    invocation TEXT NOT NULL CHECK(length(invocation) BETWEEN 1 AND 128),
+                    job_id TEXT NOT NULL REFERENCES research_jobs(id) ON DELETE CASCADE,
+                    PRIMARY KEY(invocation,job_id)
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS idx_research_invocation_links_job
+                    ON research_invocation_links(job_id);
                  CREATE TABLE IF NOT EXISTS research_signal_outbox(
                     signal_key TEXT PRIMARY KEY,
                     admitted_ms INTEGER NOT NULL,
@@ -456,6 +467,12 @@ impl Jobs {
         }) {
             return Err("IDEMPOTENCY_CONFLICT".into());
         }
+        // Only a previously admitted *same key and known same semantic*
+        // proves that a new request ID belongs to this job. The legacy
+        // null-semantic rows (or merely colliding job IDs) cannot prove it.
+        let verified_retry = owner
+            .as_ref()
+            .is_some_and(|(_, digest)| digest.as_deref() == Some(semantic_hash.as_str()));
         let hash = owner.map(|(id, _)| id).unwrap_or(hash);
         let existing = Self::read(&tx, &hash)?;
         let would_start = existing.is_none()
@@ -506,6 +523,31 @@ impl Jobs {
             .map_err(|e| e.to_string())?;
             true
         };
+        if verified_retry {
+            if let Some(invocation) = &origin {
+                // The idempotency key and semantic hash were verified under
+                // this same IMMEDIATE transaction. This maps an observed
+                // retry to its *existing* job without rewriting the original
+                // request ID or manufacturing links for rejected requests.
+                // REPLACE refreshes the rowid of a repeated invocation so
+                // the bounded window tracks the most recently observed IDs.
+                tx.execute(
+                    "INSERT OR REPLACE INTO research_invocation_links(invocation,job_id)
+                     VALUES(?1,?2)",
+                    params![invocation.as_str(), hash],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "DELETE FROM research_invocation_links WHERE job_id=?1
+                     AND rowid NOT IN (
+                       SELECT rowid FROM research_invocation_links WHERE job_id=?1
+                       ORDER BY rowid DESC LIMIT ?2
+                     )",
+                    params![hash, MAX_ORIGIN_ALIASES_PER_JOB],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
         tx.commit().map_err(|e| e.to_string())?;
         let job = Self::read(&db, &hash)?.ok_or("JOB_NOT_FOUND")?;
         self.diagnostic.publish_id(&db, &hash);

@@ -834,6 +834,155 @@ fn edge_request_diagnostic_is_bounded_nonblocking_and_ambiguous_fail_closed() {
 }
 
 #[test]
+fn idempotent_retry_links_each_observed_request_without_rewriting_job_origin() {
+    use okx_research_protocol::research_ipc::InvocationId;
+    let file = path("retry-invocations");
+    let first = InvocationId::new("req_before_lost_reply".into()).unwrap();
+    let retry = InvocationId::new("req_after_lost_reply".into()).unwrap();
+    let unrelated = InvocationId::new("req_conflicting_semantics".into()).unwrap();
+    let jobs = Jobs::open(file.clone()).unwrap();
+    let key = IdempotencyKey::new("retry-safe-key".into()).unwrap();
+    let (original, started, _) = jobs
+        .enqueue_semantic_with_origin(
+            key.clone(),
+            "c".repeat(64),
+            "same-semantic".into(),
+            Some(first.clone()),
+        )
+        .unwrap();
+    assert!(started);
+    let (replayed, restarted, _) = jobs
+        .enqueue_semantic_with_origin(
+            key.clone(),
+            "c".repeat(64),
+            "same-semantic".into(),
+            Some(retry.clone()),
+        )
+        .unwrap();
+    assert!(!restarted);
+    assert_eq!(replayed.id, original.id);
+    assert_eq!(replayed.origin_invocation, Some(first.clone()));
+    assert_eq!(
+        jobs.diagnostic_by_invocation(first.as_str())["job"]["id"],
+        original.id
+    );
+    let retried_trace = jobs.diagnostic_by_invocation(retry.as_str());
+    assert_eq!(retried_trace["job"]["id"], original.id);
+    assert_eq!(retried_trace["reference_kind"], "request_id");
+    assert!(matches!(
+        jobs.enqueue_semantic_with_origin(
+            key,
+            "d".repeat(64),
+            "different-semantic".into(),
+            Some(unrelated.clone()),
+        ),
+        Err(error) if error == "IDEMPOTENCY_CONFLICT"
+    ));
+    assert_eq!(
+        jobs.diagnostic_by_invocation(unrelated.as_str())["reason_code"],
+        "UNKNOWN_NOT_RETAINED"
+    );
+    drop(jobs);
+    let reopened = Jobs::open(file).unwrap();
+    assert_eq!(
+        reopened.diagnostic_by_invocation(first.as_str())["job"]["id"],
+        original.id
+    );
+    assert_eq!(
+        reopened.diagnostic_by_invocation(retry.as_str())["job"]["id"],
+        original.id
+    );
+    assert_eq!(
+        reopened.get(&original.id).unwrap().origin_invocation,
+        Some(first)
+    );
+}
+
+#[test]
+fn retry_request_alias_window_is_bounded_and_unknown_is_not_fabricated() {
+    use okx_research_protocol::research_ipc::InvocationId;
+    let file = path("bounded-retry-links");
+    let jobs = Jobs::open(file.clone()).unwrap();
+    let key = IdempotencyKey::new("bounded-alias-key".into()).unwrap();
+    let hash = "e".repeat(64);
+    jobs.enqueue_semantic_with_origin(
+        key.clone(),
+        hash.clone(),
+        "semantic".into(),
+        Some(InvocationId::new("req_original".into()).unwrap()),
+    )
+    .unwrap();
+    for index in 0..20 {
+        let invocation = InvocationId::new(format!("req_retry_{index:02}")).unwrap();
+        let (_, is_new, _) = jobs
+            .enqueue_semantic_with_origin(
+                key.clone(),
+                hash.clone(),
+                "semantic".into(),
+                Some(invocation),
+            )
+            .unwrap();
+        assert!(!is_new);
+    }
+    assert_eq!(
+        jobs.diagnostic_by_invocation("req_retry_00")["reason_code"],
+        "UNKNOWN_NOT_RETAINED"
+    );
+    assert_eq!(
+        jobs.diagnostic_by_invocation("req_retry_19")["job"]["id"],
+        hash
+    );
+    let count: i64 = jobs
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM research_invocation_links WHERE job_id=?1",
+            [&hash],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, MAX_ORIGIN_ALIASES_PER_JOB);
+    // Replaying a retained request refreshes its observation recency.
+    for request in ["req_retry_04", "req_retry_20"] {
+        let invocation = InvocationId::new(request.into()).unwrap();
+        jobs.enqueue_semantic_with_origin(
+            key.clone(),
+            hash.clone(),
+            "semantic".into(),
+            Some(invocation),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        jobs.diagnostic_by_invocation("req_retry_04")["job"]["id"],
+        hash
+    );
+    assert_eq!(
+        jobs.diagnostic_by_invocation("req_retry_05")["reason_code"],
+        "UNKNOWN_NOT_RETAINED"
+    );
+    drop(jobs);
+    let reopened = Jobs::open(file).unwrap();
+    assert_eq!(
+        reopened.diagnostic_by_invocation("req_original")["job"]["id"],
+        hash
+    );
+    assert_eq!(
+        reopened.diagnostic_by_invocation("req_retry_00")["reason_code"],
+        "UNKNOWN_NOT_RETAINED"
+    );
+    assert_eq!(
+        reopened.diagnostic_by_invocation("req_retry_19")["job"]["id"],
+        hash
+    );
+    assert_eq!(
+        reopened.diagnostic_by_invocation("req_retry_04")["job"]["id"],
+        hash
+    );
+}
+
+#[test]
 fn historical_rows_keep_unknown_producer_on_replay() {
     let file = path("legacy-producer");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
