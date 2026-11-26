@@ -37,7 +37,12 @@ jobs:
   dependency-audit:
     name: dependency-audit
     needs: component_impact
-    if: (github.event_name != 'pull_request' || github.event.pull_request.draft != true) && needs.component_impact.outputs.component_scope != '' && !contains(fromJSON('["docs","cloudflare"]'), needs.component_impact.outputs.component_scope)
+    # A merged main tree already passed this exact audit through the required
+    # Ready `ci` gate. Do not repeat Cargo metadata and advisory work on publish.
+    if: >-
+      needs.component_impact.outputs.build_required == 'true' &&
+      needs.component_impact.outputs.component_scope != '' &&
+      !contains(fromJSON('["docs","cloudflare"]'), needs.component_impact.outputs.component_scope)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -575,6 +580,11 @@ jobs:
     needs: component_impact
     if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.component_scope == 'host-controller' || needs.component_impact.outputs.component_scope == 'host-launcher' || needs.component_impact.outputs.component_scope == 'research-host')
     runs-on: windows-latest
+    env:
+      # Match the trusted-main Engine tests cache. Cargo keeps debug assertions
+      # enabled, while no PR-local Host cache may evict the reusable main seed.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -584,11 +594,19 @@ jobs:
           toolchain: 1.100.0
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: host-test-cache
         with:
-          cache-on-failure: true
+          # This trusted-main cache already contains Host Clippy/test outputs.
+          # Reusing it avoids a separate ~390 MB cache per Host PR merge ref.
+          prefix-key: v2-rust
+          shared-key: trading-engine-tests-windows
+          cache-workspace-crates: true
+          save-if: false
+          cache-on-failure: false
       - name: Verify architecture and formatting
         shell: pwsh
         run: |
+          "Host Cargo cache exact hit: ${{ steps.host-test-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
           python3 scripts/check_architecture.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo fmt --all -- --check
@@ -1424,12 +1442,12 @@ jobs:
               exit 1
             fi
           }
-          case "$scope" in
-            docs|cloudflare) check_result "${{ needs['dependency-audit'].result }}" skipped dependency-audit ;;
-            *) check_result "${{ needs['dependency-audit'].result }}" success dependency-audit ;;
-          esac
           if [[ "$build" == false ]]; then
             test '${{ needs.component_impact.outputs.reason }}' = 'merged tree exactly matches successful PR head tree'
+            # The immutable, first-attempt Ready `ci` already accepted this
+            # exact tree, including its dependency audit. Require the duplicate
+            # audit to be skipped rather than silently accepting a missing gate.
+            check_result "${{ needs['dependency-audit'].result }}" skipped accepted-main-dependency-audit-reuse
             for item in \
               '${{ needs.architecture_contracts.result }}' \
               '${{ needs.rust_tests_linux.result }}' \
@@ -1444,6 +1462,10 @@ jobs:
             echo 'CI=PASS; exact accepted Ready tree reused without compilation'
             exit 0
           fi
+          case "$scope" in
+            docs|cloudflare) check_result "${{ needs['dependency-audit'].result }}" skipped dependency-audit ;;
+            *) check_result "${{ needs['dependency-audit'].result }}" success dependency-audit ;;
+          esac
           case "$scope" in
             docs|cloudflare) check_result "${{ needs.architecture_contracts.result }}" skipped architecture-contracts ;;
             *) check_result "${{ needs.architecture_contracts.result }}" success architecture-contracts ;;
@@ -1800,6 +1822,8 @@ jobs:
     # Explicit status guard is required: the sole protected ci job succeeds
     # even when intentionally skipped component jobs appear in its ancestry.
     # GitHub's implicit success() would otherwise skip publication on main.
+    # The exact Ready tree already passed dependency-audit; `ci` checks that
+    # the redundant main-side audit is skipped before publishing.
     if: >-
       ${{
         always() &&
@@ -1808,7 +1832,7 @@ jobs:
         needs.component_impact.outputs.component_scope == 'full' &&
         needs.component_impact.outputs.build_required == 'false' &&
         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree' &&
-        needs['dependency-audit'].result == 'success' &&
+        needs['dependency-audit'].result == 'skipped' &&
         needs.component_impact.result == 'success' &&
         needs.required_ci.result == 'success'
       }}
@@ -1997,7 +2021,7 @@ jobs:
         needs.component_impact.outputs.component_scope == 'research' &&
         needs.component_impact.outputs.build_required == 'false' &&
         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree' &&
-        needs['dependency-audit'].result == 'success' &&
+        needs['dependency-audit'].result == 'skipped' &&
         needs.component_impact.result == 'success' &&
         needs.required_ci.result == 'success'
       }}

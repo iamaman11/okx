@@ -25,7 +25,8 @@ jobs were removed from the main workflow.
 | Narrow Research/Host `Cargo.toml` with optional `Cargo.lock` | Only that owner and its actual consumers | Scoped **only after exact before/after Windows Cargo closure proof**, including versions/features/dev dependencies; otherwise full Native | Research-only standalone three-file component when its exact owner scope qualifies; host-only nondeployable evidence otherwise |
 | Research-only owner changes; unchanged Engine/Host release closure | Research/IPC consumers | `research-windows` and independently verified Cargo closure, exact Ready PR attempt and `ci` | Raw `okx-research-component-<PR_HEAD_SHA>` CI artifact: only `Cargo.lock`, `manifest.json` (`okx.windows.research-component/v3`), `okx-research-service.exe`; append-only `research-component-<MERGE_SHA>` after verified merge, no Engine files |
 | Documentation only / Cloudflare-only | Documentation / MCP | Existing scoped gates | No fresh Native build |
-| Mixed host + Research or Cloudflare, unknown paths, renames, incomplete diff | Unknown/shared impact | Full Native matrix | Only if accepted |
+| Mixed Research + Host with proven unchanged Engine dependency closure | Research and Host consumers | `research-windows` and `host-windows`, no Engine compilation | Separate Research/Host evidence; not a replacement Native base |
+| Unknown/shared impact, unsafe mixed changes, renames, incomplete diff | All potentially affected consumers | Full Native matrix (fail closed) | Only if accepted |
 
 The host-only source exception remains intentionally **narrow**: just Rust
 implementation files inside the two host crates. A Host or Research manifest
@@ -81,7 +82,23 @@ GitHub release but never
 installs or restarts the Trading Engine.
 
 The accepted `main` run reuses the exact successful Ready PR artifact without
-compiling Engine again. Only a manual `workflow_dispatch` on accepted `main`
+compiling Engine again **or rerunning the dependency audit**. The required
+`ci` gate verifies that the main-side audit is skipped only when the immutable
+tree matches a successful, first-attempt Ready gate that included the real
+dependency audit; new or unverified trees still require a fresh audit.
+Both publishers require this explicit skipped result, successful `ci` and
+the same exact Ready provenance before releasing any accepted bytes.
+
+The Host-only runner now restores the existing **trusted main Engine-test
+Cargo cache** read-only. Its debug/test profiles match that seed, which
+already compiles Host Clippy and test dependencies. It builds only the two
+Host release binaries from the changed source and never compiles Engine;
+it no longer writes an isolated ~390 MB cache per Host PR. The cache is
+not guaranteed to hit when Cargo.lock/toolchain/profile inputs change.
+Release compilation and cross-PR warm speed still need a real Host-only
+Ready measurement; avoiding a cache write alone does not prove speedup.
+
+Only a manual `workflow_dispatch` on accepted `main`
 with `prime_windows_cargo_cache=true` starts cache warming. The
 `cache_profile=tests|release|research|both` choice starts one Windows profile
 runner for an individual profile, or two Engine runners for `both` (default);
