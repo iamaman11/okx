@@ -791,6 +791,10 @@ fn edge_request_diagnostic_is_bounded_nonblocking_and_ambiguous_fail_closed() {
         first.id
     );
     assert_eq!(
+        jobs.diagnostic_by_invocation(origin.as_str())["matched_request_id"],
+        origin.as_str()
+    );
+    assert_eq!(
         jobs.diagnostic_by_invocation(origin.as_str())["job"]["error_code"],
         "UNCLASSIFIED_RESEARCH_ERROR"
     );
@@ -818,6 +822,7 @@ fn edge_request_diagnostic_is_bounded_nonblocking_and_ambiguous_fail_closed() {
     assert_eq!(ambiguous["state"], "NOT_EVALUATED");
     assert_eq!(ambiguous["reason_code"], "AMBIGUOUS_REQUEST_ORIGIN");
     assert!(ambiguous["job"].is_null());
+    assert!(ambiguous.get("matched_request_id").is_none());
     assert_eq!(ambiguous["next_action"], "supply_exact_job_id");
     assert!(!ambiguous.to_string().contains("DO_NOT_DISCLOSE"));
     assert_eq!(jobs.diagnostic_readback(&second.id)["state"], "OBSERVED");
@@ -830,6 +835,18 @@ fn edge_request_diagnostic_is_bounded_nonblocking_and_ambiguous_fail_closed() {
     assert_eq!(
         restored.diagnostic_by_invocation("req_never_observed")["reason_code"],
         "UNKNOWN_NOT_RETAINED"
+    );
+    assert!(
+        restored
+            .diagnostic_by_invocation("req_never_observed")
+            .get("matched_request_id")
+            .is_none()
+    );
+    assert!(
+        restored
+            .diagnostic_by_invocation("req/invalid")
+            .get("matched_request_id")
+            .is_none()
     );
 }
 
@@ -866,9 +883,20 @@ fn idempotent_retry_links_each_observed_request_without_rewriting_job_origin() {
         jobs.diagnostic_by_invocation(first.as_str())["job"]["id"],
         original.id
     );
+    assert_eq!(
+        jobs.diagnostic_by_invocation(first.as_str())["matched_request_id"],
+        first.as_str()
+    );
     let retried_trace = jobs.diagnostic_by_invocation(retry.as_str());
     assert_eq!(retried_trace["job"]["id"], original.id);
     assert_eq!(retried_trace["reference_kind"], "request_id");
+    assert_eq!(retried_trace["matched_request_id"], retry.as_str());
+    assert_eq!(retried_trace["job"]["origin_invocation"], first.as_str());
+    assert!(
+        jobs.diagnostic_readback(&original.id)
+            .get("matched_request_id")
+            .is_none()
+    );
     assert!(matches!(
         jobs.enqueue_semantic_with_origin(
             key,
@@ -882,6 +910,11 @@ fn idempotent_retry_links_each_observed_request_without_rewriting_job_origin() {
         jobs.diagnostic_by_invocation(unrelated.as_str())["reason_code"],
         "UNKNOWN_NOT_RETAINED"
     );
+    assert!(
+        jobs.diagnostic_by_invocation(unrelated.as_str())
+            .get("matched_request_id")
+            .is_none()
+    );
     drop(jobs);
     let reopened = Jobs::open(file).unwrap();
     assert_eq!(
@@ -889,8 +922,16 @@ fn idempotent_retry_links_each_observed_request_without_rewriting_job_origin() {
         original.id
     );
     assert_eq!(
+        reopened.diagnostic_by_invocation(first.as_str())["matched_request_id"],
+        first.as_str()
+    );
+    assert_eq!(
         reopened.diagnostic_by_invocation(retry.as_str())["job"]["id"],
         original.id
+    );
+    assert_eq!(
+        reopened.diagnostic_by_invocation(retry.as_str())["matched_request_id"],
+        retry.as_str()
     );
     assert_eq!(
         reopened.get(&original.id).unwrap().origin_invocation,
