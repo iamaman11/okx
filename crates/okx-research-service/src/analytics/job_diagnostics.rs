@@ -15,7 +15,12 @@ const LIMIT: usize = 128;
 const COLUMNS: &str = "substr(id,1,129),state,progress,
     -- An interrupted, failed or cancelled job may retain a partial blob, but
     -- only the completed state can advertise a usable result reference.
-    CASE WHEN state='completed' AND length(artifact)=64 THEN artifact ELSE NULL END,
+    -- The durable result store emits sha256:<64 lowercase hex>. Retain the
+    -- older bare-hex references already accepted by the catalog, but never
+    -- copy arbitrary artifact text into this bounded read-only projection.
+    CASE WHEN state='completed' AND (length(artifact)=64
+        OR (length(artifact)=71 AND substr(artifact,1,7)='sha256:'))
+      THEN artifact ELSE NULL END,
     CASE WHEN error IS NULL THEN NULL
       WHEN error IN ('RESULT_EXPIRED_BY_7_DAY_RETENTION','JOB_CANCELLED','CANCELLED',
         'SOURCE_INVALID','NONFINITE_SOURCE','CANDLE_RANGE_UNAVAILABLE','CANDLE_RANGE_INCOMPLETE',
@@ -66,6 +71,10 @@ struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_progress: Option<super::super::candidate_progress::CandidateProgress>,
     origin_invocation: Option<okx_research_protocol::research_ipc::InvocationId>,
+    // Only bounded, validated retry identities participate in lookup. Do not
+    // disclose the alias roster in the public snapshot.
+    #[serde(skip)]
+    retry_invocations: Vec<okx_research_protocol::research_ipc::InvocationId>,
     producer: Option<crate::producer::Producer>,
     result_ref: Option<String>,
     error_code: Option<String>,
@@ -74,6 +83,25 @@ struct Snapshot {
     generation: u64,
     origin: &'static str,
 }
+
+fn valid_result_reference(value: &str) -> bool {
+    // Existing catalog rows may contain a bare SHA-256. New persisted results
+    // use the explicit sha256: form; require its canonical lowercase digest.
+    // A malformed or oversized reference must never escape the projection.
+    let hex = if let Some(hex) = value.strip_prefix("sha256:") {
+        if !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return false;
+        }
+        hex
+    } else {
+        value
+    };
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
     let error: Option<String> = row.get(4)?;
     let artifact: Option<String> = row.get(3)?;
@@ -98,10 +126,11 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
         origin_invocation: row
             .get::<_, Option<String>>(7)?
             .and_then(|v| serde_json::from_str(&v).ok()),
+        retry_invocations: Vec::new(),
         producer: row
             .get::<_, Option<String>>(8)?
             .and_then(|v| serde_json::from_str(&v).ok()),
-        result_ref: artifact.filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())),
+        result_ref: artifact.filter(|v| valid_result_reference(v)),
         // SQL emits only the fixed whitelist above, never raw failure payloads.
         error_code: error,
         pinned: row.get(5)?,
@@ -109,6 +138,27 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
         generation: 0,
         origin: "catalog_commit",
     })
+}
+
+fn read_retry_invocations(
+    db: &Connection,
+    id: &str,
+) -> rusqlite::Result<Vec<okx_research_protocol::research_ipc::InvocationId>> {
+    let mut stmt = db.prepare(
+        "SELECT invocation FROM research_invocation_links WHERE job_id=?1
+         ORDER BY rowid DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![id, super::MAX_ORIGIN_ALIASES_PER_JOB],
+        |row| row.get::<_, String>(0),
+    )?;
+    rows.filter_map(|row| match row {
+        Ok(value) => okx_research_protocol::research_ipc::InvocationId::new(value)
+            .ok()
+            .map(Ok),
+        Err(error) => Some(Err(error)),
+    })
+    .collect()
 }
 #[derive(Default)]
 struct State {
@@ -152,7 +202,15 @@ impl Projection {
             )
             .optional()
         {
-            Ok(Some(snapshot)) => self.publish(snapshot),
+            Ok(Some(mut snapshot)) => {
+                match read_retry_invocations(db, id) {
+                    Ok(aliases) => snapshot.retry_invocations = aliases,
+                    Err(_) => {
+                        self.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                self.publish(snapshot);
+            }
             _ => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -167,7 +225,20 @@ impl Projection {
             let mut statement = db.prepare(&format!(
                 "SELECT {COLUMNS} FROM research_jobs ORDER BY created_ms DESC,id DESC LIMIT 129"
             ))?;
-            statement.query_map([], row)?.collect()
+            let mut rows: Vec<Snapshot> = statement
+                .query_map([], row)?
+                .collect::<rusqlite::Result<_>>()?;
+            for snapshot in &mut rows {
+                match read_retry_invocations(db, &snapshot.id) {
+                    Ok(aliases) => snapshot.retry_invocations = aliases,
+                    Err(_) => {
+                        // A damaged alias record must not hide the durable job
+                        // itself or prevent all other snapshots from restoring.
+                        self.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            Ok(rows)
         })();
         match restored {
             Ok(rows) => {
@@ -198,6 +269,10 @@ impl Projection {
                     .origin_invocation
                     .as_ref()
                     .is_some_and(|origin| origin.as_str() == invocation)
+                    || snapshot
+                        .retry_invocations
+                        .iter()
+                        .any(|origin| origin.as_str() == invocation)
             },
             true,
         )
@@ -352,6 +427,65 @@ mod tests {
                 .to_string()
                 .contains("private-cancel-key")
         );
+    }
+    #[test]
+    fn completed_sha256_result_reference_survives_restart_without_leaking_bad_references() {
+        let (jobs, file) = jobs("canonical-result-ref");
+        let completed = "1".repeat(64);
+        let result = format!("sha256:{}", "a".repeat(64));
+        jobs.enqueue("canonical-result".into(), completed.clone())
+            .unwrap();
+        jobs.update(&completed, JobState::Completed, Some(result.clone()), None)
+            .unwrap();
+        assert_eq!(
+            jobs.diagnostic_readback(&completed)["job"]["result_ref"],
+            result
+        );
+
+        let invalid = [
+            format!("sha256:{}", "A".repeat(64)),
+            format!("sha256:{}x", "a".repeat(63)),
+            format!("sha256:{}", "a".repeat(65)),
+            format!("sha256{}", "a".repeat(64)),
+            "secret=DO_NOT_COPY".into(),
+        ];
+        for (index, artifact) in invalid.iter().enumerate() {
+            let id = format!("{:064x}", index + 2);
+            jobs.enqueue(format!("invalid-{index}"), id.clone())
+                .unwrap();
+            jobs.update(&id, JobState::Completed, Some(artifact.clone()), None)
+                .unwrap();
+            let projection = jobs.diagnostic_readback(&id);
+            assert_eq!(projection["job"]["state"], "completed");
+            assert!(projection["job"]["result_ref"].is_null());
+            assert!(!projection.to_string().contains("DO_NOT_COPY"));
+        }
+
+        let interrupted = "f".repeat(64);
+        jobs.enqueue("incomplete-result".into(), interrupted.clone())
+            .unwrap();
+        jobs.update(&interrupted, JobState::Running, Some(result.clone()), None)
+            .unwrap();
+        assert!(jobs.diagnostic_readback(&interrupted)["job"]["result_ref"].is_null());
+
+        drop(jobs);
+        let restored = Jobs::open(file).unwrap();
+        assert_eq!(
+            restored.get(&completed).unwrap().artifact,
+            Some(result.clone())
+        );
+        let proof = restored.diagnostic_readback(&completed);
+        assert_eq!(proof["job"]["origin"], "durable_startup_subset");
+        assert_eq!(proof["job"]["result_ref"], result);
+        for index in 0..invalid.len() {
+            assert!(
+                restored.diagnostic_readback(&format!("{:064x}", index + 2))["job"]["result_ref"]
+                    .is_null()
+            );
+        }
+        let interrupted_proof = restored.diagnostic_readback(&interrupted);
+        assert_eq!(interrupted_proof["job"]["state"], "interrupted");
+        assert!(interrupted_proof["job"]["result_ref"].is_null());
     }
     #[test]
     fn t14_partial_artifact_is_never_advertised_as_a_completed_result() {
