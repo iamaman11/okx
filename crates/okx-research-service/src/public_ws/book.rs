@@ -323,16 +323,14 @@ mod tests {
         let excessive_asks: Vec<Value> = (1..=DEPTH + 1)
             .map(|index| json!([(index + 10).to_string(), "1", "0", "1"]))
             .collect();
+        let excessive_snapshot = row(
+            20,
+            -1,
+            json!(excessive_asks),
+            json!([["9", "1", "0", "1"]]),
+        );
         assert_eq!(
-            book.apply(
-                "snapshot",
-                row(
-                    20,
-                    -1,
-                    json!(excessive_asks),
-                    json!([["9", "1", "0", "1"]]),
-                ),
-            ),
+            book.apply("snapshot", excessive_snapshot),
             Err("BOOK_LEVEL_INVALID"),
         );
         assert!(book.snapshot().is_none());
