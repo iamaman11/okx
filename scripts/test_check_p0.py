@@ -40,6 +40,10 @@ class FeedbackTests(unittest.TestCase):
                 "cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1",
                 "cargo test --locked -p okx-research-service --doc",
             ],
+            "research_ipc_windows": [
+                "cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1",
+                "edge_runtime::standalone_mcp_tests::standalone_catalog_reopens_through_real_mcp_do_websocket",
+            ],
             "trading_engine_regressions_windows": [
                 "cargo test --locked -p okx-strategy-core -p okx-research",
             ],
@@ -52,6 +56,13 @@ class FeedbackTests(unittest.TestCase):
                               f"{job} must execute owner tests, not just compile them")
         scoped = re.search(r"(?ms)^  research_service_tests_windows:\n(.*?)(?=^  [a-z_-]+:|\Z)",
                            workflow).group(1)
+        ipc = re.search(r"(?ms)^  research_ipc_windows:\n(.*?)(?=^  [a-z_-]+:|\Z)",
+                        workflow).group(1)
+        self.assertIn("if ('${{ needs.component_impact.outputs.component_scope }}' -eq 'research-host')",
+                      scoped, "mixed Research+Host retains exact IPC witness in the old owner job")
+        self.assertIn("RESEARCH_IPC_ALL_TEN_TESTS_REQUIRED", ipc)
+        self.assertIn("RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED", ipc)
+        self.assertIn("needs.component_impact.outputs.research_only == 'true'", ipc)
         self.assertNotIn("cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service",
                          scoped, "do not run IPC tests with unbounded default parallelism")
         acceptance = re.search(
