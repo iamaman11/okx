@@ -100,7 +100,10 @@ pub fn summarize(
     let control_verified = control_image.is_some()
         && control_image == expected_control_image
         && text_at(launcher, "/active/state") == Some("READY")
-        && launcher.pointer("/entrypoint_is_launcher").and_then(Value::as_bool) == Some(true)
+        && launcher
+            .pointer("/entrypoint_is_launcher")
+            .and_then(Value::as_bool)
+            == Some(true)
         && text_at(launcher, "/pending/state") == Some("NONE");
     let control = OwnerObservation {
         owner: Owner::Control,
@@ -177,9 +180,8 @@ pub fn summarize(
             && exact_hex(r.active_worker_sha256.as_deref(), 64).is_some()
             && r.active_worker_sha256 == r.installed_worker_sha256
     });
-    let research_expected_stopped = research.is_some_and(|r| {
-        r.phase == ResearchRuntimePhase::Stopped && !r.desired_running
-    });
+    let research_expected_stopped =
+        research.is_some_and(|r| r.phase == ResearchRuntimePhase::Stopped && !r.desired_running);
     let research_invalid =
         research.is_some_and(|r| r.phase == ResearchRuntimePhase::InvalidProvenance);
     let research_owner = OwnerObservation {
@@ -261,7 +263,11 @@ pub fn summarize(
             NextAction::InspectResearchStatus,
         )
     } else {
-        (Owner::Edge, "EDGE_AUTHENTICATED_SESSION", NextAction::InspectEdgeRuntime)
+        (
+            Owner::Edge,
+            "EDGE_AUTHENTICATED_SESSION",
+            NextAction::InspectEdgeRuntime,
+        )
     };
 
     serde_json::to_value(RuntimeObservation {
@@ -281,7 +287,7 @@ pub fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okx_host_protocol::{ResearchCatalogMode, HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1};
+    use okx_host_protocol::{HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1, ResearchCatalogMode};
     use serde_json::json;
 
     fn launcher() -> Value {
@@ -330,7 +336,10 @@ mod tests {
         assert_eq!(result["owners"].as_array().unwrap().len(), 4);
         assert_eq!(result["owners"][0]["state"], "OBSERVED");
         assert_eq!(result["owners"][1]["state"], "OBSERVED");
-        assert_eq!(result["owners"][1]["image_basis"], "installed_engine_executable");
+        assert_eq!(
+            result["owners"][1]["image_basis"],
+            "installed_engine_executable"
+        );
         assert_eq!(result["owners"][2]["process_generation"], 7);
         assert_eq!(result["owners"][2]["state"], "OBSERVED");
         assert_eq!(result["owners"][3]["state"], "NOT_EVALUATED");
@@ -366,7 +375,10 @@ mod tests {
         assert_eq!(result["owners"][2]["state"], "UNVERIFIED");
         assert_eq!(result["first_unproven_owner"], "research");
         let result = observe(&launcher(), &agent(), None);
-        assert_eq!(result["owners"][2]["reason_code"], "RESEARCH_STATUS_UNVERIFIED");
+        assert_eq!(
+            result["owners"][2]["reason_code"],
+            "RESEARCH_STATUS_UNVERIFIED"
+        );
     }
 
     #[test]

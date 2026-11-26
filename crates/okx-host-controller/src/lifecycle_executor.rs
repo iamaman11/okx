@@ -472,13 +472,9 @@ impl HostExecutor {
         // One existing Status/TransportStatus request now yields the complete
         // LOCAL owner chain. Research status is a bounded, read-only process
         // observation; failure stays explicit instead of hiding Engine status.
-        let research_runtime = self
-            .research
-            .status()
-            .ok()
-            .and_then(|value| {
-                serde_json::from_value::<okx_host_protocol::ResearchRuntimeStatus>(value).ok()
-            });
+        let research_runtime = self.research.status().ok().and_then(|value| {
+            serde_json::from_value::<okx_host_protocol::ResearchRuntimeStatus>(value).ok()
+        });
         let owner_diagnostics = crate::owner_diagnostics::summarize(
             &launcher,
             current_controller_sha256.as_deref(),
