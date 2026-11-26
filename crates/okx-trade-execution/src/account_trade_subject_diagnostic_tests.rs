@@ -85,12 +85,10 @@ fn close_requires_the_actual_close_operation_and_rejects_forged_plan() {
         snapshot(&store, TradeDiagnosticSubject::Close, "close_key_123"),
         Err(StoreError::Invalid("CLOSE_INTENT_OPERATION_MISMATCH"))
     ));
-    let forged_plan = store
-        .connection
-        .execute(
-            "UPDATE intent_plans SET operation='close' WHERE intent_id='intent'",
-            [],
-        );
+    let forged_plan = store.connection.execute(
+        "UPDATE intent_plans SET operation='close' WHERE intent_id='intent'",
+        [],
+    );
     // The financial SQL owner makes the original plan immutable. A forged
     // close label must not bypass that guard or become diagnostic evidence.
     assert!(forged_plan.is_err());
