@@ -34,7 +34,7 @@ const PACKAGES: [&str; 4] = [
 // keep those witnesses in a separate child with bounded concurrency.
 const FINANCIAL_WITNESS_TEST_THREADS: u64 = 4;
 const CLOCK_SENSITIVE_TEST_THREADS: u64 = 2;
-const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 10] = [
+const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 11] = [
     // All three remain mandatory original-finance witnesses. Their live
     // source readiness, exchange-clock evidence and SQL queue deadlines
     // depend on real monotonic time; unrelated heavy fixtures at four-way
@@ -49,6 +49,10 @@ const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 10] = [
     "accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_bound_rejection_preserves_code_and_reserve",
     "accounts::native_trade_contracts::native_execute_safety::risk_book_contract_native_execute_foreign_rejection_remains_unknown",
     "accounts::native_trade_contracts::native_multi_close::risk_book_contract_native_two_closes_use_remaining_lot_and_retire_partial_terminal",
+    // The public A-settlement/B-admission proof uses captured source clocks,
+    // an actual two-second maintenance turn and three-second SQL deadlines.
+    // Four concurrent heavy fixtures can expire its source freshness window.
+    "accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_b_uses_remaining_budget_after_a_settlement",
 ];
 struct LibtestGroup {
     label: &'static str,
@@ -594,8 +598,11 @@ mod timing_tests {
         let public_add = "accounts::native_trade_contracts::native_add::risk_book_contract_native_public_add_preserves_original_lot_and_protects_increment";
         assert!(!actual[0].names.contains(public_add));
         assert!(actual[1].names.contains(public_add));
-        assert_eq!(actual[0].names.len(), 56);
-        assert_eq!(actual[1].names.len(), 10);
+        let public_b = "accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_b_uses_remaining_budget_after_a_settlement";
+        assert!(!actual[0].names.contains(public_b));
+        assert!(actual[1].names.contains(public_b));
+        assert_eq!(actual[0].names.len(), 55);
+        assert_eq!(actual[1].names.len(), 11);
         // No other package may silently acquire a relaxed schedule.
         for package in [
             "okx-trade-execution",
