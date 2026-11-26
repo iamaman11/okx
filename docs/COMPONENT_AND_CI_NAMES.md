@@ -208,7 +208,7 @@ means proven reusable binary bytes, not a runtime library. Existing
 
 ## CI job names and exact ownership
 
-One `.github/workflows/ci.yml` contains **17 job definitions**. GitHub renders
+One `.github/workflows/ci.yml` contains **15 job definitions**. GitHub renders
 all of their names even when the selected component route correctly skips a
 job. Four Windows regression matrix cells and at most two manual cache
 profiles can add displayed rows; they are **not extra application components**.
@@ -220,15 +220,15 @@ protection and accepted-artifact verification use the **displayed names**.
 | --- | --- |
 | `select-checks` | Every event, Ubuntu: immutable change scope, fail-closed owner routing and Windows Cargo closure |
 | `draft-owner-feedback` | Draft PR, Ubuntu: selected owner/consumer feedback (`draft-component-tests` YAML ID); does **not** compile Windows-only code |
-| `dependency-audit` | Ready/main for Rust owners: locked dependency graph, advisories, licences and sources; an applicable failure makes `ci` fail |
+| `dependency-audit` | Fresh Ready/unverified-main Rust owners: locked dependency graph, advisories, licences and sources. Accepted main reuses the same tree's successful Ready audit and requires this job to be skipped; an applicable fresh failure makes `ci` fail |
 | `architecture-contracts` | Fresh non-Edge Rust changes: ownership, schema, product contracts and negative CI/release checks |
 | `rust-tests-linux` | Full/Engine route only: portable Rust Clippy, tests and Research-owned real IPC/process contracts; **not** an Engine dev-only Research client or Windows runtime test |
 | `cloudflare-mcp` | Edge affected: TypeScript/MCP/DO/public-contract checks on Ubuntu |
-| `host-windows` | Ready Host/CONTROL or mixed Host+Research, Windows: Clippy, tests and two Host EXE builds, no Engine build |
+| `host-windows` | Ready Host/CONTROL or mixed Host+Research, Windows: Clippy, tests and two Host EXE builds, no Engine build. Restores the existing trusted-main Engine-test cache read-only instead of saving a separate ephemeral PR Host cache |
 | `engine-windows` | Fresh Full/Engine route, Windows: exact 62 financial contracts / 107 witnesses, recovery/resource proof and two independent T10 heavy-Research process/WSS tests using a non-shipping Research-owned fixture |
 | `trading-engine-regressions-windows (suite)` | Fresh Full/Engine route: four parallel Windows suites for Engine, Host, Execution and Research; Host also runs the unchanged native `--all-targets` Clippy with `-D warnings` after its tests |
 | `research-windows` | Fresh Research-only or mixed Host+Research PR, Windows: Research owner/IPC/WSS tests and scoped Research release evidence; no Engine build on Research-only |
-| `ci` | Non-Draft, Ubuntu: **single required branch-protection status**; direct fail-closed evaluation of all applicable owner and portable/architecture/audit/Edge results; no compilation |
+| `ci` | Non-Draft, Ubuntu: **single required branch-protection status**; direct fail-closed evaluation of all applicable owner and portable/architecture/audit/Edge results; on accepted main requires the redundant audit to be explicitly skipped; no compilation |
 | `trading-engine-build-windows` | Fresh Full/Engine route, Windows: Engine-only or full four-EXE release artifact with exact SHA/tree |
 | `warm-windows-cargo-cache (profile)` | **Manual** accepted-main cache seed (`trusted_main_cache_prime` YAML ID); choose `tests`, `release`, `research` (one Windows runner) or `both` (two Engine runners, default). The `research` option primes Research-only Clippy/tests/release without Engine compilation; no automatic Research cache job. Compilation only, never acceptance/publish |
 | `publish-accepted-windows-release` | Accepted Full main tree, isolated write permission: publish immutable verified four-EXE PR artifact without rebuilding or installing |

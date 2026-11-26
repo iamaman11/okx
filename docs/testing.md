@@ -9,10 +9,14 @@ On a Draft PR the same selector runs on Linux as `draft-owner-feedback` (YAML jo
 Ready CI emits one required status `ci`, with `select-checks` routing affected
 owners. The former `classify` display name and `linux-core`/`windows-native`
 aggregators have been removed after the versioned CONTROL provenance migration.
-For applicable Rust changes,
+For fresh applicable Rust changes,
 `dependency-audit` must succeed before `ci` can succeed;
 docs-only and Edge-only changes require the audit job to be explicitly
-**skipped**. Full Native/Engine changes retain a separate Windows financial
+**skipped**. An accepted `main` push with an identical first-attempt Ready
+tree also requires it to be **skipped**, because that Ready `ci` already
+validated the full dependency audit. Both publishers explicitly verify the
+skipped audit, accepted tree and successful main `ci`; an unverified main
+tree does not receive this exception. Full Native/Engine changes retain a separate Windows financial
 collector, release builder and four Windows regression suites: `engine`,
 `host`, `execution`, `research`. The Host suite now runs the same native
 `--all-targets` Clippy with `-D warnings` after Host tests; there is no
@@ -48,6 +52,17 @@ Research-only Windows test and release dependencies after an accepted main
 Ready tree; ordinary PR and push CI never launch an extra Research seed job.
 These jobs are not protected acceptance or release evidence. Actual speedup
 must be measured on a subsequent owner-only Ready run, not inferred from the seed.
+Host-only Ready now reads the same trusted main Windows **test** cache as
+the Engine financial job (matching Cargo dev/test profiles), but compiles only
+Host/Launcher targets. The former PR-private Host cache consumed ~390 MB and
+could not warm a different PR. This avoids that cache write and may reuse
+Clippy/test dependencies; release builds remain fresh and warm Host timings
+must be verified before declaring a speed improvement. Other PR-local Linux
+and Draft caches remain writable: deleting them without a replacement main
+seed would regress repeated development builds. The observed Actions cache
+capacity was ~9.87/10 GB with most bytes in ephemeral PR refs; GitHub's
+normal eviction remains the fallback, not a reason to delete accepted-main
+Engine or Research seeds blindly.
 
 ## #512 current navigation and evidence status (r15)
 

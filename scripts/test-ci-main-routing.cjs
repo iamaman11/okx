@@ -31,6 +31,7 @@ const releaseGates = ['engine-windows',
 const acceptedWorkflowPath = String.raw`test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")`;
 const windowsIpcSummary = String.raw`test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`;
 const nativeCacheJobs = [
+  ['host_controller_launcher_checks', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_acceptance_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_build_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
@@ -86,7 +87,7 @@ function validate(yaml, fileNames) {
     assert.ok(step.split('\n').includes(`          shared-key: ${shared}`), `NATIVE_CACHE_PROFILE:${id}`);
     assert.ok(step.split('\n').includes(`          save-if: ${save}`), `SCOPED_CACHE_WRITER:${id}`);
     assert.match(step, /^          cache-on-failure: false$/m);
-    if (['trading_engine_acceptance_windows', 'trading_engine_regressions_windows',
+    if (['host_controller_launcher_checks', 'trading_engine_acceptance_windows', 'trading_engine_regressions_windows',
       'trading_engine_build_windows', 'research_service_tests_windows'].includes(id)) {
       for (const profile of ['DEV', 'TEST'])
         assert.match(block, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
@@ -123,7 +124,11 @@ function validate(yaml, fileNames) {
   assert.match(draft, /DRAFT_CHECKS: \$\{\{ needs\.component_impact\.outputs\.draft_checks \}\}/);
   assert.match(draft, /check_p0\.py --checks "\$DRAFT_CHECKS"/);
   assert.doesNotMatch(draft, /check_p0\.py --base|fetch-depth: 0/);
-  assert.match(job('dependency-audit'), /if: \(github.event_name != 'pull_request' \|\| github.event.pull_request.draft != true\)/);
+  const audit = job('dependency-audit');
+  assert.match(audit, /needs: component_impact/);
+  assert.match(audit, /if: >-\n      needs\.component_impact\.outputs\.build_required == 'true' &&/,
+    'AUDIT_REQUIRED_FOR_FRESH_READY_AND_UNVERIFIED_MAIN_ONLY');
+  assert.match(audit, /!contains\(fromJSON\('\["docs","cloudflare"\]'\), needs\.component_impact\.outputs\.component_scope\)/);
   const research = job('research_service_tests_windows');
   assert.match(research, /prefix-key: v0-rust/);
   assert.match(research, /shared-key: research-service-windows/);
@@ -170,6 +175,8 @@ function validate(yaml, fileNames) {
   assert.match(researchRelease, /\$scopeArgs \+= '--engine-only'/);
   assert.doesNotMatch(researchRelease, /gh release delete|--cleanup-tag/);
   const host = job('host_controller_launcher_checks');
+  assert.match(host, /id: host-test-cache/);
+  assert.match(host, /Host Cargo cache exact hit: \$\{\{ steps\.host-test-cache\.outputs\.cache-hit \}\}/);
   assert.match(host, /cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
   assert.match(host, /cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
   assert.doesNotMatch(host, /cargo build --locked --release -p okx-trading-engine/);
@@ -441,9 +448,11 @@ function validate(yaml, fileNames) {
       `CI_MUST_CHECK_EACH_${owner.toUpperCase()}_${result.toUpperCase()}_BRANCH`);
   }
   const auditGate = requiredCi.indexOf('docs|cloudflare) check_result "${{ needs[\'dependency-audit\'].result }}" skipped dependency-audit');
+  const acceptedReuseGate = requiredCi.indexOf('check_result "${{ needs[\'dependency-audit\'].result }}" skipped accepted-main-dependency-audit-reuse');
   const mainReuseExit = requiredCi.indexOf('CI=PASS; exact accepted Ready tree reused without compilation');
-  assert.ok(auditGate >= 0 && mainReuseExit > auditGate,
-    'MAIN_EXACT_TREE_REUSE_MUST_NOT_SKIP_FRESH_DEPENDENCY_AUDIT');
+  assert.ok(acceptedReuseGate > requiredCi.indexOf('if [[ "$build" == false ]]; then') &&
+    acceptedReuseGate < mainReuseExit && auditGate > mainReuseExit,
+  'MAIN_EXACT_TREE_REUSE_REQUIRES_SKIPPED_AUDIT_WHILE_FRESH_RUN_REQUIRES_SUCCESS');
   assert.match(requiredCi, /research_component_sha256.*\^\[0-9a-f\]\{64\}\$/);
   assert.match(requiredCi, /mixed_base_head.*\^\[0-9a-f\]\{40\}\$/);
   const publish = job('publish_accepted_windows_release');
@@ -456,7 +465,9 @@ function validate(yaml, fileNames) {
   assert.match(publish, /github\.ref == 'refs\/heads\/main' &&/);
   assert.match(publish, /needs\.component_impact\.outputs\.build_required == 'false' &&/);
   assert.match(publish, /needs\.component_impact\.outputs\.reason == 'merged tree exactly matches successful PR head tree'/);
-  for (const name of ["['dependency-audit']", '.component_impact', '.required_ci']) {
+  assert.match(publish, /needs\['dependency-audit'\]\.result == 'skipped' &&/,
+    'NATIVE_MAIN_PUBLISH_REUSES_READY_AUDIT_ONLY');
+  for (const name of ['.component_impact', '.required_ci']) {
     assert.ok(publish.includes(`needs${name}.result == 'success'`),
       `PUBLICATION_NEEDS_SUCCESS:${name}`);
   }
@@ -488,6 +499,8 @@ function validate(yaml, fileNames) {
   assert.match(researchPublish, /needs.component_impact.outputs.component_scope == 'research' &&/);
   assert.match(researchPublish, /needs.component_impact.outputs.build_required == 'false' &&/);
   assert.match(researchPublish, /needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree'/);
+  assert.match(researchPublish, /needs\['dependency-audit'\]\.result == 'skipped' &&/,
+    'RESEARCH_MAIN_PUBLISH_REUSES_READY_AUDIT_ONLY');
   assert.match(researchPublish, /needs.required_ci.result == 'success'/);
   assert.match(researchPublish, /\.merge_commit_sha == \$main and \.base.ref == "main"/);
   assert.match(researchPublish, /test "\$main_tree" = "\$head_tree"/);
@@ -649,6 +662,20 @@ assert.throws(() => validate(changeJobInput(source, 'required_ci',
   'needs: [component_impact, dependency-audit, architecture_contracts,',
   'needs: [component_impact, architecture_contracts,'), workflows),
   'SINGLE_CI_CANNOT_DROP_AUDIT_DEPENDENCY');
+assert.throws(() => validate(changeJobInput(source, 'dependency-audit',
+  "needs.component_impact.outputs.build_required == 'true' &&",
+  'true &&'), workflows),
+  'MAIN_MUST_NOT_REPEAT_ACCEPTED_READY_DEPENDENCY_AUDIT');
+assert.throws(() => validate(changeJobInput(source, 'required_ci',
+  'skipped accepted-main-dependency-audit-reuse',
+  'success accepted-main-dependency-audit-reuse'), workflows),
+  'MAIN_REUSE_MUST_REQUIRE_SKIPPED_AUDIT');
+for (const publisher of ['publish_accepted_windows_release', 'publish_accepted_research_component']) {
+  assert.throws(() => validate(changeJobInput(source, publisher,
+    "needs['dependency-audit'].result == 'skipped' &&",
+    "needs['dependency-audit'].result == 'success' &&"), workflows),
+  'PUBLISHER_MUST_ONLY_REUSE_IMMUTABLE_READY_AUDIT:' + publisher);
+}
 for (const [old, replacement, reason] of [
   ['test "${{ needs.component_impact.result }}" = "success"', 'true', 'SELECTOR'],
   ['*) check_result "${{ needs[\'dependency-audit\'].result }}" success dependency-audit',
