@@ -722,13 +722,8 @@ pub async fn deploy_research(
     }
     let zip_bytes = github.download_artifact_zip(artifact_id).await?;
     let archive_ready = Instant::now();
-    let (record, worker) = verify_research_ready_archive(
-        &run,
-        &artifact,
-        &jobs,
-        &zip_bytes,
-        expected_source_tree,
-    )?;
+    let (record, worker) =
+        verify_research_ready_archive(&run, &artifact, &jobs, &zip_bytes, expected_source_tree)?;
     verify_active_control_identity()?;
     let verified = Instant::now();
     let (status, staged) = activate_verified_research_image(supervisor, &record, &worker)?;
@@ -1581,13 +1576,15 @@ mod tests {
             assert_eq!(worker, fixture_pe_image());
         }
         let (run, artifact, jobs, zip) = ready_archive_fixture(ReadyEvidencePolicy::NamedV3);
-        assert!(validate_research_ready_jobs_for_policy(
-            ReadyEvidencePolicy::LegacyV1,
-            &run,
-            &artifact,
-            &jobs
-        )
-        .is_err());
+        assert!(
+            validate_research_ready_jobs_for_policy(
+                ReadyEvidencePolicy::LegacyV1,
+                &run,
+                &artifact,
+                &jobs
+            )
+            .is_err()
+        );
         assert!(verify_ready_fixture(&run, &artifact, &jobs, &zip).is_ok());
     }
 
@@ -1633,14 +1630,10 @@ mod tests {
             corrupt_zip[0] ^= 1;
             assert!(verify_ready_fixture(&run, &artifact, &jobs, &corrupt_zip).is_err());
 
-            assert!(verify_research_ready_archive(
-                &run,
-                &artifact,
-                &jobs,
-                &zip,
-                &"c".repeat(40)
-            )
-            .is_err());
+            assert!(
+                verify_research_ready_archive(&run, &artifact, &jobs, &zip, &"c".repeat(40))
+                    .is_err()
+            );
         }
 
         // Recalculate the outer digest to simulate a self-consistent yet
@@ -1676,10 +1669,7 @@ mod tests {
             // skipped, so ensure it cannot be accepted if it later succeeds.
             "trading-engine-regressions-windows (${{ matrix.suite }})",
         ];
-        for policy in [
-            ReadyEvidencePolicy::LegacyV1,
-            ReadyEvidencePolicy::NamedV3,
-        ] {
+        for policy in [ReadyEvidencePolicy::LegacyV1, ReadyEvidencePolicy::NamedV3] {
             let (run, artifact, jobs, zip) = ready_archive_fixture(policy);
             for name in native_names {
                 let mut with_native = jobs.clone();
