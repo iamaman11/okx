@@ -37,6 +37,7 @@ const windowsIpcSummary = String.raw`test result: ok\. 10 passed; 0 failed; 0 ig
 const nativeCacheJobs = [
   ['host_controller_launcher_checks', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_acceptance_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
+  ['trading_engine_isolation_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_build_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
   ['research_service_tests_windows', 'v0-rust', 'research-service-windows', 'false'],
@@ -91,7 +92,8 @@ function validate(yaml, fileNames) {
     assert.ok(step.split('\n').includes(`          shared-key: ${shared}`), `NATIVE_CACHE_PROFILE:${id}`);
     assert.ok(step.split('\n').includes(`          save-if: ${save}`), `SCOPED_CACHE_WRITER:${id}`);
     assert.match(step, /^          cache-on-failure: false$/m);
-    if (['host_controller_launcher_checks', 'trading_engine_acceptance_windows', 'trading_engine_regressions_windows',
+    if (['host_controller_launcher_checks', 'trading_engine_acceptance_windows', 'trading_engine_isolation_windows',
+      'trading_engine_regressions_windows',
       'trading_engine_build_windows', 'research_service_tests_windows'].includes(id)) {
       for (const profile of ['DEV', 'TEST'])
         assert.match(block, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
@@ -209,6 +211,7 @@ function validate(yaml, fileNames) {
   const names = {
     rust_tests_linux: 'rust-tests-linux',
     trading_engine_acceptance_windows: 'engine-windows',
+    trading_engine_isolation_windows: 'engine-isolation-windows',
     trading_engine_build_windows: 'trading-engine-build-windows',
     research_service_tests_windows: 'research-windows',
     host_controller_launcher_checks: 'host-windows',
@@ -253,23 +256,45 @@ function validate(yaml, fileNames) {
   // The real budgeted financial collector remains on the isolated runner.
   assert.match(engine, /Mandatory current Rust financial property acceptance/);
   assert.match(engine, /node scripts\/ci-finance-witness-manifest\.cjs --verify-report/);
-  assert.match(engine, /Isolated Native pending-fill crash recovery/);
-  assert.match(engine, /MCP DO WSS Native finance under isolated Research load/);
-  assert.match(engine, /standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture/);
-  assert.match(engine, /STANDALONE_RESEARCH_MCP_WITNESS_NOT_RUN/);
-  assert.match(engine, /cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton/);
-  assert.match(engine, /Resolve-Path 'target\/debug\/okx-research-service-test-isolated\.exe'/);
-  assert.match(engine, /cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture/);
-  assert.match(engine, /RESEARCH_TEST_LOAD_FIXTURE_BINARY_MISSING/);
+  assert.match(engine, /Current Rust collector negative controls/);
+  assert.match(engine, /Upload current Rust property evidence even on failure/);
+  assert.match(engine, /Install locked financial collector transport dependencies/);
+  assert.match(engine, /npm ci --prefix cloudflare\/okx-mcp --ignore-scripts --no-audit --no-fund/);
+  assert.doesNotMatch(engine, /Isolated Native pending-fill crash recovery|MCP DO WSS Native finance under isolated Research load/,
+    'FINANCIAL_COLLECTOR_RUNNER_MUST_REMAIN_ISOLATED_FROM_PROCESS_AND_MCP_LOAD');
+  const isolation = job('trading_engine_isolation_windows');
+  assert.match(isolation, /needs: component_impact/);
+  assert.match(isolation, /if: needs\.component_impact\.outputs\.build_required == 'true' && needs\.component_impact\.outputs\.native_required != 'false' && needs\.component_impact\.outputs\.research_only != 'true'/);
+  assert.match(isolation, /shared-key: trading-engine-tests-windows/);
+  assert.match(isolation, /Isolated Native pending-fill crash recovery/);
+  assert.match(isolation, /Isolated native protection cleanup SQL regressions/);
+  assert.match(isolation, /PROTECTION_CLEANUP_EXACT_SEVEN_TESTS_MISSING/);
+  assert.match(isolation, /Engine autonomy under heavy research process tree/);
+  assert.match(isolation, /MCP DO WSS Native finance under isolated Research load/);
+  assert.match(isolation, /MCP_NATIVE_LOAD_RECEIPT_INVALID/);
+  assert.match(isolation, /PROCESS_TREE_RECEIPT_MISSING_OR_DUPLICATED/);
+  assert.match(isolation, /PROCESS_TREE_NOT_MEASURED/);
+  assert.match(isolation, /ENGINE_RESEARCH_EXACT_TEST_MISSING/);
+  assert.match(isolation, /MCP_NATIVE_LOAD_EXACT_TEST_MISSING/);
+  assert.match(isolation, /standalone_catalog_reopens_through_real_mcp_do_websocket -- --exact --ignored --nocapture/);
+  assert.match(isolation, /STANDALONE_RESEARCH_MCP_WITNESS_NOT_RUN/);
+  assert.match(isolation, /cargo build --locked -p okx-research-service --bin okx-research-service --features test-isolated-singleton/);
+  assert.match(isolation, /Resolve-Path 'target\/debug\/okx-research-service-test-isolated\.exe'/);
+  assert.match(isolation, /cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture/);
+  assert.match(isolation, /RESEARCH_TEST_LOAD_FIXTURE_BINARY_MISSING/);
+  assert.match(isolation, /name: engine-research-process-tree-\$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/);
+  assert.match(isolation, /name: mcp-native-load-\$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/);
+  assert.doesNotMatch(isolation, /Mandatory current Rust financial property acceptance|cargo run --locked -p okx-native-finance-check/,
+    'ISOLATION_RUNNER_MUST_NOT_REPEAT_FULL_FINANCIAL_COLLECTOR');
   const fixtureEnvironment = /OKX_RESEARCH_LOAD_FIXTURE_EXE = \(Resolve-Path 'target\/debug\/okx-research-load-fixture\.exe'\)\.Path/;
   for (const [start, end] of [
     ['Engine autonomy under heavy research process tree', 'Upload Engine research process-tree observation'],
     ['MCP DO WSS Native finance under isolated Research load', 'Upload isolated MCP DO WSS Native load observation'],
   ]) {
-    const first = engine.indexOf(`      - name: ${start}`);
-    const last = engine.indexOf(`      - name: ${end}`);
+    const first = isolation.indexOf(`      - name: ${start}`);
+    const last = isolation.indexOf(`      - name: ${end}`);
     assert.ok(first >= 0 && last > first, `ISOLATED_ENGINE_T10_STEP_MISSING:${start}`);
-    assert.match(engine.slice(first, last), fixtureEnvironment,
+    assert.match(isolation.slice(first, last), fixtureEnvironment,
       `ENGINE_T10_STEP_REQUIRES_OWN_LOAD_FIXTURE:${start}`);
   }
   assert.doesNotMatch(engine, /K9 worker two-heavy cancellation latency evidence/);
@@ -453,7 +478,7 @@ function validate(yaml, fileNames) {
   assert.match(requiredCi, /^    name: ci$/m);
   const directOwners = ['component_impact', 'dependency-audit', 'architecture_contracts',
     'rust_tests_linux', 'cloudflare_mcp_contracts', 'host_controller_launcher_checks',
-    'trading_engine_acceptance_windows', 'trading_engine_regressions_windows',
+    'trading_engine_acceptance_windows', 'trading_engine_isolation_windows', 'trading_engine_regressions_windows',
     'trading_engine_build_windows', 'research_service_tests_windows'];
   assert.ok(requiredCi.includes('needs: [' + directOwners.join(', ') + ']'),
     'CI_MUST_WAIT_FOR_EVERY_OWNER_DIRECTLY');
@@ -469,6 +494,8 @@ function validate(yaml, fileNames) {
     '*) check_result "${{ needs[\'dependency-audit\'].result }}" success dependency-audit',
     "check_result '${{ needs.trading_engine_regressions_windows.result }}' success engine-regressions",
     "check_result '${{ needs.trading_engine_regressions_windows.result }}' skipped engine-regressions",
+    "check_result '${{ needs.trading_engine_isolation_windows.result }}' success engine-isolation-windows",
+    "check_result '${{ needs.trading_engine_isolation_windows.result }}' skipped engine-isolation-windows",
     "check_result '${{ needs.trading_engine_build_windows.result }}' success engine-build",
     "check_result '${{ needs.trading_engine_build_windows.result }}' skipped engine-build",
     "check_result '${{ needs.research_service_tests_windows.result }}' success research-windows",
@@ -485,6 +512,8 @@ function validate(yaml, fileNames) {
     ['trading_engine_regressions_windows', 'skipped', 2],
     ['trading_engine_build_windows', 'skipped', 2],
     ['trading_engine_acceptance_windows', 'skipped', 2],
+    ['trading_engine_isolation_windows', 'skipped', 2],
+    ['trading_engine_isolation_windows', 'success', 1],
     ['research_service_tests_windows', 'success', 2],
     ['research_service_tests_windows', 'skipped', 3],
     ['host_controller_launcher_checks', 'success', 2],
@@ -992,13 +1021,42 @@ assert.throws(() => validate(changeJobInput(source, 'required_ci',
   "test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_OWNER_ONLY", 'true'), workflows));
 assert.throws(() => validate(source.replace('node scripts/ci-finance-witness-manifest.cjs --verify-report', 'echo skipped'), workflows));
 assert.throws(() => validate(changeJobInput(source, 'trading_engine_acceptance_windows',
+  'npm ci --prefix cloudflare/okx-mcp --ignore-scripts --no-audit --no-fund',
+  'echo skipped-npm-install'), workflows),
+  'FINANCE_COLLECTOR_RETAINED_WORKERD_TRANSPORT_NEEDS_LOCKED_NPM');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_isolation_windows',
   'cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture',
   'echo fake-research-load-fixture'), workflows),
   'REAL_ENGINE_RESEARCH_T10_FIXTURE_MUST_BE_COMPILED');
-assert.throws(() => validate(changeJobInput(source, 'trading_engine_acceptance_windows',
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_isolation_windows',
   "$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = (Resolve-Path 'target/debug/okx-research-load-fixture.exe').Path",
   '$env:OKX_RESEARCH_LOAD_FIXTURE_EXE = $null'), workflows),
   'ENGINE_RESEARCH_T10_TESTS_MUST_HAVE_TWO_REAL_FIXTURE_PATHS');
+for (const [before, after, reason] of [
+  ["check_result '${{ needs.trading_engine_isolation_windows.result }}' success engine-isolation-windows",
+    "check_result '${{ needs.trading_engine_isolation_windows.result }}' skipped engine-isolation-windows",
+    'FULL_ENGINE_CANNOT_SKIP_ISOLATION'],
+  ["check_result '${{ needs.trading_engine_isolation_windows.result }}' skipped engine-isolation-windows",
+    "check_result '${{ needs.trading_engine_isolation_windows.result }}' success engine-isolation-windows",
+    'SCOPED_OWNERS_CANNOT_INVOKE_ENGINE_ISOLATION'],
+]) {
+  const mutated = changeJobInput(source, 'required_ci', before, after);
+  assert.notEqual(mutated, source, `ISOLATION_GATE_MUTATION_MISSING:${reason}`);
+  assert.throws(() => validate(mutated, workflows), reason);
+}
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_isolation_windows',
+  "needs.component_impact.outputs.native_required != 'false'",
+  "needs.component_impact.outputs.native_required == 'false'"), workflows),
+  'FULL_ENGINE_MUST_RUN_ISOLATION');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_isolation_windows',
+  'PROTECTION_CLEANUP_EXACT_SEVEN_TESTS_MISSING', 'SQL_CLEANUP_CHECK_REMOVED'), workflows),
+  'SQL_CLEANUP_SEVEN_WITNESSES_MUST_REMAIN');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_isolation_windows',
+  'STANDALONE_RESEARCH_MCP_WITNESS_NOT_RUN', 'RESEARCH_LOOPBACK_UNVERIFIED'), workflows),
+  'REAL_MCP_RESEARCH_NEGATIVE_CHECK_MUST_REMAIN');
+assert.throws(() => validate(changeJobInput(source, 'trading_engine_isolation_windows',
+  'MCP_NATIVE_LOAD_RECEIPT_INVALID', 'MCP_LOAD_RECEIPT_SKIPPED'), workflows),
+  'MCP_LOAD_RECEIPT_MUST_REMAIN_STRICT');
 assert.throws(() => validate(changeJobInput(source, 'trading_engine_regressions_windows',
   'cargo build --locked -p okx-research-service --bin okx-research-load-fixture --features test-fixture',
   'echo fake-research-load-fixture'), workflows),
@@ -1060,8 +1118,8 @@ rejectFinanceDenialMutation(
   'ENGINE_FINANCE_DENIAL_MUST_REQUIRE_BOTH_NAMED_TEST_AND_RESULT');
 assert.throws(() => validate(source.replace('$manifestJson = & node scripts/ci-finance-witness-manifest.cjs', '$manifestJson = & cargo run --locked -p okx-native-finance-check -- --list'), workflows));
 assert.throws(() => validate(changeJobInput(source, 'required_ci',
-  'trading_engine_acceptance_windows, trading_engine_regressions_windows,',
-  'trading_engine_acceptance_windows,'), workflows),
+  'trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows,',
+  'trading_engine_acceptance_windows, trading_engine_regressions_windows,'), workflows),
   'SINGLE_CI_MUST_WAIT_FOR_ALL_FOUR_REGRESSION_CELLS');
 assert.throws(() => validate(source.replace('"trading-engine-regressions-windows (engine)",', ''), workflows));
 assert.throws(() => validate(source.replace('suite: [engine, host, execution, research]', 'suite: [engine, host, execution]'), workflows),

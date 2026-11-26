@@ -41,9 +41,20 @@ jobs:
 
       - name: Secret preflight
         shell: bash
+        env:
+          OKX_RESEARCH_RUNTIME_TOKEN_SHA256: ${{ secrets.OKX_RESEARCH_RUNTIME_TOKEN_SHA256 }}
         run: |
           set -euo pipefail
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN missing"; exit 20; }
+          # Only the public SHA-256 fingerprint is supplied. Never pass or
+          # print the Research bearer outside its Windows Credential Manager.
+          [[ "$OKX_RESEARCH_RUNTIME_TOKEN_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo 'protected Research fingerprint missing or invalid'; exit 28;
+          }
+          engine_fingerprint="$(jq -r '.vars.RUNTIME_TOKEN_SHA256' wrangler.jsonc)"
+          test "$OKX_RESEARCH_RUNTIME_TOKEN_SHA256" != "$engine_fingerprint" || {
+            echo 'Research and Engine fingerprints must be distinct'; exit 29;
+          }
 
       - name: One-time v2 installation input preflight
         shell: bash
@@ -72,6 +83,8 @@ jobs:
 
       - name: Deploy Worker
         shell: bash
+        env:
+          OKX_RESEARCH_RUNTIME_TOKEN_SHA256: ${{ secrets.OKX_RESEARCH_RUNTIME_TOKEN_SHA256 }}
         run: |
           set -euo pipefail
           test "${GITHUB_REF}" = "refs/heads/main" || { echo "must deploy exact main"; exit 21; }
