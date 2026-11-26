@@ -163,6 +163,51 @@ pub(super) fn decode_budget_denial(
 }
 
 impl UnifiedFinanceHandle {
+    /// Resolve only a durable PREPARE correlation committed by this account's
+    /// SQL owner. A miss cannot establish that a request never had an effect.
+    pub async fn resolve_request_intent(
+        &self,
+        deadline: Instant,
+        account: String,
+        request_id: String,
+    ) -> StoreResult<Option<String>> {
+        if !super::admission_lifecycle::valid_edge_request_reference(&request_id) {
+            return Err(crate::StoreError::Invalid("INVALID_EDGE_REQUEST_ORIGIN"));
+        }
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            AccountStore::verify_source_account_sql(&tx, &installation, &account)?;
+            let scope = Some((installation.as_str(), account.as_str()));
+            let receipt = AccountStore::operation_sql(
+                &tx,
+                scope,
+                &format!("edge-request:{request_id}"),
+            )?;
+            let result = match receipt {
+                None => None,
+                Some(receipt) => {
+                    if receipt.kind != "EDGE_TRADE_PREPARE_ORIGIN" {
+                        return Err(crate::StoreError::Invalid("EDGE_REQUEST_ORIGIN_INVALID"));
+                    }
+                    let intent = AccountStore::find_intent_sql(
+                        &tx,
+                        scope,
+                        "intent_id",
+                        &receipt.result_ref,
+                    )?
+                    .ok_or(crate::StoreError::Invalid("EDGE_REQUEST_INTENT_MISSING"))?;
+                    if intent.request_hash != receipt.request_hash {
+                        return Err(crate::StoreError::Invalid("EDGE_REQUEST_INTENT_MISMATCH"));
+                    }
+                    Some(intent.intent_id)
+                }
+            };
+            tx.commit()?;
+            Ok(result)
+        })
+        .await
+    }
     /// One read-only account-scoped transaction on the existing finance FIFO.
     pub async fn account_diagnostic_snapshot(
         &self,

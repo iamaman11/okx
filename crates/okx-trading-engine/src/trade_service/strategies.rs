@@ -741,6 +741,7 @@ impl TradeService {
                         definition_version: instance.definition_version.clone(),
                         opening_claim: Some((input_for_execute, claimed_decision_id)),
                     }),
+                    None,
                 )
                 .await?;
         }

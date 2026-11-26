@@ -26,6 +26,22 @@ impl UnifiedFinanceHandle {
         intent: NewIntent,
         activation_revision: Option<i64>,
     ) -> StoreResult<StoredIntent> {
+        self.prepare_admission_with_invocation(
+            deadline, account, decision, intent, activation_revision, None,
+        )
+        .await
+    }
+    /// An observational Edge request identity is committed atomically with
+    /// PREPARE. It never supplies an admission or an idempotency permission.
+    pub async fn prepare_admission_with_invocation(
+        &self,
+        deadline: Instant,
+        account: String,
+        decision: Decision,
+        intent: NewIntent,
+        activation_revision: Option<i64>,
+        request_id: Option<String>,
+    ) -> StoreResult<StoredIntent> {
         let installation = self.installation.clone();
         self.submit_before(Some(deadline), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -72,6 +88,28 @@ impl UnifiedFinanceHandle {
             .ok_or(StoreError::Invalid("UNIFIED_PREPARED_INTENT_MISSING"))?;
             if let (true, Some(revision)) = (inserted, activation_revision) {
                 AccountStore::bind_strategy_send_sql(&tx, scope, &stored, revision, decision_at)?;
+            }
+            if let Some(request_id) = request_id {
+                if !valid_edge_request_reference(&request_id) {
+                    return Err(StoreError::Invalid("INVALID_EDGE_REQUEST_ORIGIN"));
+                }
+                let key = format!("edge-request:{request_id}");
+                tx.execute(
+                    "INSERT INTO operation_receipts(
+                     installation_id,account_key,operation_id,kind,request_hash,result_ref,committed_at)
+                     VALUES(?1,?2,?3,'EDGE_TRADE_PREPARE_ORIGIN',?4,?5,?6)
+                     ON CONFLICT(installation_id,account_key,operation_id) DO NOTHING",
+                    rusqlite::params![installation, account, key, stored.request_hash,
+                        stored.intent_id, super::opening_ingress::owner_now_ms()?],
+                )?;
+                let bound = AccountStore::operation_sql(&tx, Some(scope), &key)?
+                    .ok_or(StoreError::Invalid("EDGE_REQUEST_ORIGIN_MISSING"))?;
+                if bound.kind != "EDGE_TRADE_PREPARE_ORIGIN"
+                    || bound.request_hash != stored.request_hash
+                    || bound.result_ref != stored.intent_id
+                {
+                    return Err(StoreError::Invalid("EDGE_REQUEST_ORIGIN_CONFLICT"));
+                }
             }
             tx.commit().map_err(|_| {
                 StoreError::Invalid("UNIFIED_FINANCE_OUTCOME_UNKNOWN_DO_NOT_REPLAY")
@@ -266,4 +304,13 @@ impl UnifiedFinanceHandle {
         })
         .await
     }
+}
+
+/// Keep enough space for the `request:` prefix in DiagnosticsRequest (128 bytes).
+pub(super) fn valid_edge_request_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 120
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }

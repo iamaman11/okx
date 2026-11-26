@@ -30,6 +30,23 @@ if(operationTrace('operation','intent:wrong',{
  request_id:'req_read',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
  reference:'intent:abc',state:'posting',stage:'posting'}}).state!=='NOT_EVALUATED')
  throw Error('foreign Engine intent incorrectly promoted to observed');
+const engineRequestTrace=operationTrace('operation','request:req_initial_trade',{
+ request_id:'req_diagnostic',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
+ reference:'request:req_initial_trade',origin_request_id:'req_initial_trade',
+ resolved_intent_reference:'intent:intent_123',state:'POSTING',stage:'POSTING',
+ missing_evidence:['AUTHORITATIVE_VENUE_ORDER_READBACK']}
+});
+if(engineRequestTrace.state!=='OBSERVED'||engineRequestTrace.reference_kind!=='request_id'||
+ engineRequestTrace.origin_request_id!=='req_initial_trade'||
+ engineRequestTrace.first_unproven_fact!=='AUTHORITATIVE_VENUE_ORDER_READBACK')
+ throw Error('durable Engine request-to-intent correlation not projected');
+const forgedEngineTrace=operationTrace('operation','request:req_initial_trade',{
+ request_id:'req_diagnostic',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
+ reference:'request:req_initial_trade',origin_request_id:'req_other',
+ resolved_intent_reference:'intent:intent_123',state:'POSTING'}
+});
+if(forgedEngineTrace.state!=='NOT_EVALUATED'||forgedEngineTrace.origin_request_id!==null)
+ throw Error('foreign Engine request-to-intent binding promoted to observed');
 console.log('read_only_operation_trace_reference_binding PASS');
 for(const unauthorized of [{}, {auth:{scope:['research:read']}}, {auth:{scope:[]}}]){
  const forbidden=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({

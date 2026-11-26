@@ -3,12 +3,89 @@ use super::{
     UnifiedFinanceHandle,
     operation_diagnostics::{NativeEntrySourceFailure, NativeEntrySourceKind},
     owner_financial_reply_tests::{INSTALLATION, account, campaign},
-    owner_reserve_reply_tests::{cleanup, setup},
+    owner_reserve_reply_tests::{cleanup, setup, setup_with_origin},
 };
 use std::time::{Duration, Instant};
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
+}
+
+#[tokio::test]
+async fn edge_request_identity_resolves_one_durable_intent_without_replaying_admission() {
+    let origin = "req_original_trade_0123456789";
+    let (root, owner, _request) = setup_with_origin(origin).await;
+    let before = serde_json::to_value(owner.campaign_summary(campaign()).await.unwrap()).unwrap();
+    assert_eq!(
+        owner
+            .resolve_request_intent(deadline(), account(), origin.into())
+            .await
+            .unwrap(),
+        Some("reply_intent_001".into())
+    );
+    assert_eq!(
+        owner
+            .resolve_request_intent(deadline(), account(), "req_unknown".into())
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        owner
+            .resolve_request_intent(
+                deadline(),
+                format!("okx:real:{}", "b".repeat(64)),
+                origin.into(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        before,
+        serde_json::to_value(owner.campaign_summary(campaign()).await.unwrap()).unwrap()
+    );
+    let mut stopped = owner.termination_signal();
+    drop(owner);
+    if !*stopped.borrow() {
+        tokio::time::timeout(Duration::from_secs(5), stopped.changed())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let owner = UnifiedFinanceHandle::open_native(root.clone(), INSTALLATION.into())
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .resolve_request_intent(deadline(), account(), origin.into())
+            .await
+            .unwrap(),
+        Some("reply_intent_001".into())
+    );
+    cleanup(root, owner).await;
+}
+
+#[tokio::test]
+async fn non_origin_operation_receipt_cannot_impersonate_a_trade_request() {
+    let (root, owner, _request) = setup().await;
+    owner
+        .operation_receipt(
+            deadline(),
+            account(),
+            "edge-request:req_foreign".into(),
+            "f".repeat(64),
+            "UNRELATED_OPERATION".into(),
+            "reply_intent_001".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        owner
+            .resolve_request_intent(deadline(), account(), "req_foreign".into())
+            .await,
+        Err(crate::StoreError::Invalid("EDGE_REQUEST_ORIGIN_INVALID"))
+    ));
+    cleanup(root, owner).await;
 }
 
 #[tokio::test]
