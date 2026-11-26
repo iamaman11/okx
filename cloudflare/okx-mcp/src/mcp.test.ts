@@ -221,6 +221,7 @@ if(oversizedCatalog.status!=='failed'||oversizedCatalog.reason_code!=='RESPONSE_
 console.log('market_capabilities_20k_only_preserves_descriptors_and_finite_bound PASS');
 
 const nativeResponse=(response:unknown):any=>({RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
+ if(!init?.body)return Response.json(response);
  const id=JSON.parse(String(init.body)).request_id;
  const isNative=(value:any)=>value?.schema==='okx.agent.response/v1';
  const align=(value:any):any=>isNative(value)?{...value,request_id:id}:value;
