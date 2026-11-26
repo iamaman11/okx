@@ -1248,8 +1248,8 @@ jobs:
     name: research-windows
     needs: component_impact
     # A successful, identical PR tree is already accepted; main must reuse it.
-    # Only an accepted PR run may mint component bytes. An unreviewed main
-    # fallback must stay red; it cannot manufacture a substitute origin.
+    # This job proves owner tests and actual MCP/DO/WSS behavior. The separate
+    # release-profile job may mint bytes, but the sole ci gate requires both.
     if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')
     runs-on: windows-latest
     env:
@@ -1258,7 +1258,6 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     outputs:
-      research_component_sha256: ${{ steps.package.outputs.research_component_sha256 }}
       mixed_base_head: ${{ steps.mixed_evidence.outputs.base_head }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1289,7 +1288,7 @@ jobs:
       - name: Fresh Strategy Core, Research and Worker owner checks
         shell: pwsh
         run: |
-          # One Cargo target root for tests and release, and the action cache.
+          # One isolated Cargo target root for the owner test profile.
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
           "Research Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
           # The Native Linux job is intentionally skipped for Research-only
@@ -1297,7 +1296,7 @@ jobs:
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # This is the REQUIRED Ready gate for Research owners.
-          # A failing primitive unit test must fail this job before packaging.
+          # A failing primitive test must fail Ready even if release compiled.
           cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $ownerLog = Join-Path $env:RUNNER_TEMP 'research-native-owner-tests.log'
@@ -1362,9 +1361,93 @@ jobs:
             throw 'RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED'
           }
 
+      - name: Verify accepted Engine and build fresh Research for mixed owner evidence
+        id: mixed_evidence
+        if: needs.component_impact.outputs.component_scope == 'research-host'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse 'HEAD^{tree}').Trim()
+          $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
+          & ./scripts/prepare-research-release.ps1 -VerifyOnly -MixedHost
+          $proof = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
+          if ($proof.current_head_sha -cne $env:OKX_BUILD_SOURCE_HEAD -or
+              $proof.scope.scope -cne 'research-host' -or
+              $proof.scope.engine_windows_cargo_closure_identical -ne $true -or
+              $proof.base_head_sha -cnotmatch '^[0-9a-f]{40}$') { throw 'MIXED_ENGINE_PROOF_REQUIRED' }
+          cargo build --locked --release -p okx-research-service --bin okx-research-service
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = 'target/release/okx-research-service.exe'
+          [ordered]@{
+            fresh_component = 'okx-research-service.exe'
+            source_head_sha = $env:OKX_BUILD_SOURCE_HEAD
+            source_tree = $env:OKX_BUILD_SOURCE_TREE
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
+            reused_engine = $proof.components.'okx-agent.exe'
+            release_is_complete = $false
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'mixed-research-proof.json') -Encoding utf8NoBOM
+          "base_head=$($proof.base_head_sha)" >> $env:GITHUB_OUTPUT
+
+      - name: Retain fresh Research binary and verified Engine origin
+        if: needs.component_impact.outputs.component_scope == 'research-host'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mixed-research-windows-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            target/release/okx-research-service.exe
+            ${{ runner.temp }}/mixed-research-proof.json
+            ${{ runner.temp }}/research-release-proof.json
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
+
+
+  research_component_release_windows:
+    # Windows release compilation uses a different Cargo profile from owner
+    # tests. Running on another runner removes its serial 60+ second wait
+    # without weakening the existing Research Ready v3 status roster.
+    name: research-component-windows
+    needs: component_impact
+    if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'
+    runs-on: windows-latest
+    env:
+      # Match the trusted-main Research cache seed, including both debug and
+      # release cache fingerprints. These do not override the release profile.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    outputs:
+      research_component_sha256: ${{ steps.package.outputs.research_component_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Require exact immutable PR HEAD for standalone Research release
+        shell: pwsh
+        run: |
+          $expected = '${{ github.event.pull_request.head.sha }}'
+          if ($expected -cnotmatch '^[0-9a-f]{40}$' -or
+              (git rev-parse HEAD).Trim() -cne $expected) {
+            throw 'RESEARCH_COMPONENT_NOT_EXACT_PR_HEAD'
+          }
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: research-release-cache
+        with:
+          prefix-key: v0-rust
+          shared-key: research-service-windows
+          cache-workspace-crates: true
+          save-if: false
+          cache-on-failure: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: cloudflare/okx-mcp/.node-version
+          package-manager-cache: false
       - name: Build self-contained Research-only Windows component
         id: package
-        if: needs.component_impact.outputs.research_only == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -1416,7 +1499,6 @@ jobs:
           "RESEARCH_COMPONENT_MANIFEST_SCHEMA=okx.windows.research-component/v3" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload isolated Research release evidence
-        if: github.event_name == 'pull_request' && needs.component_impact.outputs.research_only == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: research-only-release-evidence-${{ github.event.pull_request.head.sha }}
@@ -1427,7 +1509,6 @@ jobs:
           retention-days: 14
 
       - name: Upload exact standalone Research component ZIP
-        if: github.event_name == 'pull_request' && needs.component_impact.outputs.research_only == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: okx-research-component-${{ github.event.pull_request.head.sha }}
@@ -1436,54 +1517,11 @@ jobs:
           compression-level: 1
           retention-days: 14
 
-      - name: Verify accepted Engine and build fresh Research for mixed owner evidence
-        id: mixed_evidence
-        if: needs.component_impact.outputs.component_scope == 'research-host'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $env:OKX_BUILD_SOURCE_TREE = (git rev-parse 'HEAD^{tree}').Trim()
-          $env:OKX_BUILD_SOURCE_HEAD = (git rev-parse HEAD).Trim()
-          & ./scripts/prepare-research-release.ps1 -VerifyOnly -MixedHost
-          $proof = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'research-release-proof.json') | ConvertFrom-Json
-          if ($proof.current_head_sha -cne $env:OKX_BUILD_SOURCE_HEAD -or
-              $proof.scope.scope -cne 'research-host' -or
-              $proof.scope.engine_windows_cargo_closure_identical -ne $true -or
-              $proof.base_head_sha -cnotmatch '^[0-9a-f]{40}$') { throw 'MIXED_ENGINE_PROOF_REQUIRED' }
-          cargo build --locked --release -p okx-research-service --bin okx-research-service
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $binary = 'target/release/okx-research-service.exe'
-          [ordered]@{
-            fresh_component = 'okx-research-service.exe'
-            source_head_sha = $env:OKX_BUILD_SOURCE_HEAD
-            source_tree = $env:OKX_BUILD_SOURCE_TREE
-            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
-            reused_engine = $proof.components.'okx-agent.exe'
-            release_is_complete = $false
-          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'mixed-research-proof.json') -Encoding utf8NoBOM
-          "base_head=$($proof.base_head_sha)" >> $env:GITHUB_OUTPUT
-
-      - name: Retain fresh Research binary and verified Engine origin
-        if: needs.component_impact.outputs.component_scope == 'research-host'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: mixed-research-windows-${{ github.event.pull_request.head.sha || github.sha }}
-          path: |
-            target/release/okx-research-service.exe
-            ${{ runner.temp }}/mixed-research-proof.json
-            ${{ runner.temp }}/research-release-proof.json
-          if-no-files-found: error
-          compression-level: 1
-          retention-days: 14
-
-
   required_ci:
     # The sole required status checks owner jobs directly. A skipped job may
     # satisfy a GitHub branch rule, so require each expected result explicitly.
     name: ci
-    needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows]
+    needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows, research_component_release_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1518,7 +1556,8 @@ jobs:
               '${{ needs.trading_engine_isolation_windows.result }}' \
               '${{ needs.trading_engine_regressions_windows.result }}' \
               '${{ needs.trading_engine_build_windows.result }}' \
-              '${{ needs.research_service_tests_windows.result }}'; do
+              '${{ needs.research_service_tests_windows.result }}' \
+              '${{ needs.research_component_release_windows.result }}'; do
               check_result "$item" skipped accepted-main-reuse
             done
             echo 'CI=PASS; exact accepted Ready tree reused without compilation'
@@ -1543,6 +1582,7 @@ jobs:
               check_result '${{ needs.rust_tests_linux.result }}' skipped portable-rust
               check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
               check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
+              check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
               check_result '${{ needs.trading_engine_acceptance_windows.result }}' skipped engine-windows
               check_result '${{ needs.trading_engine_isolation_windows.result }}' skipped engine-isolation-windows
               check_result '${{ needs.trading_engine_regressions_windows.result }}' skipped engine-regressions
@@ -1557,19 +1597,22 @@ jobs:
               case "$scope" in
                 research)
                   test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_OWNER_ONLY
-                  [[ '${{ needs.research_service_tests_windows.outputs.research_component_sha256 }}' =~ ^[0-9a-f]{64}$ ]]
+                  [[ '${{ needs.research_component_release_windows.outputs.research_component_sha256 }}' =~ ^[0-9a-f]{64}$ ]]
                   check_result '${{ needs.research_service_tests_windows.result }}' success research-windows
+                  check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows
                   check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
                   ;;
                 research-host)
                   test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_HOST_OWNER_CHECKS
                   [[ '${{ needs.research_service_tests_windows.outputs.mixed_base_head }}' =~ ^[0-9a-f]{40}$ ]]
                   check_result '${{ needs.research_service_tests_windows.result }}' success research-windows
+                  check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
                   check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows
                   ;;
                 *)
                   test '${{ needs.component_impact.outputs.native_proof }}' = HOST_WINDOWS_OWNER_AND_CONSUMER
                   check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
+                  check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
                   check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows
                   ;;
               esac
@@ -1581,6 +1624,7 @@ jobs:
               check_result '${{ needs.trading_engine_regressions_windows.result }}' success engine-regressions
               check_result '${{ needs.trading_engine_build_windows.result }}' success engine-build
               check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
+              check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
               check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
               case "$scope" in
                 engine) test '${{ needs.component_impact.outputs.native_proof }}' = ENGINE_OWNER_ONLY ;;
@@ -1841,7 +1885,8 @@ jobs:
         run: |
           # Reproduce the Research owner's Clippy, test and release compilation
           # without executing tests, packaging an artifact or accepting a PR.
-          # The single research-windows runner can restore both profiles.
+          # The two independent PR Research runners restore this one trusted
+          # main cache read-only; neither PR job may overwrite it.
           $ErrorActionPreference = 'Stop'
           cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_CACHE_SEED_CLIPPY_FAILED' }

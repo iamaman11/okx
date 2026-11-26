@@ -1,5 +1,6 @@
 //! Read-only diagnostics project actual owners; they never change access or replay an intent.
 pub(crate) mod native_intent;
+mod trade_subject;
 mod protection_trace;
 pub(crate) use protection_trace::{
     ProtectionCleanupInvocation, ProtectionOperationTrace, ProtectionTraceEvent,
@@ -52,6 +53,17 @@ async fn operation_diagnostics(
     }
     if reference.starts_with("intent:") || reference.starts_with("request:") {
         return Ok(native_intent::read(
+            &account,
+            ctx.finance.accounts()?.installation_id(),
+            reference,
+        )
+        .await);
+    }
+    if reference.starts_with("cancel:")
+        || reference.starts_with("close:")
+        || reference.starts_with("replace:")
+    {
+        return Ok(trade_subject::read(
             &account,
             ctx.finance.accounts()?.installation_id(),
             reference,

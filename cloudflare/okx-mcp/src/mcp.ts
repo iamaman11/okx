@@ -153,11 +153,90 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
  if(artifact)projected.artifact_id=artifact;
  return projected;
 }
+type TraceSubject=
+ | {kind:'research_job';job_id:string}
+ | {kind:'trade_intent';intent_id:string}
+ | {kind:'cancel_operation';operation_id:string}
+ | {kind:'close_intent';intent_id:string}
+ | {kind:'terminal_release';intent_id:string}
+ | {kind:'protection_operation';operation_id:string};
+type TraceReferenceKind='request_id'|'job_id'|'trade_intent'|'idempotency_key'|
+ 'terminal_release'|'protection_operation';
+type TraceOwner='research_job_catalog'|'trading_engine';
+type TraceState='OBSERVED'|'NOT_EVALUATED';
+export type OperationTraceSummary={schema:'okx.operation-trace-summary/v1';owner:TraceOwner;
+ reference_kind:TraceReferenceKind;diagnostic_request_id:string|null;
+ origin_request_id:string|null;job_id:string|null;subject:TraceSubject|null;
+ state:TraceState;observed_stage:string;first_unproven_fact:string;reason_code:string;
+ quality:'partial';history:'UNKNOWN';read_only:true;next_action:string};
+const subjectId=(id:unknown):id is string=>typeof id==='string'&&
+ id.length>=1&&id.length<=128&&/^[A-Za-z0-9_-]+$/.test(id);
+const intentStates=new Set(['PREPARED','RESERVED','POSTING','UNKNOWN','ACKNOWLEDGED',
+ 'PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED']);
+type ReasonCode=string&{readonly __reasonCode:unique symbol};
+const validReason=(v:unknown):v is ReasonCode=>typeof v==='string'&&/^[A-Z0-9_]{1,96}$/.test(v);
+const validStage=(v:unknown):v is string=>typeof v==='string'&&/^[A-Za-z0-9_]{1,64}$/.test(v);
+const validNextAction=(v:unknown):v is string=>typeof v==='string'&&/^[a-z_.]{1,80}$/.test(v);
+/** A typed subject is emitted only when the owner snapshot proves its exact ID.
+ * A request ID is never itself an intent, and a protection alias is not the
+ * protection operation's ID. Domain IDs never come from a guessed mapping.
+ */
+function traceSubject(view:'operation'|'research',reference:string|undefined,
+ data:Record<string,unknown>|undefined,job:Record<string,unknown>|undefined,
+ trusted:boolean,observed:boolean):TraceSubject|null{
+ if(!trusted||!observed||!data)return null;
+ if(view==='research')return typeof job?.id==='string'&&/^[a-f0-9]{64}$/.test(job.id)
+   ?{kind:'research_job',job_id:job.id}:null;
+ if(data.family==='native_intent'){
+   const intent=isObject(data.intent)?data.intent:undefined;
+   const resolved=reference?.startsWith('request:')?data.resolved_intent_reference:reference;
+   const id=typeof resolved==='string'&&resolved.startsWith('intent:')?resolved.slice(7):null;
+   return subjectId(id)&&intent?.intent_id===id?{kind:'trade_intent',intent_id:id}:null;
+ }
+ // New owner-specific finance operation identities are durable SQL subjects,
+ // not aliases of the incoming MCP request or reconstructed venue outcomes.
+ if(data.family==='cancel'||data.family==='close'||data.family==='replace'){
+   if(data.family==='replace')return null; // Original reference binding is unverified.
+   const prefix=`${data.family}:`;
+   const key=reference?.startsWith(prefix)?reference.slice(prefix.length):null;
+   const scoped=data.owner==='execution.unified_finance'&&
+     typeof data.account==='string'&&data.account.length>0&&data.account.length<=256&&
+     typeof data.installation_id==='string'&&data.installation_id.length>0&&
+     data.reference_kind==='idempotency_key'&&data.read_only===true&&
+     data.state==='OBSERVED'&&data.quality==='partial'&&data.history==='UNKNOWN'&&
+     data.causal_history==='NOT_RECONSTRUCTED';
+   if(!scoped||!subjectId(key)||key.length<8)return null;
+   if(data.family==='cancel'){
+     const operation=isObject(data.operation)?data.operation:undefined;
+     return operation?.kind==='cancel'&&operation.operation_id===key
+       ?{kind:'cancel_operation',operation_id:key}:null;
+   }
+   const intent=isObject(data.intent)?data.intent:undefined;
+   return intent?.operation==='close'&&intent.idempotency_key===key&&subjectId(intent.intent_id)
+     ?{kind:'close_intent',intent_id:intent.intent_id}:null;
+ }
+ if(data.family==='terminal_release'&&reference?.startsWith('terminal_release:')){
+   const id=reference.slice('terminal_release:'.length);
+   const operation=isObject(data.operation)?data.operation:undefined;
+   const snapshot=operation&&isObject(operation.snapshot)?operation.snapshot:undefined;
+   return subjectId(id)&&snapshot?.intent_id===id?{kind:'terminal_release',intent_id:id}:null;
+ }
+ // The remaining legacy projection is protection cleanup. Do not interpret
+ // a new owner family (cancel/replace/close/strategy) as cleanup before its
+ // exact identity and durable semantics have a dedicated contract.
+ if(data.family!==undefined)return null;
+ const operation=isObject(data.operation)?data.operation:undefined;
+ const snapshot=operation&&isObject(operation.snapshot)?operation.snapshot:undefined;
+ const exactReference=reference===snapshot?.operation_id||reference===snapshot?.intent_id||
+   reference===snapshot?.client_order_id;
+ return data.state==='OBSERVED'&&subjectId(snapshot?.operation_id)&&exactReference
+   ?{kind:'protection_operation',operation_id:snapshot.operation_id}:null;
+}
 /** One read-only summary over owner evidence, never a reconstructed history.
  * Foreign/failed envelopes must not be promoted to an observed operation.
  */
 export function operationTrace(view:'operation'|'research',reference:string|undefined,
- projected:Record<string,Json>):Record<string,Json>{
+ projected:Record<string,Json>):OperationTraceSummary{
  const owner=view==='research'?'research_job_catalog':'trading_engine';
  const data=isObject(projected.data)?projected.data:undefined;
  const job=data&&isObject(data.job)?data.job:undefined;
@@ -182,16 +261,21 @@ export function operationTrace(view:'operation'|'research',reference:string|unde
  const trusted=!['unknown','failed','rejected'].includes(String(projected.status))&&
    data?.schema===(view==='research'
    ?'okx.research-job-diagnostics/v1':'okx.operation-diagnostics/v1')&&!!bound;
- const observed=trusted&&view==='research'?data.state==='OBSERVED':
-   trusted&&data?.state!==undefined&&!['NOT_EVALUATED','NOT_OBSERVED','NOT_FOUND'].includes(String(data.state));
- const reason=typeof projected.reason_code==='string'&&/^[A-Z0-9_]{1,96}$/.test(projected.reason_code)
+ const engineObserved=data?.family==='native_intent'?typeof data.state==='string'&&
+   intentStates.has(data.state.toUpperCase()):data?.state==='OBSERVED';
+ // Every OBSERVED summary must have a concrete owner-attested domain subject.
+ // Mismatched nested IDs (or an absent durable row) are not enough evidence.
+ const candidateObserved=!!trusted&&(view==='research'?data?.state==='OBSERVED':engineObserved);
+ const subject=traceSubject(view,reference,data,job,!!trusted,!!candidateObserved);
+ const observed=candidateObserved&&subject!==null;
+ const reason=validReason(projected.reason_code)
    ?projected.reason_code:'OWNER_EVIDENCE_UNAVAILABLE';
- const nativeReason=typeof data?.reason_code==='string'&&/^[A-Z0-9_]{1,96}$/.test(data.reason_code)
+ const nativeReason=validReason(data?.reason_code)
    ?data.reason_code:'NOT_RECONSTRUCTED';
- const validNext=(v:unknown)=>typeof v==='string'&&/^[a-z_.]{1,80}$/.test(v)?v:undefined;
  let firstMissing='CORRELATED_OWNER_DIAGNOSTIC';
  let nextAction=view==='research'?'retry_read_only_diagnostic':'trade.status';
  let stage='NOT_EVALUATED';
+ let ownerReason=trusted?nativeReason:reason;
  if(trusted&&data){
    if(view==='research'){
      const jobStage=job?jobState(job):undefined;
@@ -203,23 +287,52 @@ export function operationTrace(view:'operation'|'research',reference:string|unde
        'inspect_research_job_snapshot'):
        data.reason_code==='AMBIGUOUS_REQUEST_ORIGIN'?'supply_exact_job_id':'retry_read_only_diagnostic';
    }else{
-     stage=typeof data.stage==='string'&&data.stage.length<=64?data.stage:
+     const operation=isObject(data.operation)?data.operation:undefined;
+     const snapshot=operation&&isObject(operation.snapshot)?operation.snapshot:undefined;
+     stage=validStage(data.observed_stage)?data.observed_stage:
+       validStage(data.stage)?data.stage:validStage(snapshot?.stage)?snapshot.stage:
        observed?'OPERATION_SNAPSHOT':'NOT_EVALUATED';
      const missing=Array.isArray(data.missing_evidence)?data.missing_evidence:[];
-     firstMissing=typeof missing[0]==='string'&&/^[A-Z0-9_]{1,96}$/.test(missing[0])
-       ?missing[0]:observed?'FULL_CAUSAL_HISTORY':'ACCOUNT_OPERATION_SNAPSHOT';
-     nextAction=validNext(data.next_action)??'trade.status';
+     const required=validReason(operation?.required_evidence)?operation.required_evidence:
+       typeof operation?.required_evidence==='string'&&
+       /^[a-z_]{1,96}$/.test(operation.required_evidence)?operation.required_evidence.toUpperCase():undefined;
+     firstMissing=validReason(data.first_unproven_fact)?data.first_unproven_fact:
+       validReason(missing[0])?missing[0]:
+       validReason(snapshot?.first_unproven_boundary)?snapshot.first_unproven_boundary:
+       required??(observed?'FULL_CAUSAL_HISTORY':'ACCOUNT_OPERATION_SNAPSHOT');
+     nextAction=validNextAction(data.next_action)?data.next_action:
+       validNextAction(operation?.next_action)?operation.next_action:
+       validNextAction(snapshot?.next_action)?snapshot.next_action:'trade.status';
+     if(!validReason(data.reason_code)&&validReason(snapshot?.reason_code))
+       ownerReason=snapshot.reason_code;
    }
+ }
+ // A schema-less preflight refusal is NOT operation evidence. However, the
+ // installed Engine can explicitly reject an explain request without an
+ // account before it reaches account-owned diagnostics. Preserve that denial
+ // and the missing input without making up a financial state or intent.
+ const accountRefusal=!trusted&&view==='operation'&&data?.scope==='engine'&&
+   data.stage==='operation'&&data.quality==='partial'&&data.retryable===false&&
+   data.reason_code==='ACCOUNT_REQUIRED'&&Array.isArray(data.blockers)&&
+   data.blockers.length===1&&data.blockers[0]==='ACCOUNT_REQUIRED';
+ if(accountRefusal){
+   ownerReason='ACCOUNT_REQUIRED';
+   firstMissing='AUTHORIZED_ACCOUNT_AND_OPERATION_REFERENCE';
+   nextAction='supply_authorized_account_and_operation_reference';
  }
  return {schema:'okx.operation-trace-summary/v1',owner,
    reference_kind:view==='research'?(reference?.startsWith('request:')?'request_id':'job_id'):
-     reference?.startsWith('request:')?'request_id':reference?.startsWith('intent:')?'trade_intent':reference?.startsWith('terminal_release:')?'terminal_release':'protection_operation',
-   diagnostic_request_id:projected.request_id,
-   origin_request_id:trusted&&observed&&view==='research'&&job?job.origin_invocation??null:
+     reference?.startsWith('request:')?'request_id':reference?.startsWith('intent:')?'trade_intent':
+     reference?.startsWith('cancel:')||reference?.startsWith('close:')||reference?.startsWith('replace:')
+       ?'idempotency_key':reference?.startsWith('terminal_release:')?'terminal_release':'protection_operation',
+   diagnostic_request_id:typeof projected.request_id==='string'?projected.request_id:null,
+   origin_request_id:trusted&&observed&&view==='research'&&job&&
+     typeof job.origin_invocation==='string'?job.origin_invocation:
      trusted&&observed&&view==='operation'&&reference?.startsWith('request:')?reference.slice(8):null,
-   job_id:trusted&&view==='research'&&job?job.id:null,
+   job_id:observed&&view==='research'&&job&&typeof job.id==='string'?job.id:null,
+   subject,
    state:observed?'OBSERVED':'NOT_EVALUATED',observed_stage:stage,
-   first_unproven_fact:firstMissing,reason_code:trusted?nativeReason:reason,
+   first_unproven_fact:firstMissing,reason_code:ownerReason,
    quality:'partial',history:'UNKNOWN',read_only:true,
    next_action:nextAction};
 }
