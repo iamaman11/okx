@@ -339,7 +339,7 @@ def _self_test() -> None:
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
     assert "--filter-platform x86_64-pc-windows-msvc" in workflow
     protected = workflow.split("\n  required_ci:\n", 1)[1].split("\n  trading_engine_build_windows:\n", 1)[0]
-    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows]" in protected
+    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_service_tests_windows, research_component_release_windows]" in protected
     for owner in ("trading_engine_acceptance_windows", "trading_engine_isolation_windows",
                   "trading_engine_regressions_windows", "trading_engine_build_windows"):
         assert f"check_result '${{{{ needs.{owner}.result }}}}' success" in protected, f"CI_FINANCE_GATE_MISSING:{owner}"
@@ -370,9 +370,16 @@ def _self_test() -> None:
     assert "standalone_research_status_is_typed_and_does_not_claim_edge_online" in host, "HOST_RESEARCH_STATUS_TYPED_WITNESS_REQUIRED"
     assert "research_token_provision_command_has_no_bearer_fields" in host, "HOST_RESEARCH_SECRET_WIRE_WITNESS_REQUIRED"
     assert "control_bridge_denies_research_mutations_before_network" in host, "HOST_BRIDGE_MUTATION_DENIAL_WITNESS_REQUIRED"
-    research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  required_ci:\n", 1)[0]
+    research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  research_component_release_windows:\n", 1)[0]
+    research_release = workflow.split("\n  research_component_release_windows:\n", 1)[1].split("\n  required_ci:\n", 1)[0]
     assert "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
-    assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research
+    assert "cargo build --locked --release -p okx-research-service --bin okx-research-service" in research_release
+    assert "name: research-component-windows" in research_release
+    assert "needs.component_impact.outputs.research_only == 'true'" in research_release
+    assert "schema = 'okx.windows.research-component/v3'" in research_release
+    assert "name: okx-research-component-${{ github.event.pull_request.head.sha }}" in research_release
+    assert "check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows" in protected
+    assert "needs.research_component_release_windows.outputs.research_component_sha256" in protected
     for witness in (
         "research_token_validation_is_bounded_and_ascii_only",
         "research_native_target_is_distinct_from_engine",
@@ -382,9 +389,12 @@ def _self_test() -> None:
     ):
         assert witness in research, f"RESEARCH_WINDOWS_SECRET_WITNESS_REQUIRED:{witness}"
     assert "cargo fmt --all -- --check" in research, "SCOPED_RESEARCH_MUST_VERIFY_RUST_FORMATTING"
-    # Reuse the same established Cargo cache action and one target directory.
+    # Both parallel Windows jobs restore the same immutable trusted-main
+    # Research cache into their own isolated Cargo target directories.
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
-    assert research.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 2
+    assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research_release
+    assert research.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 1
+    assert research_release.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 1
 
     def files(*paths):
         return [[{"filename": path, "status": "modified"} for path in paths]]

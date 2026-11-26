@@ -40,6 +40,8 @@ mod strategy_nav_contracts;
 mod terminal_diagnostics;
 #[path = "account_trade_read_contract_tests.rs"]
 mod trade_read_contracts;
+#[path = "account_trade_subject_diagnostic_tests.rs"]
+mod trade_subject_diagnostics;
 #[path = "account_usd_page_contract_tests.rs"]
 mod usd_page_contracts;
 

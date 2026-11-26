@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 // #512 S0 fixed read-only diagnostic budget; no financial operation is canceled.
-const READ_BUDGET: Duration = Duration::from_millis(250);
+pub(super) const READ_BUDGET: Duration = Duration::from_millis(250);
 
 // Classify only facts already recorded by the owner; this is not a replay of
 // admission and cannot establish why a response was lost.
@@ -39,7 +39,7 @@ fn incident_evidence(incident: Option<&str>) -> IncidentEvidence {
 // Read-only diagnostics must finish even when the writer cannot start the
 // queued read. The financial owner's start deadline does not bound reply wait.
 // Canceling this read grants no permission and cancels no financial command.
-async fn bounded_snapshot<T, F>(until: Instant, read: F) -> Result<T, String>
+pub(super) async fn bounded_snapshot<T, F>(until: Instant, read: F) -> Result<T, String>
 where
     F: std::future::Future<Output = okx_trade_execution::StoreResult<T>>,
 {

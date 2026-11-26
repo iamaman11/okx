@@ -39,7 +39,7 @@ pub use self::sql::finance_installation::{FinanceInstallationReceipt, NewFinance
 pub use financial_admission::{FinancialAdmissionRequest, instance_nav_gate};
 #[path = "account_trade_reads.rs"]
 mod trade_reads;
-pub use trade_reads::TradeIntentLookup;
+pub use trade_reads::{TradeDiagnosticSubject, TradeIntentLookup, TradeSubjectDiagnosticSnapshot};
 #[path = "account_census_reads.rs"]
 mod census_reads;
 pub use census_reads::{

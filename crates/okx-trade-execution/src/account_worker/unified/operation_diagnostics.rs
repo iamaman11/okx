@@ -2,7 +2,7 @@
 use super::UnifiedFinanceHandle;
 use crate::{
     AccountStore, CentralReceipt, CentralReceiptView, ProtectionReceipt, SourceCursor, StoreResult,
-    StoredIntent, TradeIntentLookup,
+    StoredIntent, TradeDiagnosticSubject, TradeIntentLookup, TradeSubjectDiagnosticSnapshot,
 };
 use rusqlite::OptionalExtension;
 use std::time::Instant;
@@ -163,6 +163,33 @@ pub(super) fn decode_budget_denial(
 }
 
 impl UnifiedFinanceHandle {
+    /// A single read-only transaction on the existing account SQL FIFO. In
+    /// particular no absence of a receipt can prove an exchange mutation did
+    /// not happen, and no candidate replacement relation can authorize POST.
+    pub async fn inspect_trade_subject(
+        &self,
+        deadline: Instant,
+        account: String,
+        subject: TradeDiagnosticSubject,
+        key: String,
+    ) -> StoreResult<TradeSubjectDiagnosticSnapshot> {
+        let installation = self.installation.clone();
+        self.submit_before(Some(deadline), move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            AccountStore::verify_source_account_sql(&tx, &installation, &account)?;
+            let result = AccountStore::trade_subject_diagnostic_sql(
+                &tx,
+                Some((&installation, &account)),
+                subject,
+                &key,
+                super::opening_ingress::owner_now_ms()?,
+            )?;
+            tx.commit()?;
+            Ok(result)
+        })
+        .await
+    }
+
     /// Resolve only a durable PREPARE correlation committed by this account's
     /// SQL owner. A miss cannot establish that a request never had an effect.
     pub async fn resolve_request_intent(

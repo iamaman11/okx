@@ -8,6 +8,7 @@ const researchTrace=operationTrace('research','request:req_original_01',{
    origin_invocation:'req_original_01',result_ref:'b'.repeat(64)}}
 });
 if(researchTrace.state!=='OBSERVED'||researchTrace.job_id!==originJob||
+ researchTrace.subject?.kind!=='research_job'||researchTrace.subject.job_id!==originJob||
  researchTrace.origin_request_id!=='req_original_01'||
  researchTrace.diagnostic_request_id!=='req_diagnostic_02'||
  researchTrace.next_action!=='research.result'||researchTrace.read_only!==true)
@@ -16,37 +17,185 @@ const forgedTrace=operationTrace('research','request:req_different',{
  request_id:'req_diagnostic_02',status:'partial',data:{schema:'okx.research-job-diagnostics/v1',
   state:'OBSERVED',job:{id:originJob,state:'completed',origin_invocation:'req_original_01'}}
 });
-if(forgedTrace.state!=='NOT_EVALUATED'||forgedTrace.job_id!==null)
+if(forgedTrace.state!=='NOT_EVALUATED'||forgedTrace.job_id!==null||forgedTrace.subject!==null)
  throw Error('foreign Research origin incorrectly promoted to observed job');
 const nativeIntentTrace=operationTrace('operation','intent:abc',{
  request_id:'req_read',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
-  reference:'intent:abc',state:'posting',stage:'posting',
+  family:'native_intent',reference:'intent:abc',state:'posting',stage:'posting',
+  intent:{intent_id:'abc'},
   missing_evidence:['AUTHORITATIVE_ORDER_READBACK'],next_action:'trade.status'}
 });
 if(nativeIntentTrace.state!=='OBSERVED'||nativeIntentTrace.first_unproven_fact!==
- 'AUTHORITATIVE_ORDER_READBACK'||nativeIntentTrace.next_action!=='trade.status')
+ 'AUTHORITATIVE_ORDER_READBACK'||nativeIntentTrace.next_action!=='trade.status'||
+ nativeIntentTrace.subject?.kind!=='trade_intent'||nativeIntentTrace.subject.intent_id!=='abc')
  throw Error('Engine native intent stage was lost');
 if(operationTrace('operation','intent:wrong',{
  request_id:'req_read',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
- reference:'intent:abc',state:'posting',stage:'posting'}}).state!=='NOT_EVALUATED')
+ family:'native_intent',reference:'intent:abc',state:'posting',stage:'posting',
+ intent:{intent_id:'abc'}}}).state!=='NOT_EVALUATED')
  throw Error('foreign Engine intent incorrectly promoted to observed');
 const engineRequestTrace=operationTrace('operation','request:req_initial_trade',{
  request_id:'req_diagnostic',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
- reference:'request:req_initial_trade',origin_request_id:'req_initial_trade',
+ family:'native_intent',reference:'request:req_initial_trade',origin_request_id:'req_initial_trade',
  resolved_intent_reference:'intent:intent_123',state:'POSTING',stage:'POSTING',
+ intent:{intent_id:'intent_123'},
  missing_evidence:['AUTHORITATIVE_VENUE_ORDER_READBACK']}
 });
 if(engineRequestTrace.state!=='OBSERVED'||engineRequestTrace.reference_kind!=='request_id'||
  engineRequestTrace.origin_request_id!=='req_initial_trade'||
+ engineRequestTrace.subject?.kind!=='trade_intent'||engineRequestTrace.subject.intent_id!=='intent_123'||
  engineRequestTrace.first_unproven_fact!=='AUTHORITATIVE_VENUE_ORDER_READBACK')
  throw Error('durable Engine request-to-intent correlation not projected');
 const forgedEngineTrace=operationTrace('operation','request:req_initial_trade',{
  request_id:'req_diagnostic',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
- reference:'request:req_initial_trade',origin_request_id:'req_other',
- resolved_intent_reference:'intent:intent_123',state:'POSTING'}
+ family:'native_intent',reference:'request:req_initial_trade',origin_request_id:'req_other',
+ resolved_intent_reference:'intent:intent_123',intent:{intent_id:'intent_123'},state:'POSTING'}
 });
-if(forgedEngineTrace.state!=='NOT_EVALUATED'||forgedEngineTrace.origin_request_id!==null)
+if(forgedEngineTrace.state!=='NOT_EVALUATED'||forgedEngineTrace.origin_request_id!==null||
+ forgedEngineTrace.subject!==null)
  throw Error('foreign Engine request-to-intent binding promoted to observed');
+for(const [label,reference,record] of [
+ ['wrong intent row','intent:intent_123',{family:'native_intent',intent:{intent_id:'other'}}],
+ ['missing request target','request:req_initial_trade',{family:'native_intent',intent:{intent_id:'other'},
+   origin_request_id:'req_initial_trade',resolved_intent_reference:'intent:intent_123'}],
+ ['unknown intent state','intent:intent_123',{family:'native_intent',intent:{intent_id:'intent_123'},
+   state:'REPLAY_WITHOUT_SQL'}],
+] as const){
+ const trace=operationTrace('operation',reference,{request_id:'req_diagnostic',status:'partial',
+  data:{schema:'okx.operation-diagnostics/v1',reference,state:'POSTING',...record}});
+ if(trace.state!=='NOT_EVALUATED'||trace.subject!==null||trace.origin_request_id!==null)
+  throw Error(`Engine malformed owner subject promoted: ${label}`);
+}
+const releaseTrace=operationTrace('operation','terminal_release:intent_123',{
+ request_id:'req_read',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
+ family:'terminal_release',reference:'terminal_release:intent_123',state:'OBSERVED',
+ operation:{state:'OBSERVED',required_evidence:'current_governance',
+  next_action:'read_trade_status_for_authoritative_result',
+  snapshot:{intent_id:'intent_123',stage:'Authority'}}}
+});
+if(releaseTrace.state!=='OBSERVED'||releaseTrace.subject?.kind!=='terminal_release'||
+ releaseTrace.subject.intent_id!=='intent_123'||
+ releaseTrace.first_unproven_fact!=='CURRENT_GOVERNANCE'||
+ releaseTrace.observed_stage!=='Authority'||
+ releaseTrace.next_action!=='read_trade_status_for_authoritative_result')
+ throw Error('terminal release owner snapshot lost its exact subject or action');
+const wrongRelease=operationTrace('operation','terminal_release:intent_123',{
+ request_id:'req_read',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
+ family:'terminal_release',reference:'terminal_release:intent_123',state:'OBSERVED',
+ operation:{snapshot:{intent_id:'different',stage:'Authority'}}}
+});
+if(wrongRelease.state!=='NOT_EVALUATED'||wrongRelease.subject!==null)
+ throw Error('foreign terminal release intent was promoted');
+const protectionTrace=operationTrace('operation','order_client_alias',{
+ request_id:'req_read',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
+ reference:'order_client_alias',state:'OBSERVED',operation:{
+ state:'OBSERVED',current_boundary:'SIGNED_ORDER_READBACK',
+ snapshot:{operation_id:'cleanup_123',client_order_id:'order_client_alias',stage:'VERIFIED',
+ first_unproven_boundary:'SIGNED_ORDER_READBACK',next_action:'trade.status'}}}
+});
+if(protectionTrace.state!=='OBSERVED'||protectionTrace.subject?.kind!=='protection_operation'||
+ protectionTrace.subject.operation_id!=='cleanup_123'||
+ protectionTrace.first_unproven_fact!=='SIGNED_ORDER_READBACK'||
+ protectionTrace.next_action!=='trade.status')
+ throw Error('protection alias did not resolve to owner operation identity');
+const wrongProtection=operationTrace('operation','unrelated_alias',{
+ request_id:'req_read',status:'partial',data:{schema:'okx.operation-diagnostics/v1',
+ reference:'unrelated_alias',state:'OBSERVED',operation:{
+ snapshot:{operation_id:'cleanup_123',client_order_id:'known_order'}}}
+});
+if(wrongProtection.state!=='NOT_EVALUATED'||wrongProtection.subject!==null)
+ throw Error('unrelated protection alias was promoted by outer reference echo');
+const accountRefusal=operationTrace('operation','request:req_missing_account',{
+ request_id:'req_read',status:'partial',data:{scope:'engine',stage:'operation',
+ reason_code:'ACCOUNT_REQUIRED',quality:'partial',retryable:false,blockers:['ACCOUNT_REQUIRED'],
+ next_action:'supply an authorized account and operation reference'}
+});
+if(accountRefusal.state!=='NOT_EVALUATED'||accountRefusal.subject!==null||
+ accountRefusal.reason_code!=='ACCOUNT_REQUIRED'||
+ accountRefusal.first_unproven_fact!=='AUTHORIZED_ACCOUNT_AND_OPERATION_REFERENCE'||
+ accountRefusal.next_action!=='supply_authorized_account_and_operation_reference')
+ throw Error('account preflight denial lost its safe next action');
+const forgedRefusal=operationTrace('operation','intent:abc',{
+ request_id:'req_read',status:'partial',data:{scope:'research',stage:'operation',
+ reason_code:'ACCOUNT_REQUIRED',quality:'partial',retryable:false,blockers:['ACCOUNT_REQUIRED']}
+});
+if(forgedRefusal.reason_code==='ACCOUNT_REQUIRED'||forgedRefusal.state!=='NOT_EVALUATED')
+ throw Error('foreign account refusal was accepted');
+// Each finance subject is attested by its *own* durable owner identity. A
+// local cancel ACK never implies venue terminal state; a replace candidate
+// never proves which original order was cancelled.
+const financeKey='trade_key_12345678';
+const financeSubjectBase={schema:'okx.operation-diagnostics/v1',
+ owner:'execution.unified_finance',account:'okx:demo:fixture',installation_id:'okx_v2_fixture',
+ reference_kind:'idempotency_key',read_only:true,quality:'partial',history:'UNKNOWN',
+ causal_history:'NOT_RECONSTRUCTED'};
+const cancelData={...financeSubjectBase,family:'cancel',reference:`cancel:${financeKey}`,
+ state:'OBSERVED',observed_stage:'CANCEL_STARTED_SQL_ONLY',
+ first_unproven_fact:'CANCEL_VENUE_ACK_AND_FINAL_STATE',
+ reason_code:'CANCEL_POSTING_OUTCOME_UNKNOWN',
+ next_action:'inspect_original_order_status_do_not_resend',
+ operation:{kind:'cancel',operation_id:financeKey,committed_at_ms:1234}};
+const cancelTrace=operationTrace('operation',`cancel:${financeKey}`,{
+ request_id:'req_read',status:'partial',data:cancelData});
+if(cancelTrace.state!=='OBSERVED'||cancelTrace.reference_kind!=='idempotency_key'||
+ cancelTrace.subject?.kind!=='cancel_operation'||cancelTrace.subject.operation_id!==financeKey||
+ cancelTrace.first_unproven_fact!=='CANCEL_VENUE_ACK_AND_FINAL_STATE'||
+ cancelTrace.observed_stage!=='CANCEL_STARTED_SQL_ONLY'||
+ cancelTrace.next_action!=='inspect_original_order_status_do_not_resend'||
+ cancelTrace.origin_request_id!==null||cancelTrace.quality!=='partial'||cancelTrace.history!=='UNKNOWN')
+ throw Error('cancel SQL receipt was converted into a false venue outcome');
+const closeData={...financeSubjectBase,family:'close',reference:`close:${financeKey}`,
+ state:'OBSERVED',observed_stage:'RESERVED',
+ first_unproven_fact:'ORIGINAL_CLOSE_TARGET_AND_CURRENT_VENUE_STATE',
+ reason_code:'DURABLE_CLOSE_INTENT_ONLY',next_action:'trade.status',
+ intent:{intent_id:'close_intent_42',idempotency_key:financeKey,operation:'close',state:'RESERVED'}};
+const closeTrace=operationTrace('operation',`close:${financeKey}`,{
+ request_id:'req_read',status:'partial',data:closeData});
+if(closeTrace.state!=='OBSERVED'||closeTrace.subject?.kind!=='close_intent'||
+ closeTrace.subject.intent_id!=='close_intent_42'||
+ closeTrace.first_unproven_fact!=='ORIGINAL_CLOSE_TARGET_AND_CURRENT_VENUE_STATE')
+ throw Error('close SQL intent was not bound to its own idempotency identity');
+const replaceData={...financeSubjectBase,family:'replace',reference:`replace:${financeKey}`,
+ state:'NOT_EVALUATED',observed_stage:'IDEMPOTENCY_KEY_INTENT_OBSERVED',
+ first_unproven_fact:'REPLACE_COMMAND_AND_ORIGINAL_REFERENCE_BINDING',
+ reason_code:'REPLACE_ORIGIN_UNVERIFIED',next_action:'inspect_original_and_replacement_status_do_not_resend',
+ causal_link:'UNVERIFIED',candidate_new_intent:{intent_id:'candidate_42',idempotency_key:financeKey}};
+const replaceTrace=operationTrace('operation',`replace:${financeKey}`,{
+ request_id:'req_read',status:'partial',data:replaceData});
+if(replaceTrace.state!=='NOT_EVALUATED'||replaceTrace.subject!==null||
+ replaceTrace.reason_code!=='REPLACE_ORIGIN_UNVERIFIED'||
+ replaceTrace.first_unproven_fact!=='REPLACE_COMMAND_AND_ORIGINAL_REFERENCE_BINDING'||
+ replaceTrace.next_action!=='inspect_original_and_replacement_status_do_not_resend')
+ throw Error('unverified replacement causality was promoted to observed');
+for(const [label,reference,changed] of [
+ ['wrong cancel receipt',`cancel:${financeKey}`,{operation:{...cancelData.operation,operation_id:'other_key_1234'}}],
+ ['wrong cancel kind',`cancel:${financeKey}`,{operation:{...cancelData.operation,kind:'replace'}}],
+ ['missing account',`cancel:${financeKey}`,{account:''}],
+ ['wrong owner',`cancel:${financeKey}`,{owner:'research'}],
+ ['wrong identity kind',`cancel:${financeKey}`,{reference_kind:'request_id'}],
+ ['cross family',`close:${financeKey}`,{reference:`close:${financeKey}`}],
+] as const){
+ const trace=operationTrace('operation',reference,{request_id:'req_read',status:'partial',
+  data:{...cancelData,...changed}});
+ if(trace.state!=='NOT_EVALUATED'||trace.subject!==null)
+  throw Error(`forged cancel operation promoted: ${label}`);
+}
+for(const [label,changed] of [
+ ['wrong close key',{intent:{...closeData.intent,idempotency_key:'different_key_123'}}],
+ ['wrong close operation',{intent:{...closeData.intent,operation:'open'}}],
+ ['missing installation',{installation_id:''}],
+ ['wrong family',{family:'cancel'}],
+] as const){
+ const trace=operationTrace('operation',`close:${financeKey}`,{request_id:'req_read',
+  status:'partial',data:{...closeData,...changed}});
+ if(trace.state!=='NOT_EVALUATED'||trace.subject!==null)
+  throw Error(`forged close intent promoted: ${label}`);
+}
+const forgedReplace=operationTrace('operation',`replace:${financeKey}`,{
+ request_id:'req_read',status:'partial',data:{...replaceData,state:'OBSERVED',
+ intent:{...closeData.intent,operation:'replace'}}});
+if(forgedReplace.state!=='NOT_EVALUATED'||forgedReplace.subject!==null)
+ throw Error('forged replace outcome promoted without original reference binding');
 console.log('read_only_operation_trace_reference_binding PASS');
 for(const unauthorized of [{}, {auth:{scope:['research:read']}}, {auth:{scope:[]}}]){
  const forbidden=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
@@ -329,6 +478,32 @@ if(aliasTrace?.operation_trace?.state!=='OBSERVED'||
  aliasTrace.operation_trace.origin_request_id!=='req_original_01'||
  aliasTrace.operation_trace.next_action!=='research.result')
  throw Error('Research retry request was not bound to its durable job');
+const accountDeniedTrace=await mcpResponse('diagnostics',
+ {action:'explain',view:'operation',reference:'request:req_missing_account'},
+ {status:'partial',data:{scope:'engine',stage:'operation',reason_code:'ACCOUNT_REQUIRED',
+  quality:'partial',retryable:false,blockers:['ACCOUNT_REQUIRED'],
+  next_action:'supply an authorized account and operation reference'}});
+if(accountDeniedTrace?.operation_trace?.state!=='NOT_EVALUATED'||
+ accountDeniedTrace.operation_trace.reason_code!=='ACCOUNT_REQUIRED'||
+ accountDeniedTrace.operation_trace.subject!==null||
+ accountDeniedTrace.operation_trace.next_action!==
+  'supply_authorized_account_and_operation_reference')
+ throw Error('public diagnostics.explain obscured owner account preflight denial');
+const cancelOwnerTrace=await mcpResponse('diagnostics',
+ {action:'explain',view:'operation',account:'demo',reference:`cancel:${financeKey}`},
+ {status:'partial',data:cancelData});
+if(cancelOwnerTrace?.operation_trace?.state!=='OBSERVED'||
+ cancelOwnerTrace.operation_trace.subject?.kind!=='cancel_operation'||
+ cancelOwnerTrace.operation_trace.first_unproven_fact!=='CANCEL_VENUE_ACK_AND_FINAL_STATE')
+ throw Error('public diagnostics.explain lost owner cancel SQL-only evidence');
+const replaceOwnerTrace=await mcpResponse('diagnostics',
+ {action:'explain',view:'operation',account:'demo',reference:`replace:${financeKey}`},
+ {status:'partial',data:replaceData});
+if(replaceOwnerTrace?.operation_trace?.state!=='NOT_EVALUATED'||
+ replaceOwnerTrace.operation_trace.subject!==null||
+ replaceOwnerTrace.operation_trace.next_action!==
+  'inspect_original_and_replacement_status_do_not_resend')
+ throw Error('public diagnostics.explain inferred a replacement causal chain');
 for(const [label,changed] of [
  ['missing owner match',{}],
  ['wrong match',{matched_request_id:'req_unrelated_03'}],
