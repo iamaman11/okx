@@ -34,7 +34,7 @@ const PACKAGES: [&str; 4] = [
 // keep those witnesses in a separate child with bounded concurrency.
 const FINANCIAL_WITNESS_TEST_THREADS: u64 = 4;
 const CLOCK_SENSITIVE_TEST_THREADS: u64 = 2;
-const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 11] = [
+const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 12] = [
     // All three remain mandatory original-finance witnesses. Their live
     // source readiness, exchange-clock evidence and SQL queue deadlines
     // depend on real monotonic time; unrelated heavy fixtures at four-way
@@ -53,6 +53,9 @@ const CLOCK_SENSITIVE_AGENT_WITNESSES: [&str; 11] = [
     // an actual two-second maintenance turn and three-second SQL deadlines.
     // Four concurrent heavy fixtures can expire its source freshness window.
     "accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_b_uses_remaining_budget_after_a_settlement",
+    // The post-HELD stale-tariff witness gates a live concurrent Execute on
+    // actual exchange timestamps and bounded 3s/8s SQL/task deadlines.
+    "accounts::native_trade_contracts::native_stale_diagnostic::risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_and_read_only",
 ];
 struct LibtestGroup {
     label: &'static str,
@@ -601,8 +604,11 @@ mod timing_tests {
         let public_b = "accounts::native_trade_contracts::native_public_cohort::risk_book_contract_native_public_b_uses_remaining_budget_after_a_settlement";
         assert!(!actual[0].names.contains(public_b));
         assert!(actual[1].names.contains(public_b));
-        assert_eq!(actual[0].names.len(), 55);
-        assert_eq!(actual[1].names.len(), 11);
+        let post_held = "accounts::native_trade_contracts::native_stale_diagnostic::risk_book_contract_native_stale_post_held_tariff_diagnostic_is_exact_and_read_only";
+        assert!(!actual[0].names.contains(post_held));
+        assert!(actual[1].names.contains(post_held));
+        assert_eq!(actual[0].names.len(), 54);
+        assert_eq!(actual[1].names.len(), 12);
         // No other package may silently acquire a relaxed schedule.
         for package in [
             "okx-trade-execution",
