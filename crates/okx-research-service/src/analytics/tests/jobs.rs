@@ -1048,6 +1048,78 @@ fn historical_rows_keep_unknown_producer_on_replay() {
 }
 
 #[test]
+fn legacy_null_semantic_hash_does_not_attest_retry_request_after_reopen() {
+    use okx_research_protocol::research_ipc::InvocationId;
+
+    let file = path("legacy-unverified-retry");
+    let jobs = Jobs::open(file.clone()).unwrap();
+    let key = IdempotencyKey::new("legacy-retry-key".into()).unwrap();
+    let hash = "c".repeat(64);
+    let (legacy, new, _) = jobs
+        .enqueue("legacy-retry-key".into(), hash.clone())
+        .unwrap();
+    assert!(new);
+    // Upgraded catalogs can contain admitted jobs without the semantic
+    // digest that would prove a new invocation is the same request.
+    jobs.db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE research_jobs SET semantic_hash=NULL WHERE id=?1",
+            [&hash],
+        )
+        .unwrap();
+
+    let retry = InvocationId::new("req_unproven_legacy_retry".into()).unwrap();
+    let (replayed, new, _) = jobs
+        .enqueue_semantic_with_origin(
+            key.clone(),
+            hash.clone(),
+            "new-semantic-version".into(),
+            Some(retry.clone()),
+        )
+        .unwrap();
+    assert!(!new);
+    assert_eq!(replayed.id, legacy.id);
+    assert!(replayed.origin_invocation.is_none());
+    assert_eq!(
+        jobs.diagnostic_by_invocation(retry.as_str())["reason_code"],
+        "UNKNOWN_NOT_RETAINED"
+    );
+    assert!(
+        jobs.diagnostic_by_invocation(retry.as_str())
+            .get("matched_request_id")
+            .is_none()
+    );
+    let link_count: i64 = jobs
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM research_invocation_links WHERE job_id=?1",
+            [&hash],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(link_count, 0);
+
+    drop(jobs);
+    let reopened = Jobs::open(file).unwrap();
+    assert_eq!(reopened.get(&hash).unwrap().id, hash);
+    assert!(reopened.get(&hash).unwrap().origin_invocation.is_none());
+    assert_eq!(
+        reopened.diagnostic_by_invocation(retry.as_str())["reason_code"],
+        "UNKNOWN_NOT_RETAINED"
+    );
+    assert!(
+        reopened
+            .diagnostic_by_invocation(retry.as_str())
+            .get("matched_request_id")
+            .is_none()
+    );
+}
+
+#[test]
 fn existing_catalog_requires_matching_scope_before_recovery() {
     let file = path("existing-adoption");
     let alice = okx_research_protocol::research_ipc::ResearchScope::new("alice".into()).unwrap();
