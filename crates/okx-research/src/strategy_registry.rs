@@ -1158,7 +1158,14 @@ mod tests {
             result
                 .trades
                 .iter()
-                .map(|t| (t.time, t.side, t.quantity, t.price, t.fee, t.reason.as_str()))
+                .map(|t| (
+                    t.time,
+                    t.side,
+                    t.quantity,
+                    t.price,
+                    t.fee,
+                    t.reason.as_str()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 (120_000, -1, 1.0, 80.0, 0.8, "next_bar_signal"),
@@ -1185,16 +1192,9 @@ mod tests {
             assert_eq!(actual.0, time);
             assert!((actual.1 - expected).abs() < 1e-9);
         }
-        let audit = crate::economic_audit::audit_replay(
-            &bars,
-            &spec,
-            &result,
-            "USDT",
-            1,
-            5,
-            &|| false,
-        )
-        .unwrap();
+        let audit =
+            crate::economic_audit::audit_replay(&bars, &spec, &result, "USDT", 1, 5, &|| false)
+                .unwrap();
         assert_eq!(audit.net_exact, result.summary.pnl_exact);
         assert_eq!(audit.fees_exact, result.summary.fees_exact);
 
