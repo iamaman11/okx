@@ -1048,7 +1048,10 @@ mod tests {
             "RESEARCH_STATE_CORRUPT"
         );
         assert!(child.try_wait().unwrap().is_some());
-        assert!(!marker.exists(), "uncommitted generation released Research gate");
+        assert!(
+            !marker.exists(),
+            "uncommitted generation released Research gate"
+        );
         assert_eq!(owner.desired, previous);
         assert!(owner.child.is_none());
         assert!(owner.job.is_none());
@@ -1081,7 +1084,10 @@ mod tests {
             .unwrap();
         assert_eq!(owner.store.read().unwrap().process_generation, 1);
         assert!(child.wait().unwrap().success());
-        assert_eq!(fs::read(&marker).unwrap(), b"research-gate-released:Some(1)");
+        assert_eq!(
+            fs::read(&marker).unwrap(),
+            b"research-gate-released:Some(1)"
+        );
         drop(job);
 
         // A delivery failure *after* the durable commit must not roll the

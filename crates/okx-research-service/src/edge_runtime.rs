@@ -707,7 +707,10 @@ mod tests {
         writer.write_all(&SUPERVISOR_GATE[8..]).await.unwrap();
         assert!(pending.as_mut().now_or_never().is_none());
         drop(writer);
-        assert!(pending.await.is_ok(), "closed exact gate must release Research");
+        assert!(
+            pending.await.is_ok(),
+            "closed exact gate must release Research"
+        );
 
         let (mut writer, mut reader) = tokio::io::duplex(256);
         writer.write_all(SUPERVISOR_GATE).await.unwrap();
