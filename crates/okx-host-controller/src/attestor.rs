@@ -27,7 +27,9 @@ use tokio_tungstenite::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{HostControlResult, auth::load_native_attestor_token, lifecycle_executor::HostExecutor};
+use crate::{
+    HostControlResult, auth::load_native_attestor_token, lifecycle_executor::HostExecutor,
+};
 
 const FRAME_SCHEMA: &str = "okx.control-attestor.frame/v1";
 const ATTESTOR_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/attestor";
@@ -374,7 +376,9 @@ pub async fn run(token: Zeroizing<String>, requests: mpsc::Sender<ObservationReq
         token = match load_native_attestor_token() {
             Ok(current) => current,
             Err(_) => {
-                eprintln!("CONTROL attestor credential unavailable; read-only evidence remains partial");
+                eprintln!(
+                    "CONTROL attestor credential unavailable; read-only evidence remains partial"
+                );
                 None
             }
         };
