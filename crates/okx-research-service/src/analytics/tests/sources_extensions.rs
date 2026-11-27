@@ -37,7 +37,7 @@ async fn graph_preflight_rejects_unsupported_operator_without_job_or_venue_get()
     assert!(request.valid());
     assert_eq!(
         service.research(request).await.unwrap_err(),
-        "composition.stream:OPERATOR_NOT_INCREMENTAL"
+        "GRAPH_OPERATOR_NOT_INCREMENTAL:vol:rolling_stddev"
     );
     assert!(service.jobs.snapshot().is_empty());
     assert!(transport.routes.lock().unwrap().is_empty());
