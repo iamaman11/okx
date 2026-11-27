@@ -62,6 +62,16 @@ struct LibtestGroup {
     threads: u64,
     names: BTreeSet<String>,
 }
+struct LibtestSpec {
+    package: &'static str,
+    group: LibtestGroup,
+}
+enum LibtestSlot {
+    // The ordinary Trade Execution owner and ordinary Engine witnesses have
+    // separate libtest processes. Both MUST finish before any real-clock test.
+    NonClockOverlap(LibtestSpec, LibtestSpec),
+    Single(LibtestSpec),
+}
 fn libtest_groups(package: &str, names: &BTreeSet<String>) -> Result<Vec<LibtestGroup>> {
     if package != "okx-trading-engine" {
         return Ok(vec![LibtestGroup {
@@ -96,6 +106,43 @@ fn libtest_groups(package: &str, names: &BTreeSet<String>) -> Result<Vec<Libtest
 }
 type Witnesses = BTreeSet<(String, String)>;
 type Result<T> = std::result::Result<T, &'static str>;
+fn libtest_schedule(wanted: &Witnesses) -> Result<Vec<LibtestSlot>> {
+    let mut groups = Vec::new();
+    for package in PACKAGES {
+        let names: BTreeSet<String> = wanted
+            .iter()
+            .filter(|(p, _)| p == package)
+            .map(|(_, n)| n.clone())
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        for group in libtest_groups(package, &names)? {
+            if group.names.is_empty() {
+                return Err("EMPTY_LIBTEST_GROUP");
+            }
+            groups.push(LibtestSpec { package, group });
+        }
+    }
+    let mut groups = groups.into_iter().peekable();
+    let mut schedule = Vec::new();
+    while let Some(spec) = groups.next() {
+        // Exactly this pair may overlap. The clock-sensitive Engine group
+        // stays in the NEXT slot, with a hard join barrier before it starts.
+        if spec.package == "okx-trade-execution"
+            && spec.group.label == "all"
+            && groups.peek().is_some_and(|next| {
+                next.package == "okx-trading-engine" && next.group.label == "parallel"
+            })
+        {
+            let engine = groups.next().ok_or("NON_CLOCK_OVERLAP_GROUP_MISSING")?;
+            schedule.push(LibtestSlot::NonClockOverlap(spec, engine));
+        } else {
+            schedule.push(LibtestSlot::Single(spec));
+        }
+    }
+    Ok(schedule)
+}
 fn timing_distribution(mut times: Vec<u64>) -> Value {
     times.sort_unstable();
     json!({"sample_count":times.len(),
@@ -146,6 +193,132 @@ fn failure(
         "exit_code":output.and_then(|o| o.exit_code),"child_failure":output.and_then(|o| o.failure),
         "child_failures":output.map(|o|&o.failures),
         "stdout_tail":output.map(|o|tail(&o.stdout)),"stderr_tail":output.map(|o|tail(&o.stderr))});
+}
+async fn run_libtest(
+    repo: &Path,
+    binary: &Path,
+    spec: &LibtestSpec,
+    run_id: &str,
+    measurements: &budgets::Measurements,
+) -> (Result<Output>, Value) {
+    let mut cmd = Command::new(binary);
+    let thread_count = spec.group.threads.to_string();
+    cmd.current_dir(repo)
+        .args([
+            "--exact",
+            "--format",
+            "pretty",
+            "--color",
+            "never",
+            "--test-threads",
+            &thread_count,
+        ])
+        .args(&spec.group.names);
+    cmd.env("OKX_NATIVE_ACCEPTANCE_RUN_ID", run_id);
+    cmd.env("OKX_NATIVE_ACCEPTANCE_WORKLOAD_DIR", measurements.path());
+    let stage_started = Instant::now();
+    let out = command(cmd, Duration::from_secs(180)).await;
+    let receipt = json!({
+        "stage":"libtest", "package":spec.package, "group":spec.group.label,
+        "test_threads":spec.group.threads,"witness_count":spec.group.names.len(),
+        "wall_ms":stage_started.elapsed().as_millis(),
+        "success":out.as_ref().is_ok_and(|o|o.success),
+        "direct_process_resources":out.as_ref().ok().map(|o|&o.resources)
+    });
+    (out, receipt)
+}
+async fn accept_libtest(
+    repo: &Path,
+    baseline: &(String, String, bool),
+    spec: &LibtestSpec,
+    result: Result<Output>,
+    report: &mut Value,
+    measurements: &budgets::Measurements,
+    observed: &mut Witnesses,
+) -> Result<()> {
+    match &result {
+        Ok(out) if !out.success => failure(
+            report,
+            "libtest",
+            Some(spec.package),
+            out.failure.unwrap_or("LIBTEST_PROCESS_FAILED"),
+            Some(out),
+        ),
+        Err(code) => failure(report, "libtest", Some(spec.package), code, None),
+        _ => {}
+    }
+    if let Ok(output) = &result
+        && !output.success
+    {
+        reporting::record_failures(report, spec.package, &output.stdout, &spec.group.names);
+    }
+    if snapshot(repo).await? != *baseline {
+        return Err("GIT_TREE_CHANGED");
+    }
+    let out = result?;
+    if !out.success {
+        return Err(out.failure.unwrap_or("LIBTEST_PROCESS_FAILED"));
+    }
+    let verified = verify_output(&out.stdout, &spec.group.names).inspect_err(|code| {
+        failure(
+            report,
+            "libtest_output_verification",
+            Some(spec.package),
+            code,
+            Some(&out),
+        );
+    })?;
+    if spec.group.label == "clock_sensitive" {
+        // Only after every real-clock witness actually passed.
+        let phases = phase_timing::collect(measurements.path(), report["run_id"].as_str().unwrap())
+            .inspect_err(|code| {
+                failure(
+                    report,
+                    "clock_sensitive_phase_timing",
+                    Some(spec.package),
+                    code,
+                    Some(&out),
+                );
+            })?;
+        report["clock_sensitive_phase_timings"] = json!(phases);
+    }
+    for name in verified {
+        observed.insert((spec.package.to_owned(), name));
+    }
+    reporting::record_verified(report, observed);
+    Ok(())
+}
+async fn accept_repository_guards(
+    repo: &Path,
+    baseline: &(String, String, bool),
+    task: &mut Option<tokio::task::JoinHandle<(Result<()>, Value)>>,
+    report: &mut Value,
+    observed: &mut Witnesses,
+) -> Result<()> {
+    let Some(task) = task.take() else {
+        return Ok(());
+    };
+    let (result, receipt) = task.await.map_err(|_| "REPOSITORY_GUARD_TASK_FAILED")?;
+    if snapshot(repo).await? != *baseline {
+        return Err("GIT_TREE_CHANGED");
+    }
+    let guard_stages = receipt["stages"]
+        .as_array()
+        .ok_or("RESOURCE_STAGES_MISSING")?;
+    report["stages"]
+        .as_array_mut()
+        .unwrap()
+        .extend(guard_stages.iter().cloned());
+    report["repository_guards"] = receipt["repository_guards"].clone();
+    if !receipt["failure"].is_null() {
+        report["failure"] = receipt["failure"].clone();
+    }
+    result?;
+    if snapshot(repo).await? != *baseline {
+        return Err("GIT_TREE_CHANGED");
+    }
+    observed.insert(("repository".into(), repository_guards::WITNESS.into()));
+    Ok(())
 }
 async fn execute(
     repo: &Path,
@@ -207,8 +380,9 @@ async fn execute(
     // Repository guards are read-only and already independently gated by CI.
     // Run them on the same clean source tree while financial witnesses execute,
     // retaining their individual exit status, outputs and resource receipts.
-    // Never overlap the two financial libtest groups with each other: the
-    // real-clock and SQLite acceptance witnesses still run in isolation.
+    // Never overlap the Engine clock-sensitive group with any other libtest
+    // process or repository guard task; those real-clock witnesses remain
+    // isolated even if a normally fast guard stalls unexpectedly.
     let mut guard_task =
         if wanted.contains(&("repository".into(), repository_guards::WITNESS.into())) {
             let repo = repo.to_owned();
@@ -221,128 +395,71 @@ async fn execute(
             None
         };
     let execution: Result<()> = async {
-        for package in PACKAGES {
-            let names: BTreeSet<String> = wanted
-                .iter()
-                .filter(|(p, _)| p == package)
-                .map(|(_, n)| n.clone())
-                .collect();
-            if names.is_empty() {
-                continue;
+        let schedule = libtest_schedule(wanted)?;
+        report["schedule_slots"] = json!([]);
+        for slot in schedule {
+            if snapshot(repo).await? != *baseline {
+                return Err("GIT_TREE_CHANGED");
             }
-            for group in libtest_groups(package, &names)? {
-                if group.names.is_empty() {
-                    return Err("EMPTY_LIBTEST_GROUP");
-                }
-                if snapshot(repo).await? != *baseline {
-                    return Err("GIT_TREE_CHANGED");
-                }
-                let mut cmd = Command::new(&binaries[package]);
-                let thread_count = group.threads.to_string();
-                cmd.current_dir(repo)
-                    .args([
-                        "--exact",
-                        "--format",
-                        "pretty",
-                        "--color",
-                        "never",
-                        "--test-threads",
-                        &thread_count,
-                    ])
-                    .args(&group.names);
-                cmd.env(
-                    "OKX_NATIVE_ACCEPTANCE_RUN_ID",
-                    report["run_id"].as_str().unwrap(),
-                );
-                cmd.env("OKX_NATIVE_ACCEPTANCE_WORKLOAD_DIR", measurements.path());
-                let stage_started = Instant::now();
-                let out = command(cmd, Duration::from_secs(180)).await;
-                report["stages"].as_array_mut().unwrap().push(json!({
-                    "stage":"libtest", "package":package, "group":group.label,
-                    "test_threads":group.threads,"witness_count":group.names.len(),
-                    "wall_ms":stage_started.elapsed().as_millis(),
-                    "success":out.as_ref().is_ok_and(|o|o.success),
-                    "direct_process_resources":out.as_ref().ok().map(|o|&o.resources)
-                }));
-                match &out {
-                    Ok(out) if !out.success => failure(
-                        report,
-                        "libtest",
-                        Some(package),
-                        out.failure.unwrap_or("LIBTEST_PROCESS_FAILED"),
-                        Some(out),
-                    ),
-                    Err(code) => failure(report, "libtest", Some(package), code, None),
-                    _ => {}
-                }
-                if let Ok(output) = &out
-                    && !output.success
-                {
-                    reporting::record_failures(report, package, &output.stdout, &group.names);
-                }
-                if snapshot(repo).await? != *baseline {
-                    return Err("GIT_TREE_CHANGED");
-                }
-                let out = out?;
-                if !out.success {
-                    return Err(out.failure.unwrap_or("LIBTEST_PROCESS_FAILED"));
-                }
-                let verified = verify_output(&out.stdout, &group.names).inspect_err(|code| {
-                    failure(
-                        report,
-                        "libtest_output_verification",
-                        Some(package),
-                        code,
-                        Some(&out),
+            let started = Instant::now();
+            match slot {
+                LibtestSlot::NonClockOverlap(execution, engine_parallel) => {
+                    // Both bounded children are joined BEFORE the real-clock
+                    // group. On either failure, the other child is still
+                    // reaped and the collector fails closed without starting
+                    // another financial test process.
+                    let run_id = report["run_id"].as_str().unwrap();
+                    let ((execution_out, execution_stage), (engine_out, engine_stage)) = tokio::join!(
+                        run_libtest(repo, &binaries[execution.package], &execution, run_id, &measurements),
+                        run_libtest(repo, &binaries[engine_parallel.package], &engine_parallel, run_id, &measurements)
                     );
-                })?;
-                if group.label == "clock_sensitive" {
-                    // Collect fixed-name diagnostic receipts from the isolated
-                    // clock-sensitive group only after the complete libtest proof;
-                    // they never replace functional or resource witnesses.
-                    let phases = phase_timing::collect(
-                        measurements.path(),
-                        report["run_id"].as_str().unwrap(),
-                    )
-                    .inspect_err(|code| {
-                        failure(
-                            report,
-                            "clock_sensitive_phase_timing",
-                            Some(package),
-                            code,
-                            Some(&out),
-                        );
-                    })?;
-                    report["clock_sensitive_phase_timings"] = json!(phases);
+                    report["stages"].as_array_mut().unwrap().push(execution_stage);
+                    report["stages"].as_array_mut().unwrap().push(engine_stage);
+                    report["schedule_slots"].as_array_mut().unwrap().push(json!({
+                        "slot":"non_clock_overlap", "wall_ms":started.elapsed().as_millis(),
+                        "groups":["okx-trade-execution/all", "okx-trading-engine/parallel"],
+                        "clock_sensitive_running":false
+                    }));
+                    if snapshot(repo).await? != *baseline {
+                        return Err("GIT_TREE_CHANGED");
+                    }
+                    // Check BOTH reaped results even when the first failed:
+                    // retain both bounded per-package failure diagnostics.
+                    let execution_result = accept_libtest(repo, baseline, &execution, execution_out, report, &measurements, &mut observed).await;
+                    let first_failure = report["failure"].clone();
+                    let engine_result = accept_libtest(repo, baseline, &engine_parallel, engine_out, report, &measurements, &mut observed).await;
+                    if execution_result.is_err() {
+                        // Keep the earliest causal error. Both joined child
+                        // witness-failure lists were still independently read.
+                        report["failure"] = first_failure;
+                    }
+                    execution_result?;
+                    engine_result?;
                 }
-                for name in verified {
-                    observed.insert((package.to_owned(), name));
+                LibtestSlot::Single(spec) => {
+                    if spec.group.label == "clock_sensitive" {
+                        accept_repository_guards(
+                            repo, baseline, &mut guard_task, report, &mut observed,
+                        )
+                        .await?;
+                    }
+                    let (out, stage) = run_libtest(
+                        repo, &binaries[spec.package], &spec,
+                        report["run_id"].as_str().unwrap(), &measurements,
+                    ).await;
+                    report["stages"].as_array_mut().unwrap().push(stage);
+                    report["schedule_slots"].as_array_mut().unwrap().push(json!({
+                        "slot":"single", "wall_ms":started.elapsed().as_millis(),
+                        "groups":[format!("{}/{}", spec.package, spec.group.label)],
+                        "clock_sensitive_running":spec.group.label == "clock_sensitive"
+                    }));
+                    accept_libtest(repo, baseline, &spec, out, report, &measurements, &mut observed).await?;
                 }
-                reporting::record_verified(report, &observed);
             }
         }
-        if let Some(task) = guard_task.take() {
-            let (result, receipt) = task.await.map_err(|_| "REPOSITORY_GUARD_TASK_FAILED")?;
-            if snapshot(repo).await? != *baseline {
-                return Err("GIT_TREE_CHANGED");
-            }
-            let guard_stages = receipt["stages"]
-                .as_array()
-                .ok_or("RESOURCE_STAGES_MISSING")?;
-            report["stages"]
-                .as_array_mut()
-                .unwrap()
-                .extend(guard_stages.iter().cloned());
-            report["repository_guards"] = receipt["repository_guards"].clone();
-            if !receipt["failure"].is_null() {
-                report["failure"] = receipt["failure"].clone();
-            }
-            result?;
-            if snapshot(repo).await? != *baseline {
-                return Err("GIT_TREE_CHANGED");
-            }
-            observed.insert(("repository".into(), repository_guards::WITNESS.into()));
-        }
+        // Partial diagnostic rosters without a clock-sensitive slot must
+        // still await and verify every requested repository guard.
+        accept_repository_guards(repo, baseline, &mut guard_task, report, &mut observed).await?;
         if wanted.contains(&(
             "repository".into(),
             repository_guards::TRANSPORT_WITNESS.into(),
@@ -437,7 +554,7 @@ async fn main() {
     let mut report = json!({"schema":"okx.native-finance-acceptance/v1", "run_id":run_id,"mode":mode,
         "head":null,"tree":null,"git_clean":false,"build_ms":null,"runtime_setup_to_teardown_ms":null,
         "observed_witnesses":[],"repository_guards":[],"stages":[],"clock_sensitive_phase_timings":[],"contracts":[],"overall":"FAIL","timeout_guards_seconds":{"build":1800,"per_libtest_group":180},"test_threads":FINANCIAL_WITNESS_TEST_THREADS,"clock_sensitive_test_threads":CLOCK_SENSITIVE_TEST_THREADS,
-        "test_schedule":format!("parallel_{FINANCIAL_WITNESS_TEST_THREADS}_then_clock_sensitive_{CLOCK_SENSITIVE_TEST_THREADS}")});
+        "test_schedule":format!("trade_execution_and_engine_parallel_overlap_then_clock_sensitive_{CLOCK_SENSITIVE_TEST_THREADS}")});
     let result: Result<Witnesses> = async {
         collector_sources_match(repo)?;
         report["collector_source_binding"] = json!("VERIFIED");
@@ -477,7 +594,8 @@ async fn main() {
             measurements.push(json!({"sample":sample,"run_id":report["run_id"],
                 "head":baseline.0,"tree":baseline.1,"build_ms":report["build_ms"],
                 "runtime_setup_to_teardown_ms":report["runtime_setup_to_teardown_ms"],
-                "stages":report["stages"],"clock_sensitive_phase_timings":report["clock_sensitive_phase_timings"],
+                "stages":report["stages"],"schedule_slots":report["schedule_slots"],
+                "clock_sensitive_phase_timings":report["clock_sensitive_phase_timings"],
                 "owner_workload":report["owner_workload"],
                 "resource_budgets":report["resource_budgets"],"executed_witnesses":observed.len()}));
             report["samples"] = json!(measurements);
@@ -524,6 +642,76 @@ async fn main() {
 #[cfg(test)]
 mod timing_tests {
     use super::*;
+    #[test]
+    fn only_non_clock_owner_groups_overlap_and_all_witnesses_remain_required() {
+        let wanted = selected().unwrap();
+        let schedule = libtest_schedule(&wanted).unwrap();
+        assert_eq!(schedule.len(), 4);
+        let mut actual = Witnesses::new();
+        let mut groups = Vec::new();
+        let mut isolated_clock_slot = None;
+        for (slot_index, slot) in schedule.iter().enumerate() {
+            match slot {
+                LibtestSlot::NonClockOverlap(execution, engine) => {
+                    assert_eq!(slot_index, 0);
+                    assert_eq!(
+                        (execution.package, execution.group.label),
+                        ("okx-trade-execution", "all")
+                    );
+                    assert_eq!(
+                        (engine.package, engine.group.label),
+                        ("okx-trading-engine", "parallel")
+                    );
+                    assert_eq!(execution.group.threads, 4);
+                    assert_eq!(engine.group.threads, 4);
+                    groups.extend([execution, engine]);
+                }
+                LibtestSlot::Single(spec) => {
+                    if spec.group.label == "clock_sensitive" {
+                        assert_eq!(spec.package, "okx-trading-engine");
+                        assert_eq!(spec.group.threads, 2);
+                        isolated_clock_slot = Some(slot_index);
+                    }
+                    groups.push(spec);
+                }
+            }
+        }
+        assert_eq!(isolated_clock_slot, Some(1));
+        assert_eq!(groups.len(), PACKAGES.len() + 1);
+        for spec in groups {
+            assert!(!spec.group.names.is_empty());
+            for name in &spec.group.names {
+                assert!(actual.insert((spec.package.to_owned(), name.clone())));
+            }
+        }
+        let required: Witnesses = wanted
+            .iter()
+            .filter(|(package, _)| package != "repository")
+            .cloned()
+            .collect();
+        assert_eq!(actual, required);
+        // Partial/diagnostic modes must not fabricate an overlap when one
+        // owner is absent, and missing clock-sensitive tests still block.
+        let without_execution = wanted
+            .iter()
+            .filter(|(package, _)| package != "okx-trade-execution")
+            .cloned()
+            .collect();
+        assert!(
+            libtest_schedule(&without_execution)
+                .unwrap()
+                .iter()
+                .all(|slot| matches!(slot, LibtestSlot::Single(_)))
+        );
+        for mandatory in CLOCK_SENSITIVE_AGENT_WITNESSES {
+            let mut missing = wanted.clone();
+            missing.remove(&("okx-trading-engine".into(), mandatory.into()));
+            assert!(matches!(
+                libtest_schedule(&missing),
+                Err("CLOCK_SENSITIVE_WITNESS_MISSING")
+            ));
+        }
+    }
     #[test]
     fn timing_requires_samples_and_uses_nearest_rank() {
         assert!(timing_distribution(vec![])["max_ms"].is_null());

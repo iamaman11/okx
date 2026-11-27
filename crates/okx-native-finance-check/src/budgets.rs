@@ -161,6 +161,45 @@ pub(super) fn verify(report: &mut Value, observed: &Witnesses) -> Result<bool> {
             .checked_add(number(r, "write_bytes")?)
             .ok_or("RESOURCE_OVERFLOW")?;
     }
+    // The two non-clock libtest children now overlap with one (sequential)
+    // repository guard. A maximum of individual process peaks is no longer
+    // an upper bound on simultaneous direct working-set consumption. The sum
+    // of both child peaks plus the LARGEST guard peak is conservative: the
+    // peaks may occur at different times, but a real simultaneous total can
+    // never exceed this direct-process bound. Descendants remain excluded.
+    let concurrent_peak_upper_bound = if available {
+        let group_peak = |package: &str, group: &str| -> Result<u64> {
+            let stage = stages
+                .iter()
+                .find(|s| s["stage"] == "libtest" && s["package"] == package && s["group"] == group)
+                .ok_or("RESOURCE_OVERLAP_GROUP_MISSING")?;
+            number(
+                &stage["direct_process_resources"],
+                "peak_working_set_bytes_observed",
+            )
+        };
+        let guard_peak = stages
+            .iter()
+            .filter(|s| s["stage"] == "repository_guard")
+            .map(|stage| {
+                number(
+                    &stage["direct_process_resources"],
+                    "peak_working_set_bytes_observed",
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .ok_or("RESOURCE_OVERLAP_GUARD_MISSING")?;
+        Some(
+            group_peak("okx-trade-execution", "all")?
+                .checked_add(group_peak("okx-trading-engine", "parallel")?)
+                .and_then(|sum| sum.checked_add(guard_peak))
+                .ok_or("RESOURCE_OVERFLOW")?,
+        )
+    } else {
+        None
+    };
     let wall = number(report, "runtime_setup_to_teardown_ms")?;
     // The prior same-workload local baseline is 81.798/82.765/89.091s on
     // Windows x86_64, Intel family6 model60,8 logical CPUs, debug threads4.
@@ -184,9 +223,11 @@ pub(super) fn verify(report: &mut Value, observed: &Witnesses) -> Result<bool> {
         "executed_core_witnesses":observed.len(),"workload_sha256":workload_hash,
         "observed":{"wall_ms":wall,"direct_cpu_100ns":available.then_some(cpu),
             "max_direct_peak_bytes":available.then_some(peak),
+            "overlap_direct_peak_upper_bound_bytes":concurrent_peak_upper_bound,
             "direct_read_bytes":available.then_some(reads),"direct_write_bytes":available.then_some(writes)},
         "limits":{"wall_ms":180000,"direct_cpu_100ns":900000000,
-            "max_direct_peak_bytes":512*MIB,"direct_read_bytes":512*MIB,"direct_write_bytes":512*MIB},
+            "max_direct_peak_bytes":512*MIB,"overlap_direct_peak_upper_bound_bytes":512*MIB,
+            "direct_read_bytes":512*MIB,"direct_write_bytes":512*MIB},
         "scope":"direct processes only; excludes descendants; IO includes pipes, not disk-only",
         "baseline":{"head":"d35565e06f478bb83ef2699bee90cabeafd4c1d1",
             "wall_samples_ms":[89091,81798,82765],"same_hardware_class":comparable,
@@ -204,6 +245,12 @@ pub(super) fn verify(report: &mut Value, observed: &Witnesses) -> Result<bool> {
         if actual > limit {
             violations.push(json!({"field":field,"actual":actual,"limit":limit}));
         }
+    }
+    if let Some(actual) = concurrent_peak_upper_bound
+        && actual > 512 * MIB
+    {
+        violations.push(json!({"field":"overlap_direct_peak_upper_bound_bytes",
+            "actual":actual,"limit":512*MIB}));
     }
     if comparable && wall > 111_364 {
         violations.push(json!({"field":"comparable_wall_ms","actual":wall,"limit":111364}));
@@ -302,6 +349,22 @@ mod tests {
         missing["stages"][0]["direct_process_resources"] = Value::Null;
         assert!(!verify(&mut missing, &Witnesses::new()).unwrap());
         assert!(missing["resource_budgets"]["observed"]["direct_cpu_100ns"].is_null());
+        let mut simultaneous = measured_report();
+        simultaneous["stages"][0]["direct_process_resources"]["peak_working_set_bytes_observed"] =
+            json!(300 * MIB);
+        simultaneous["stages"][1]["direct_process_resources"]["peak_working_set_bytes_observed"] =
+            json!(300 * MIB);
+        // Neither child breaches 512 MiB alone. Their possible 600 MiB
+        // overlap must fail, including in a full successful witness run.
+        assert!(verify(&mut simultaneous, &Witnesses::new()).is_err());
+        assert_eq!(
+            simultaneous["budget_violations"][0]["field"],
+            "overlap_direct_peak_upper_bound_bytes"
+        );
+        assert_eq!(
+            simultaneous["resource_budgets"]["observed"]["max_direct_peak_bytes"],
+            300 * MIB
+        );
         for field in [
             "cpu_100ns",
             "read_bytes",
