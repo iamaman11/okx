@@ -397,12 +397,14 @@ mod tests {
         let health = log.health();
         let shared = Arc::new(Mutex::new(log));
         let poisoned = shared.clone();
-        assert!(std::thread::spawn(move || {
-            let _guard = poisoned.lock().unwrap();
-            panic!("simulate poisoned log writer");
-        })
-        .join()
-        .is_err());
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned.lock().unwrap();
+                panic!("simulate poisoned log writer");
+            })
+            .join()
+            .is_err()
+        );
         drain(io::Cursor::new(b"output after poisoned mutex\n"), shared);
         assert_eq!(
             fs::read_to_string(path).unwrap(),

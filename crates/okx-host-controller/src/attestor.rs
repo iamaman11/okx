@@ -364,7 +364,10 @@ mod tests {
         assert_eq!(wait, INITIAL_RETRY_SECONDS);
         assert_eq!(next, 4);
         assert_eq!(
-            retry_after_session(current, STABLE_SESSION_BACKOFF_RESET - Duration::from_nanos(1)),
+            retry_after_session(
+                current,
+                STABLE_SESSION_BACKOFF_RESET - Duration::from_nanos(1)
+            ),
             (MAX_RETRY_SECONDS, MAX_RETRY_SECONDS)
         );
         assert_eq!(retry_after_session(next, Duration::ZERO), (4, 8));
@@ -374,14 +377,16 @@ mod tests {
     async fn dropped_control_owner_stops_attestor_without_reconnecting() {
         let (requests, receiver) = mpsc::channel(1);
         drop(receiver);
-        assert!(timeout(
-            Duration::from_millis(100),
-            // Invalid HTTP header prevents any accidental outbound connection
-            // if owner-closure handling ever regresses.
-            run(Zeroizing::new("invalid\nheader".to_owned()), requests)
-        )
-        .await
-        .is_ok());
+        assert!(
+            timeout(
+                Duration::from_millis(100),
+                // Invalid HTTP header prevents any accidental outbound connection
+                // if owner-closure handling ever regresses.
+                run(Zeroizing::new("invalid\nheader".to_owned()), requests)
+            )
+            .await
+            .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -409,9 +414,8 @@ mod tests {
             "session_id": "control_0123456789abcdef",
             "connection_generation": 7,
         });
-        let mut reader = futures_util::stream::iter([Ok::<_, ()>(Message::Text(
-            valid.to_string().into(),
-        ))]);
+        let mut reader =
+            futures_util::stream::iter([Ok::<_, ()>(Message::Text(valid.to_string().into()))]);
         assert_eq!(
             read_hello_ack(&mut reader, Duration::from_millis(20)).await,
             Ok(("control_0123456789abcdef".into(), 7))
@@ -453,19 +457,15 @@ mod tests {
             (injected_owner, "ATTESTOR_INVALID_FRAME"),
             (unknown_type, "ATTESTOR_INVALID_FRAME"),
         ] {
-            let mut reader = futures_util::stream::iter([Ok::<_, ()>(Message::Text(
-                frame.to_string().into(),
-            ))]);
+            let mut reader =
+                futures_util::stream::iter([Ok::<_, ()>(Message::Text(frame.to_string().into()))]);
             assert_eq!(
                 read_hello_ack(&mut reader, Duration::from_millis(20)).await,
                 Err(expected)
             );
         }
         for (frame, expected) in [
-            (
-                Message::Binary(vec![0].into()),
-                "ATTESTOR_NON_TEXT_FRAME",
-            ),
+            (Message::Binary(vec![0].into()), "ATTESTOR_NON_TEXT_FRAME"),
             (
                 Message::Text("x".repeat(MAX_FRAME_BYTES + 1).into()),
                 "ATTESTOR_OVERSIZED_FRAME",
