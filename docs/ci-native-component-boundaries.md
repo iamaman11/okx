@@ -18,14 +18,15 @@ jobs were removed from the main workflow.
 
 | Changed files (complete GitHub diff) | Direct owner and consumers | Ready CI | Native release artifact |
 | --- | --- | --- | --- |
-| Only `crates/okx-host-launcher/src/**/*.rs` (+ docs) | Launcher, plus Host Controller consumer | `host-windows`; no Trading Engine/SQL compilation | None: host identities are not an installable four-component bundle |
-| Only `crates/okx-host-controller/src/**/*.rs` and optional Launcher Rust source (+ docs) | Host Controller and Launcher | `host-windows`; no Trading Engine/SQL compilation | None |
+| Only audited Launcher diagnostics source (`logging.rs`, `stdio_capture.rs`) or Launcher tests (+ docs) | Launcher and CONTROL consumer | `host-windows`; no Trading Engine/SQL compilation | Strict, **non-installable** four-file `okx-host-component-<PR_HEAD_SHA>` proof; not a Native ReleaseSet |
+| Only audited CONTROL read-only attestor (`attestor.rs`), Host protocol/controller tests, optional audited Launcher source (+ docs/Edge) | Host Controller, Launcher and relevant Edge consumers | `host-windows` (+ `cloudflare-mcp` for Edge changes); no Trading Engine/SQL compilation | Strict, **non-installable** four-file `okx-host-component-<PR_HEAD_SHA>` proof; no accepted-main Host publisher or installer |
+| CONTROL/Launcher entrypoints, Engine install/desired state/lifecycle, shared Host protocol implementation, unknown Host implementation | Engine lifecycle and all possibly affected consumers | Full Native matrix (fail closed) | Full bundle only after accepted finance and lifecycle checks |
 | Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory financial `engine-windows`, independent `trading-engine-regressions-windows`, parallel `trading-engine-build-windows` and portable Rust checks | Full verified Windows bundle on qualifying PR |
 | Shared `okx-api`, `okx-market-runtime`, `okx-ipc-contracts`, root Cargo files, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
 | Narrow Research/Host `Cargo.toml` with optional `Cargo.lock` | Only that owner and its actual consumers | Scoped **only after exact before/after Windows Cargo closure proof**, including versions/features/dev dependencies; otherwise full Native | Research-only standalone three-file component when its exact owner scope qualifies; host-only nondeployable evidence otherwise |
 | Research-only owner changes; unchanged Engine/Host release closure | Research/IPC consumers | `research-windows` and independently verified Cargo closure, exact Ready PR attempt and `ci` | Raw `okx-research-component-<PR_HEAD_SHA>` CI artifact: only `Cargo.lock`, `manifest.json` (`okx.windows.research-component/v3`), `okx-research-service.exe`; append-only `research-component-<MERGE_SHA>` after verified merge, no Engine files |
 | Documentation only / Cloudflare-only | Documentation / MCP | Existing scoped gates | No fresh Native build |
-| Mixed Research + Host with proven unchanged Engine dependency closure | Research and Host consumers | `research-windows` and `host-windows`, no Engine compilation | Separate Research/Host evidence; not a replacement Native base |
+| Mixed Research + explicitly isolated Host source with proven unchanged Engine dependency/lifecycle | Research and Host consumers | `research-windows` and `host-windows`, no Engine compilation | Separate Research/Host evidence; not a replacement Native base |
 | Unknown/shared impact, unsafe mixed changes, renames, incomplete diff | All potentially affected consumers | Full Native matrix (fail closed) | Only if accepted |
 
 Research coverage is monotonic across owner combinations: adding Host source
@@ -34,11 +35,16 @@ the live Research MCP/DO/WSS loopback witness in `research-windows`. It does
 **not** authorize creation of a Research-only standalone release artifact from
 mixed-owner changes. Negative routing mutations cover both requirements.
 
-The host-only source exception remains intentionally **narrow**: just Rust
-implementation files inside the two host crates. A Host or Research manifest
-change takes the corresponding scoped route **only if a separate resolver proof
-establishes** that all protected Windows dependency closures are identical.
-Unverified dependency changes and installation contracts stay full. The
+The host-only source exception is an **explicit reviewed allowlist**, never a
+whole-crate `src/**/*.rs` prefix: CONTROL `attestor.rs`, Launcher `logging.rs`
+and `stdio_capture.rs`, plus Rust Host test-only files. These sources are not
+Engine installation, process handoff, desired-state or trading owners. Host
+protocol implementation and unreviewed/new Host runtime files select Full,
+even if the Cargo graph would show no direct Engine dependency. A Host or
+Research manifest change takes the corresponding scoped route **only if a
+separate resolver proof establishes** that all protected Windows dependency
+closures are identical. Unverified dependency changes and installation
+contracts stay full. The
 `select-checks` verifies the complete comparison of the immutable event
 base and head. A failed, capped or ambiguous comparison selects full impact.
 Draft executes the checks emitted by this same job without fetching Git
@@ -85,8 +91,46 @@ reopen, but are not independent proof of financial correctness.
 The host job runs the existing installation-root safety fixture, architecture
 guard, formatting, clippy, Rust tests and Windows release builds for both
 CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
-hashes are retained as **non-deployable** evidence. It never publishes a new
-Native base; `publish-accepted-windows-release` inside the **same** protected
+hashes are retained as **non-deployable** evidence. For a Host-only PR it also
+uploads the actual CONTROL and Launcher executables, `Cargo.lock`, and strict
+`okx.windows.host-component/v1` manifest with the exact four-file allowlist.
+The manifest binds the PR HEAD, tree, exact pinned compiler identity
+`rustc 1.100.0 (0ef1bc386 2026-11-09)`, lockfile digest,
+and both executable SHA-256/size values, while explicitly declaring
+`release_is_complete=false` and `installation_allowed=false`.
+`scripts/verify_host_component_release.py` checks these bytes before upload
+and can re-check the immutable artifact ZIP against an externally obtained
+SHA-256. Negative tests cover missing/extra Engine or Research bytes, manifest
+drift, malformed identities, byte mismatches, ZIP overlays/NUL aliases,
+unconsumed bytes hidden after a member's DEFLATE end marker, and unsafe ZIP
+entries. Git checkout cleanliness is checked both before and after the
+release build, preventing PR-controlled build scripts from altering source
+bytes after the recorded HEAD/tree. The Host executable build and immutable
+Actions upload occur **before** any PR-owned Rust tests, on an exact-head checkout,
+so test code cannot rewrite retained bytes after publication. A later failing
+test leaves an unaccepted artifact, not an accepted component. The
+manifest's `ci_status_policy` is a **policy identifier, not a verified Ready
+receipt**: neither the producer nor the byte verifier authenticates Actions
+status, the accepted-main tree or a protected publication origin. Existing
+CONTROL and Launcher readers do not accept the new schema. The artifact
+expires with the configured Actions retention and is not an accepted release.
+
+**Next mandatory gate, before any Host-only deployment:** add an independent
+publisher in the protected `main` CI that resolves the *exact* first-attempt
+Ready PR run for the accepted tree, checks `select-checks`,
+`architecture-contracts`, `dependency-audit`, `host-windows`, `ci` and all
+applicable consumer checks against the versioned Host roster, and verifies
+the original Actions artifact ID, SHA-256 digest and all four files. Require
+immutable accepted-main origin plus a complete, compatible installed Native
+base, and preserve its Engine/Research bytes and rollback ancestry. Version
+the runtime CONTROL/Launcher consumer and fail closed on missing, expired,
+replaced, incompatible or replayed Host bytes. Activate those consumers via a
+separate Full verified four-EXE release **before** enabling any Host-only
+publication or installation; exercise negative and Windows rollback tests.
+Do not accept this producer's current CI evidence as completing those steps.
+
+The Host job itself never publishes a new Native base;
+`publish-accepted-windows-release` inside the **same** protected
 `.github/workflows/ci.yml` runs after successful main checks and continues
 to require fresh financial acceptance, all four regression suites (including
 Host Clippy) and a complete four-component Windows artifact. It publishes a
