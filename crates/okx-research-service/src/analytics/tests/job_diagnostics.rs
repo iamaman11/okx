@@ -599,3 +599,126 @@ fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
     assert_eq!(projection.read(&original_job)["job"]["id"], original_job);
     assert_eq!(projection.read(&second_job)["job"]["id"], second_job);
 }
+
+#[test]
+fn durable_origin_and_verified_retry_collision_stays_ambiguous_after_restart() {
+    use okx_research_protocol::research_ipc::{IdempotencyKey, InvocationId};
+
+    // A real retry link can collide with a different job's original request
+    // identity. Neither a catalog commit nor startup restoration may silently
+    // pick the completed job (or disclose its result) for that request ID.
+    let (jobs, file) = jobs("durable-origin-retry-collision");
+    let shared = InvocationId::new("req_shared_across_jobs".into()).unwrap();
+    let second_origin = InvocationId::new("req_second_job_original".into()).unwrap();
+    let first_id = "a".repeat(64);
+    let second_id = "b".repeat(64);
+    let result_ref = format!("sha256:{}", "c".repeat(64));
+    let first_key = IdempotencyKey::new("original-collision-key".into()).unwrap();
+    let second_key = IdempotencyKey::new("retry-collision-key".into()).unwrap();
+
+    let (first, fresh, _) = jobs
+        .enqueue_semantic_with_origin(
+            first_key,
+            first_id.clone(),
+            "semantic-first".into(),
+            Some(shared.clone()),
+        )
+        .unwrap();
+    assert!(fresh);
+    jobs.update(
+        &first.id,
+        JobState::Completed,
+        Some(result_ref.clone()),
+        None,
+    )
+    .unwrap();
+    let (second, fresh, _) = jobs
+        .enqueue_semantic_with_origin(
+            second_key.clone(),
+            second_id.clone(),
+            "semantic-second".into(),
+            Some(second_origin.clone()),
+        )
+        .unwrap();
+    assert!(fresh);
+    jobs.update(
+        &second.id,
+        JobState::Failed,
+        None,
+        Some("private=DO_NOT_DISCLOSE".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        jobs.diagnostic_by_invocation(shared.as_str())["job"]["id"],
+        first_id
+    );
+
+    // The replay is proven by the same key and semantic hash, not by a
+    // request-ID-only association or an artificially seeded Projection.
+    let (replayed, fresh, _) = jobs
+        .enqueue_semantic_with_origin(
+            second_key,
+            second_id.clone(),
+            "semantic-second".into(),
+            Some(shared.clone()),
+        )
+        .unwrap();
+    assert!(!fresh);
+    assert_eq!(replayed.id, second.id);
+    assert_eq!(replayed.origin_invocation, Some(second_origin.clone()));
+    let link_count: i64 = jobs
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM research_invocation_links WHERE invocation=?1 AND job_id=?2",
+            [shared.as_str(), second_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(link_count, 1);
+
+    let assert_fail_closed = |jobs: &Jobs| {
+        let collision = jobs.diagnostic_by_invocation(shared.as_str());
+        assert_eq!(collision["state"], "NOT_EVALUATED");
+        assert_eq!(collision["reason_code"], "AMBIGUOUS_REQUEST_ORIGIN");
+        assert_eq!(collision["next_action"], "supply_exact_job_id");
+        assert_eq!(collision["history"], "UNKNOWN");
+        assert!(collision["job"].is_null());
+        assert!(collision.get("matched_request_id").is_none());
+        assert!(!collision.to_string().contains(result_ref.as_str()));
+        assert!(!collision.to_string().contains("DO_NOT_DISCLOSE"));
+
+        // Recovery is by exact job ID, with no fabricated winner or loss of
+        // the two independent durable outcomes.
+        assert_eq!(
+            jobs.diagnostic_readback(&first_id)["job"]["result_ref"],
+            result_ref
+        );
+        assert_eq!(
+            jobs.diagnostic_readback(&second_id)["job"]["state"],
+            "failed"
+        );
+        assert!(
+            jobs.diagnostic_readback(&second_id)["job"]
+                .get("retry_invocations")
+                .is_none()
+        );
+        assert_eq!(
+            jobs.diagnostic_by_invocation(second_origin.as_str())["job"]["id"],
+            second_id
+        );
+    };
+    assert_fail_closed(&jobs);
+    drop(jobs);
+    let restored = Jobs::open(file).unwrap();
+    assert_fail_closed(&restored);
+    assert_eq!(
+        restored.diagnostic_readback(&first_id)["job"]["origin"],
+        "durable_startup_subset"
+    );
+    assert_eq!(
+        restored.diagnostic_readback(&second_id)["job"]["origin"],
+        "durable_startup_subset"
+    );
+}
