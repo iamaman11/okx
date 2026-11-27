@@ -242,13 +242,27 @@ pub(super) async fn opened_market_with_public_client(
                 let through_ms = jiff::Timestamp::now()
                     .as_millisecond()
                     .saturating_sub(1_900);
-                let state = fixture
+                let state = match fixture
                     ._account
                     .execution
                     .store
                     .source_capture_state(Instant::now() + Duration::from_secs(2))
                     .await
-                    .expect("original account source state remains readable");
+                {
+                    Ok(state) => state,
+                    // This is a read-only SQL-owner queue *start* deadline,
+                    // not an observation of a missing or healthy frontier.
+                    // Under contended Windows libtest scheduling, a poll may
+                    // expire before it starts. Retry only that exact typed
+                    // queue refusal inside the EXISTING eight-second fixture
+                    // envelope; do not change the production two-second
+                    // per-read budget or manufacture a successful capture.
+                    Err(error) if retryable_source_capture_queue_wait(&error) => {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        continue;
+                    }
+                    Err(error) => panic!("original account source state unreadable: {error:?}"),
+                };
                 let complete = [
                     state.cursors.spot.as_ref(),
                     state.cursors.margin.as_ref(),
@@ -362,6 +376,36 @@ pub(super) async fn opened_market_with_public_client(
         .await
         .unwrap();
     (stop, task, socket, public)
+}
+
+fn retryable_source_capture_queue_wait(error: &okx_trade_execution::StoreError) -> bool {
+    matches!(
+        error,
+        okx_trade_execution::StoreError::Invalid("UNIFIED_FINANCE_QUEUE_DEADLINE")
+    )
+}
+
+#[test]
+fn source_read_fixture_retry_is_exact_and_never_accepts_other_finance_errors() {
+    use okx_trade_execution::StoreError;
+
+    assert!(retryable_source_capture_queue_wait(&StoreError::Invalid(
+        "UNIFIED_FINANCE_QUEUE_DEADLINE"
+    )));
+    for denial in [
+        "UNIFIED_FINANCE_QUEUE_FULL",
+        "SOURCE_CURSOR_REGRESSION",
+        "UNIFIED_FINANCE_QUEUE_OWNER_GONE",
+        "SOURCE_CAPTURE_UNAVAILABLE",
+    ] {
+        assert!(
+            !retryable_source_capture_queue_wait(&StoreError::Invalid(denial)),
+            "only the read queue start deadline permits bounded retry: {denial}"
+        );
+    }
+    assert!(!retryable_source_capture_queue_wait(&StoreError::Io(
+        std::io::Error::other("disk read failed")
+    )));
 }
 
 pub(super) fn get(

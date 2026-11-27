@@ -28,12 +28,21 @@ _RESEARCH_PROTECTED_SOURCES = (
 )
 _ENGINE_DIRS = ("crates/okx-trading-engine/", "crates/okx-trade-execution/")
 _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
-_HOST_CONTROL_SRC = "crates/okx-host-controller/src/"
-_HOST_LAUNCHER_SRC = "crates/okx-host-launcher/src/"
-_HOST_PROTOCOL_SRC = "crates/okx-host-protocol/src/"
 _HOST_CONTROL_TEST = "crates/okx-host-controller/tests/"
 _HOST_LAUNCHER_TEST = "crates/okx-host-launcher/tests/"
 _HOST_PROTOCOL_TEST = "crates/okx-host-protocol/tests/"
+# Host-only release is permitted for source files whose runtime authority is
+# demonstrably isolated from Engine installation, desired state and lifecycle.
+# An entire crate-level src/ prefix is NOT such a proof: runtime.rs, artifact.rs,
+# desired.rs, autostart.rs and entrypoints can install/restart Engine. Unknown or
+# newly introduced Host source defaults to Full until explicitly reviewed.
+_ISOLATED_HOST_CONTROL_SOURCE = {
+    "crates/okx-host-controller/src/attestor.rs",
+}
+_ISOLATED_HOST_LAUNCHER_SOURCE = {
+    "crates/okx-host-launcher/src/logging.rs",
+    "crates/okx-host-launcher/src/stdio_capture.rs",
+}
 _RESEARCH_MANIFESTS = {
     "crates/okx-research/Cargo.toml",
     "crates/okx-analysis/Cargo.toml",
@@ -63,6 +72,14 @@ _ENGINE_RESEARCH_RUNTIME_POLICY = {
 _ENGINE_HOST_LIFECYCLE = {
     "crates/okx-host-controller/src/job.rs",
     "crates/okx-host-controller/src/lifecycle_executor.rs",
+    "crates/okx-host-controller/src/runtime.rs",
+    "crates/okx-host-controller/src/artifact.rs",
+    "crates/okx-host-controller/src/desired.rs",
+    "crates/okx-host-controller/src/autostart.rs",
+    "crates/okx-host-controller/src/controller_update.rs",
+    "crates/okx-host-controller/src/legacy_bootstrap.rs",
+    "crates/okx-host-controller/src/root_migration.rs",
+    "crates/okx-host-controller/src/main.rs",
 }
 
 
@@ -78,14 +95,17 @@ def category(path):
         return "cloudflare"
     if path in _ENGINE_RESEARCH_RUNTIME_POLICY or path in _ENGINE_HOST_LIFECYCLE:
         return "full"
-    # Only Rust implementation files may use the host-only gate. Changes to
-    # manifests, assets, scripts, shared IPC or packaging still require full
-    # CI. Only Host-owned protocol source under okx-host-protocol may be scoped.
-    if path.endswith(".rs") and path.startswith((
-        _HOST_CONTROL_SRC, _HOST_PROTOCOL_SRC, _HOST_CONTROL_TEST, _HOST_PROTOCOL_TEST,
-    )):
+    # An explicit source allowlist protects the Engine lifecycle boundary.
+    # Host test-only files cannot alter a shipping executable; however all
+    # Host protocol implementation changes must still use Full until every
+    # financial/Engine consumer of the wire schema has been proved absent.
+    if path in _ISOLATED_HOST_CONTROL_SOURCE or (
+        path.endswith(".rs") and path.startswith((_HOST_CONTROL_TEST, _HOST_PROTOCOL_TEST))
+    ):
         return "host-controller"
-    if path.endswith(".rs") and path.startswith((_HOST_LAUNCHER_SRC, _HOST_LAUNCHER_TEST)):
+    if path in _ISOLATED_HOST_LAUNCHER_SOURCE or (
+        path.endswith(".rs") and path.startswith(_HOST_LAUNCHER_TEST)
+    ):
         return "host-launcher"
     # A scoped Research change must be Rust source or an integration test.
     # Arbitrary configs, SQL fixtures, generated code and build inputs can
@@ -429,17 +449,47 @@ def _self_test() -> None:
         "cloudflare": [files("cloudflare/okx-mcp/src/runtime_session.ts"), files("cloudflare/okx-mcp/src/mcp.test.ts", "docs/okx.md")],
         "research": [files("crates/okx-research/src/strategy_registry.rs"), files("crates/okx-analysis/src/lib.rs"), files("crates/okx-research-service/src/analytics/market.rs", "cloudflare/okx-mcp/src/mcp.ts", "docs/a.md"), files("crates/okx-strategy-core/src/operators.rs"), files("crates/okx-strategy-core/src/time_series.rs"), files("crates/okx-strategy-core/src/query_plan.rs", "docs/a.md"), files("crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-research-service/tests/edge_wss.rs")],
         "engine": [files("crates/okx-trading-engine/src/query.rs"), files("crates/okx-trade-execution/src/risk/mod.rs", "README.md"), files("crates/okx-trading-engine/src/trade_service/strategies.rs", "cloudflare/okx-mcp/src/mcp.ts")],
-        "host-controller": [files("crates/okx-host-controller/src/main.rs"), files("crates/okx-host-protocol/src/lib.rs"), files("crates/okx-host-controller/src/research_supervisor.rs"), files("crates/okx-host-protocol/src/research.rs"), files("crates/okx-host-controller/tests/research_supervisor.rs"), files("crates/okx-host-protocol/tests/research_wire.rs"), files("crates/okx-host-controller/src/activation/tests.rs", "crates/okx-host-launcher/src/main.rs", "docs/a.md"), files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-host-protocol/src/lib.rs", "cloudflare/okx-mcp/src/mcp.ts")],
-        "host-launcher": [files("crates/okx-host-launcher/src/main.rs"), files("crates/okx-host-launcher/tests/launcher_process.rs"), files("crates/okx-host-launcher/src/verify.rs", "README.md")],
-        "research-host": [files("crates/okx-host-launcher/src/main.rs", "crates/okx-research-service/src/analytics/market.rs"), files("crates/okx-host-controller/src/lifecycle.rs", "crates/okx-research-service/tests/edge_wss.rs"), files("crates/okx-host-controller/src/research_supervisor.rs", "crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-host-protocol/src/research.rs", "crates/okx-research-service/src/edge_credentials.rs")],
+        "host-controller": [files("crates/okx-host-controller/src/attestor.rs"), files("crates/okx-host-controller/tests/research_supervisor.rs"), files("crates/okx-host-protocol/tests/research_wire.rs"), files("crates/okx-host-controller/src/attestor.rs", "cloudflare/okx-mcp/src/mcp.ts"), files("crates/okx-host-controller/src/attestor.rs", "crates/okx-host-launcher/src/logging.rs", "docs/a.md")],
+        "host-launcher": [files("crates/okx-host-launcher/src/logging.rs"), files("crates/okx-host-launcher/src/stdio_capture.rs"), files("crates/okx-host-launcher/tests/launcher_process.rs"), files("crates/okx-host-launcher/src/logging.rs", "README.md")],
+        "research-host": [files("crates/okx-host-launcher/src/logging.rs", "crates/okx-research-service/src/analytics/market.rs"), files("crates/okx-host-controller/src/attestor.rs", "crates/okx-research-service/tests/edge_wss.rs"), files("crates/okx-host-controller/src/attestor.rs", "crates/okx-research-service/src/edge_runtime.rs"), files("crates/okx-host-protocol/tests/research_wire.rs", "crates/okx-research-service/src/edge_credentials.rs")],
     }
     for wanted, selections in cases.items():
         assert all(classify(pages) == wanted for pages in selections)
-    host_and_edge = files("crates/okx-host-controller/src/main.rs", "cloudflare/okx-mcp/src/mcp.ts")
+    host_and_edge = files("crates/okx-host-controller/src/attestor.rs", "cloudflare/okx-mcp/src/mcp.ts")
     assert classify(host_and_edge) == "host-controller"
-    assert classify(files("crates/okx-host-protocol/src/lib.rs", "cloudflare/okx-mcp/src/mcp.ts")) == "host-controller"
+    assert classify(files("crates/okx-host-protocol/tests/research_wire.rs", "cloudflare/okx-mcp/src/mcp.ts")) == "host-controller"
     assert edge_changed(host_and_edge)
-    assert not edge_changed(files("crates/okx-host-controller/src/main.rs", "README.md"))
+    assert not edge_changed(files("crates/okx-host-controller/src/attestor.rs", "README.md"))
+    # No broad `src/*.rs` Host skip: a CONTROL or Launcher implementation
+    # can deploy/restart Engine or affect its desired/installed state without
+    # depending on the trading-engine Cargo crate. The classifier must fail
+    # closed for all files not explicitly isolated above, including new ones.
+    for lifecycle in (
+        "crates/okx-host-controller/src/job.rs",
+        "crates/okx-host-controller/src/lifecycle_executor.rs",
+        "crates/okx-host-controller/src/runtime.rs",
+        "crates/okx-host-controller/src/artifact.rs",
+        "crates/okx-host-controller/src/desired.rs",
+        "crates/okx-host-controller/src/autostart.rs",
+        "crates/okx-host-controller/src/controller_update.rs",
+        "crates/okx-host-controller/src/legacy_bootstrap.rs",
+        "crates/okx-host-controller/src/root_migration.rs",
+        "crates/okx-host-controller/src/main.rs",
+        "crates/okx-host-controller/src/future_new_engine_lifecycle.rs",
+        "crates/okx-host-controller/src/research_supervisor.rs",
+        "crates/okx-host-protocol/src/lib.rs",
+        "crates/okx-host-protocol/src/research.rs",
+        "crates/okx-host-launcher/src/main.rs",
+        "crates/okx-host-launcher/src/lib.rs",
+        "crates/okx-host-launcher/src/future_new_launcher.rs",
+    ):
+        assert classify(files(lifecycle)) == "full", f"HOST_ENGINE_LIFECYCLE_SKIP:{lifecycle}"
+        assert classify(files(lifecycle, "cloudflare/okx-mcp/src/mcp.ts")) == "full", (
+            f"HOST_ENGINE_LIFECYCLE_EDGE_SKIP:{lifecycle}"
+        )
+        assert classify(files(lifecycle, "crates/okx-research-service/src/edge_runtime.rs")) == "full", (
+            f"HOST_ENGINE_LIFECYCLE_RESEARCH_SKIP:{lifecycle}"
+        )
     unsafe = [
         [], [[]], [[{}]],
         files("crates/okx-trading-engine/src/query.rs", "crates/okx-research-protocol/src/analytics.rs"),

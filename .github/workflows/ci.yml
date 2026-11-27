@@ -130,7 +130,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Reject unsafe component classifications
-        run: python3 -B scripts/check_ci_native_scope.py --self-test
+        run: |
+          python3 -B scripts/check_ci_native_scope.py --self-test
+          # A Host-only component is never an installable 4-EXE ReleaseSet.
+          # These exact-byte negative controls run even on a Full workflow edit.
+          python3 -B scripts/test_verify_host_component_release.py
       - name: Classify complete changed-file impact
         id: file_scope
         shell: bash
@@ -646,6 +650,74 @@ jobs:
           cache-workspace-crates: true
           save-if: false
           cache-on-failure: false
+      # Source tests execute PR-owned code and can write to the checkout.
+      # Compile and immutably upload the non-installable byte artifact FIRST
+      # from the clean exact-head checkout; a later failed check leaves only
+      # unaccepted evidence, never a deployable release.
+      - name: Build both Windows host executables without Engine
+        shell: pwsh
+        run: |
+          $dirty = @(& git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) { throw 'HOST_RELEASE_CHECKOUT_DIRTY_BEFORE_BUILD' }
+          $head = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          cargo build --locked --release -p okx-host-launcher -p okx-host-controller
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Build scripts execute from the PR source. Refuse provenance if any
+          # tracked or previously untracked source changed during compilation.
+          # The ignored target/ tree is only a build output, never a source.
+          $dirtyAfterBuild = @(& git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $dirtyAfterBuild.Count -ne 0) { throw 'HOST_RELEASE_CHECKOUT_DIRTY_AFTER_BUILD' }
+          $proof = @("scope=${{ needs.component_impact.outputs.component_scope }}", "head=$head", "tree=$tree", 'release_is_complete=false')
+          foreach ($name in @('okx-host-launcher.exe', 'okx-host-control.exe')) {
+            $path = Join-Path 'target/release' $name
+            if (!(Test-Path -LiteralPath $path)) { throw "MISSING_HOST_BINARY_$name" }
+            $proof += "$name=$((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant())"
+          }
+          $proof | Set-Content -LiteralPath "$env:RUNNER_TEMP/host-component-proof.txt" -Encoding utf8NoBOM
+          # Retain real Host-only bytes and a fail-closed, explicitly
+          # NON-INSTALLABLE provenance manifest. Existing CONTROL and Launcher
+          # cannot consume this schema. No Engine or Research image is copied.
+          $dist = Join-Path $env:RUNNER_TEMP 'okx-host-component'
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+          $components = [ordered]@{}
+          foreach ($name in @('okx-host-control.exe', 'okx-host-launcher.exe')) {
+            $source = Join-Path 'target/release' $name
+            $target = Join-Path $dist $name
+            Copy-Item -LiteralPath $source -Destination $target
+            $components[$name] = [ordered]@{
+              sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+              size = (Get-Item -LiteralPath $target).Length
+            }
+          }
+          Copy-Item -LiteralPath 'Cargo.lock' -Destination (Join-Path $dist 'Cargo.lock')
+          $rustVersion = (& rustc --version).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'HOST_RUST_VERSION_UNAVAILABLE' }
+          if ($rustVersion -cne 'rustc 1.100.0 (0ef1bc386 2026-11-09)') { throw 'HOST_RUST_VERSION_NOT_EXACT_PIN' }
+          [ordered]@{
+            schema = 'okx.windows.host-component/v1'
+            ci_status_policy = 'okx.github.actions.host-ready/v1'
+            repository_id = 1388071566
+            source_head_sha = $head
+            source_tree = $tree
+            rust_version = $rustVersion
+            cargo_lock_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dist 'Cargo.lock')).Hash.ToLowerInvariant()
+            artifact_scope = 'host_only'
+            release_is_complete = $false
+            installation_allowed = $false
+            components = $components
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dist 'manifest.json') -Encoding utf8NoBOM
+          python3 -B scripts/verify_host_component_release.py $dist $head $tree
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain exact Host-only bytes (NOT a deployable Native ReleaseSet)
+        if: github.event_name == 'pull_request' && (needs.component_impact.outputs.component_scope == 'host-controller' || needs.component_impact.outputs.component_scope == 'host-launcher')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: okx-host-component-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}\okx-host-component
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
       - name: Verify architecture and formatting
         shell: pwsh
         run: |
@@ -686,20 +758,6 @@ jobs:
             $pattern = 'test [^\r\n]*' + [regex]::Escape($witness) + ' \.\.\. ok'
             if ($output -notmatch $pattern) { throw "HOST_RESEARCH_OWNER_WITNESS_NOT_RUN_$witness" }
           }
-      - name: Build both Windows host executables without Engine
-        shell: pwsh
-        run: |
-          cargo build --locked --release -p okx-host-launcher -p okx-host-controller
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $head = (git rev-parse HEAD).Trim()
-          $tree = (git rev-parse 'HEAD^{tree}').Trim()
-          $proof = @("scope=${{ needs.component_impact.outputs.component_scope }}", "head=$head", "tree=$tree", 'release_is_complete=false')
-          foreach ($name in @('okx-host-launcher.exe', 'okx-host-control.exe')) {
-            $path = Join-Path 'target/release' $name
-            if (!(Test-Path -LiteralPath $path)) { throw "MISSING_HOST_BINARY_$name" }
-            $proof += "$name=$((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant())"
-          }
-          $proof | Set-Content -LiteralPath "$env:RUNNER_TEMP/host-component-proof.txt" -Encoding utf8NoBOM
       - name: Retain host-only build identities (not a deployable bundle)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -1202,6 +1260,26 @@ jobs:
           if ($code -ne 0) { exit $code }
           if (($output -join "`n") -notmatch 'test result: ok\. 2 passed; 0 failed;') {
             throw 'BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED'
+          }
+
+      - name: Exact source-capture queue retry negative control
+        if: matrix.suite == 'engine'
+        shell: pwsh
+        run: |
+          # Execute the new unit negative, not just compile it into the 62
+          # fixed financial witnesses. Other typed SQL/queue errors must
+          # remain hard failures; no deadline, actor or frontier is relaxed.
+          $testName = 'accounts::native_trade_contracts::filled_fixture::source_read_fixture_retry_is_exact_and_never_accepts_other_finance_errors'
+          $output = & cargo test --locked -p okx-trading-engine --lib $testName -- --exact --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          $log = $output -join "`n"
+          $passedLine = '(?m)^test ' + [regex]::Escape($testName)
+          $oneSelected = 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured;'
+          if ($log -notmatch ($passedLine + ' \.\.\. ok$') -or
+              $log -notmatch ($oneSelected + ' [1-9][0-9]* filtered out;')) {
+            throw 'SOURCE_CAPTURE_QUEUE_RETRY_NEGATIVE_TEST_NOT_EXECUTED'
           }
 
       # K9 runs once on its own runner, not beside isolated OS/SQL clocks.
