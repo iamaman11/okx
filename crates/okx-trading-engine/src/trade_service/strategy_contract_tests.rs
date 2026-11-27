@@ -107,6 +107,39 @@ fn update(key: &str, revision: u64) -> StrategyRequest {
         timeframe_ms: None,
     }
 }
+
+#[tokio::test]
+async fn unsupported_live_timeframe_is_rejected_before_strategy_creation() {
+    let fixture = Fixture::new().await;
+    let financial_before = money(&fixture).await;
+    let mut invalid = create("unsupported_interval_create");
+    if let StrategyRequest::Create { timeframe_ms, .. } = &mut invalid {
+        *timeframe_ms = 1_000;
+    }
+    rejected(fixture.request(invalid).await, "INVALID_COMMAND");
+    let mut invalid_update = update("unsupported_interval_update", 1);
+    if let StrategyRequest::Update { timeframe_ms, .. } = &mut invalid_update {
+        *timeframe_ms = Some(1_000);
+    }
+    rejected(
+        fixture.request(invalid_update).await,
+        "INVALID_COMMAND",
+    );
+    assert_eq!(money(&fixture).await, financial_before);
+    fixture.finish().await;
+}
+
+#[test]
+fn strategy_diagnostics_publish_reason_codes_not_source_error_text() {
+    assert_eq!(
+        safe_strategy_reason("ANALYTICS_SOURCE_NOT_READY"),
+        "ANALYTICS_SOURCE_NOT_READY"
+    );
+    assert_eq!(
+        safe_strategy_reason("HTTP 403 source body"),
+        "STRATEGY_TURN_FAILED"
+    );
+}
 fn completed_data(response: AgentResponse) -> Value {
     assert_eq!(response.request_id, "strategy-contract-request");
     assert_eq!(
@@ -477,8 +510,31 @@ async fn approved_strategy_without_live_source_never_claims_or_trades_and_can_st
         "ANALYTICS_SOURCE_NOT_READY"
     );
     // Exercise the shipping loop over enabled SQL strategies as well as its
-    // private one-strategy error path; it deliberately swallows errors.
+    // private one-strategy error path; failed turns are read-only and observed.
     engine.strategy_decisions_turn().await;
+    let account = fixture.owner.configuration.account_key.wire();
+    let status = completed_data(
+        fixture
+            .request(StrategyRequest::Status {
+                instance_id: INSTANCE.into(),
+            })
+            .await,
+    );
+    assert_eq!(status["runtime_observation"]["state"], "TURN_RETURNED_ERROR");
+    assert_eq!(
+        status["runtime_observation"]["last_failure_reason"],
+        "ANALYTICS_SOURCE_NOT_READY"
+    );
+    assert_eq!(status["runtime_observation"]["policy_revision"], 2);
+    assert_eq!(status["runtime_observation"]["durable"], false);
+    assert_eq!(
+        status["runtime_observation"]["financial_effect"],
+        "NOT_EVALUATED"
+    );
+    let unknown = engine
+        .strategy_runtime_observation(&account, "unknown_strategy")
+        .await;
+    assert_eq!(unknown["state"], "NOT_OBSERVED");
     assert_eq!(money(&fixture).await, financial_before);
     assert_eq!(*fixture.feed.requests.lock().unwrap(), requests_before);
     assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts_before);

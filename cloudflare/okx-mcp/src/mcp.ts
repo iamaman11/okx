@@ -344,28 +344,55 @@ function toolResult(value:Json,resultBudgetBytes=NORMAL_RESULT_BYTES,
  const status=projected.status==='unknown'?'unknown':'failed';
  return baseToolResult({request_id:projected.request_id,status,as_of_ms:Date.now(),data:{response_bytes:bytes(projected),response_budget_bytes:resultBudgetBytes},quality:{state:'partial'},warnings:['RESPONSE_BUDGET_EXCEEDED'],reason_code:'RESPONSE_TOO_LARGE',scope:'response',retryable:false,next_action:status==='unknown'?'inspect_exact_intent':'inspect_diagnostics'});
 }
+// Read at most one MCP request budget before materializing or parsing JSON.
+// Content-Length is not trusted; chunked streams are subject to the same limit.
+async function boundedRequestText(request:Request):Promise<string|null>{
+ const reader=request.body?.getReader();if(!reader)return '';
+ const chunks:Uint8Array[]=[];let length=0;
+ try{
+  while(true){
+   const {done,value}=await reader.read();if(done)break;
+   length+=value.byteLength;
+   if(length>MAX_BODY_BYTES){await reader.cancel().catch(()=>{});return null;}
+   chunks.push(value);
+  }
+ }finally{reader.releaseLock();}
+ const bytes=new Uint8Array(length);let offset=0;
+ for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+ return new TextDecoder().decode(bytes);
+}
 export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Response>{
  if(!ctx?.auth?.scope?.includes('mcp:use'))return new Response('insufficient scope',{status:403});
  if(request.method!=='POST')return new Response('method not allowed',{status:405});
- const raw=await request.text();if(new TextEncoder().encode(raw).byteLength>MAX_BODY_BYTES)return new Response('request too large',{status:413});
- let rpc:any;try{rpc=JSON.parse(raw);}catch{return jsonRpcError(null,-32700,'parse error');}
- const id=(rpc.id??null) as Json;
- if(rpc.method==='notifications/initialized')return new Response(null,{status:202});
+ let raw:string|null;
+ try{raw=await boundedRequestText(request);}catch{return jsonRpcError(null,-32700,'request body unavailable');}
+ if(raw===null)return new Response('request too large',{status:413});
+ let parsed:unknown;try{parsed=JSON.parse(raw);}catch{return jsonRpcError(null,-32700,'parse error');}
+ if(!isObject(parsed)||parsed.jsonrpc!=='2.0'||typeof parsed.method!=='string')
+  return jsonRpcError(null,-32600,'invalid request');
+ if(parsed.method==='notifications/initialized')
+  return 'id'in parsed?jsonRpcError(null,-32600,'invalid request'):new Response(null,{status:202});
+ const validId=parsed.id===null||typeof parsed.id==='string'||
+  (typeof parsed.id==='number'&&Number.isSafeInteger(parsed.id));
+ if(!validId)return jsonRpcError(null,-32600,'invalid request');
+ const rpc=parsed,id=rpc.id as Json;
  if(rpc.method==='initialize')return jsonRpc(id,{protocolVersion:MCP_PROTOCOL_VERSION,capabilities:{tools:{}},serverInfo:{name:'okx-cloudflare-mcp',version:MCP_SERVER_VERSION}});
  if(rpc.method==='ping')return jsonRpc(id,{});
  if (rpc.method === "tools/list") {return jsonRpc(id,{tools:PUBLIC_TOOLS});}
- if (rpc.method !== "tools/call" || !isObject(rpc.params))return jsonRpcError(id,-32601,'method not found');
+ if(rpc.method!=='tools/call')return jsonRpcError(id,-32601,'method not found');
+ if(!isObject(rpc.params))return jsonRpcError(id,-32602,'invalid params');
  const name=rpc.params.name,args=rpc.params.arguments;
+ if(typeof name!=='string'||!isObject(args))return jsonRpcError(id,-32602,'invalid tool action payload');
  // Validate the actual public descriptor first. Retired generic "trade"
  // is not a hidden mutation route; trade.execute remains explicitly high-risk.
- const published=typeof name==='string'&&PUBLIC_TOOLS.some(tool=>(tool as any).name===name);
- const scopedAction=typeof name==='string'&&name.startsWith('trade.')?name.slice(6):null;
+ const published=PUBLIC_TOOLS.some(tool=>(tool as any).name===name);
+ const scopedAction=name.startsWith('trade.')?name.slice(6):null;
  const nativeName=scopedAction===null?name:'trade';
  const nativeArgs=scopedAction===null?args:{...args,action:scopedAction};
  if(name==='strategies'&&isObject(args)&&args.action==='start'&&
     (!('expected_revision' in args)||!('configuration_digest' in args)))
    return jsonRpcError(id,-32602,'strategy start requires expected_revision and configuration_digest from status');
- if(!published||!isObject(args)||(scopedAction!==null&&'action' in args)||
+ if(!published||(scopedAction!==null&&'action' in args)||
     !validTool(nativeName,nativeArgs))return jsonRpcError(id,-32602,'invalid tool action payload');
  const edgeRequestId=requestId();
  try{
@@ -592,7 +619,7 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
  return jsonRpc(id,toolResult(reply,NORMAL_RESULT_BYTES,
    nativeName==='diagnostics'&&nativeArgs.action==='explain'&&
    (nativeArgs.view==='research'||nativeArgs.view==='operation')
-     ?{view:nativeArgs.view,reference:nativeArgs.reference}:undefined));
+     ?{view:nativeArgs.view,reference:typeof nativeArgs.reference==='string'?nativeArgs.reference:undefined}:undefined));
  }catch{
    const research=nativeName==='research'||nativeName==='market'||
      (nativeName==='diagnostics'&&nativeArgs.view==='research')||

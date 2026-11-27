@@ -19,14 +19,42 @@ use std::{
 };
 use tokio::{sync::watch, time::Instant};
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_with_config,
     tungstenite::{
         Message,
         client::IntoClientRequest,
         http::header::{AUTHORIZATION, HeaderValue},
+        protocol::WebSocketConfig,
     },
 };
 use zeroize::Zeroizing;
+
+const STABLE_EDGE_SESSION: Duration = Duration::from_secs(60);
+const RECONNECT_DELAYS_SECONDS: [u64; 5] = [1, 5, 15, 30, 60];
+
+/// Stable connections should not inherit old failure streaks. This preserves
+/// bounded exponential delays for failures before the session becomes healthy.
+fn reconnect_delay(failures: &mut usize, session_elapsed: Duration) -> Duration {
+    if session_elapsed >= STABLE_EDGE_SESSION {
+        *failures = 0;
+    }
+    let delay = RECONNECT_DELAYS_SECONDS[(*failures).min(RECONNECT_DELAYS_SECONDS.len() - 1)];
+    *failures = (*failures)
+        .saturating_add(1)
+        .min(RECONNECT_DELAYS_SECONDS.len() - 1);
+    Duration::from_secs(delay)
+}
+
+/// Enforce the existing wire budget in the decoder, before Tungstenite can
+/// aggregate a fragmented message into a much larger allocation.
+fn engine_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .read_buffer_size(4 * 1024)
+        .write_buffer_size(4 * 1024)
+        .max_write_buffer_size(2 * DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES)
+        .max_message_size(Some(DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES))
+        .max_frame_size(Some(DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES))
+}
 
 pub struct CloudflareTransportConfig {
     ws_url: String,
@@ -111,6 +139,23 @@ fn nonce() -> u128 {
 fn transport(message: &str) -> AgentError {
     AgentError::CloudflareTransport(message.into())
 }
+
+/// Only stable internal reason tokens may reach logs. Never print an error's
+/// raw Display string: it can contain URLs, response bodies or credentials.
+fn disconnect_reason(error: &AgentError) -> &str {
+    let AgentError::CloudflareTransport(code) = error else {
+        return "DIRECT_TRANSPORT_ERROR";
+    };
+    if (1..=64).contains(&code.len())
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        code
+    } else {
+        "DIRECT_TRANSPORT_ERROR"
+    }
+}
 fn frame(message: Message) -> AgentResult<F> {
     let Message::Text(text) = message else {
         return Err(transport("NON_TEXT_FRAME"));
@@ -145,18 +190,19 @@ pub async fn run_cloudflare_transport(
         if *shutdown.borrow() {
             return Ok(());
         }
+        let session_started = Instant::now();
         let result = run_session(config, ctx.clone(), shutdown.clone()).await;
         if *shutdown.borrow() {
             return Ok(());
         }
-        if result.is_err() {
+        if let Err(error) = result {
             eprintln!(
-                "direct transport disconnected; pending exchange outcomes require exact readback"
+                "OKX_DIRECT_TRANSPORT_DISCONNECTED_V1 reason_code={} outcome=UNKNOWN_CHECK_EXACT_READBACK",
+                disconnect_reason(&error)
             );
         }
-        let seconds = [1, 5, 15, 30, 60][retry.min(4)];
-        retry = (retry + 1).min(4);
-        tokio::select! {_=shutdown.changed()=>return Ok(()),_=tokio::time::sleep(Duration::from_secs(seconds))=>{}}
+        let delay = reconnect_delay(&mut retry, session_started.elapsed());
+        tokio::select! {_=shutdown.changed()=>return Ok(()),_=tokio::time::sleep(delay)=>{}}
     }
 }
 async fn run_session(
@@ -180,7 +226,10 @@ async fn run_session(
         HeaderValue::from_str(&format!("Bearer {}", config.bearer_token.as_str()))
             .map_err(|_| transport("INVALID_TOKEN"))?,
     );
-    let (socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(request))
+    let (socket, _) = tokio::time::timeout(
+        Duration::from_secs(15),
+        connect_async_with_config(request, Some(engine_websocket_config()), false),
+    )
         .await
         .map_err(|_| transport("WS_CONNECT_TIMEOUT"))?
         .map_err(|_| transport("WS_CONNECT_FAILED"))?;
@@ -327,6 +376,68 @@ mod reserved_finance_admission_tests {
         drop(diagnostic);
         assert!(Arc::clone(&finance).try_acquire_owned().is_ok());
         drop(ordinary);
+    }
+}
+
+#[cfg(test)]
+mod reconnect_and_frame_budget_tests {
+    use super::*;
+
+    #[test]
+    fn short_failure_streak_is_bounded_and_stable_session_recovers_quickly() {
+        let mut failures = 0;
+        for seconds in [1, 5, 15, 30, 60, 60] {
+            assert_eq!(
+                reconnect_delay(&mut failures, Duration::from_secs(59)),
+                Duration::from_secs(seconds)
+            );
+        }
+        assert_eq!(
+            reconnect_delay(&mut failures, STABLE_EDGE_SESSION),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            reconnect_delay(&mut failures, Duration::ZERO),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn websocket_decoder_rejects_messages_before_exceeding_wire_budget() {
+        let config = engine_websocket_config();
+        assert_eq!(
+            config.max_message_size,
+            Some(DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES)
+        );
+        assert_eq!(
+            config.max_frame_size,
+            Some(DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES)
+        );
+        let oversized = Message::Text("x".repeat(DIRECT_TRANSPORT_MAX_PAYLOAD_BYTES + 1).into());
+        assert!(matches!(
+            frame(oversized),
+            Err(AgentError::CloudflareTransport(reason)) if reason == "OVERSIZED_FRAME"
+        ));
+    }
+
+    #[test]
+    fn disconnect_reason_never_exposes_untrusted_error_text() {
+        assert_eq!(
+            disconnect_reason(&transport("WS_CONNECT_TIMEOUT")),
+            "WS_CONNECT_TIMEOUT"
+        );
+        assert_eq!(
+            disconnect_reason(&transport("Authorization: Bearer secret")),
+            "DIRECT_TRANSPORT_ERROR"
+        );
+        assert_eq!(
+            disconnect_reason(&transport(&"A".repeat(65))),
+            "DIRECT_TRANSPORT_ERROR"
+        );
+        let malformed: AgentError = serde_json::from_str::<serde_json::Value>("{")
+            .unwrap_err()
+            .into();
+        assert_eq!(disconnect_reason(&malformed), "DIRECT_TRANSPORT_ERROR");
     }
 }
 

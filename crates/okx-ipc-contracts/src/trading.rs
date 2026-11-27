@@ -417,18 +417,69 @@ pub struct StrategyConfigurationV1 {
     pub instruments: Vec<String>,
     pub timeframe_ms: u64,
 }
+/// The live strategy candle intervals accepted by the native market source.
+/// The wire stays a millisecond integer; only this enum admits supported values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategyTimeframe {
+    Minute1,
+    Minute3,
+    Minute5,
+    Minute15,
+    Minute30,
+    Hour1,
+    Hour4,
+    Day1Utc,
+}
+impl StrategyTimeframe {
+    pub const fn from_millis(value: u64) -> Option<Self> {
+        match value {
+            60_000 => Some(Self::Minute1),
+            180_000 => Some(Self::Minute3),
+            300_000 => Some(Self::Minute5),
+            900_000 => Some(Self::Minute15),
+            1_800_000 => Some(Self::Minute30),
+            3_600_000 => Some(Self::Hour1),
+            14_400_000 => Some(Self::Hour4),
+            86_400_000 => Some(Self::Day1Utc),
+            _ => None,
+        }
+    }
+}
 impl StrategyConfigurationV1 {
     pub fn valid(&self) -> bool {
         self.parameters.valid()
             && !self.instruments.is_empty()
             && self.instruments.len() <= 32
             && self.instruments.iter().all(|v| name(v))
-            && self.timeframe_ms >= 1000
+            && StrategyTimeframe::from_millis(self.timeframe_ms).is_some()
     }
 }
 #[cfg(test)]
 mod typed_strategy_parameters_tests {
     use super::*;
+    #[test]
+    fn live_strategy_timeframe_admission_matches_native_source() {
+        let valid = [
+            60_000, 180_000, 300_000, 900_000, 1_800_000, 3_600_000, 14_400_000,
+            86_400_000,
+        ];
+        let config = |timeframe_ms| StrategyConfigurationV1 {
+            parameters: StrategyParametersV1 {
+                fast: 10,
+                slow: 20,
+            },
+            instruments: vec!["BTC-USDT-SWAP".into()],
+            timeframe_ms,
+        };
+        for ms in valid {
+            assert!(StrategyTimeframe::from_millis(ms).is_some(), "{ms}");
+            assert!(config(ms).valid(), "{ms}");
+        }
+        for ms in [0, 1_000, 59_999, 60_001, 120_000, 86_400_001] {
+            assert!(StrategyTimeframe::from_millis(ms).is_none(), "{ms}");
+            assert!(!config(ms).valid(), "{ms}");
+        }
+    }
     #[test]
     fn s2_06_same_golden_preimage_and_sha256_for_reordered_semantics() {
         use sha2::{Digest, Sha256};
@@ -563,7 +614,7 @@ impl StrategyRequest {
                     && !instruments.is_empty()
                     && instruments.len() <= 32
                     && instruments.iter().all(|v| name(v))
-                    && *timeframe_ms >= 1000
+                    && StrategyTimeframe::from_millis(*timeframe_ms).is_some()
                     && decimal(budget_usd)
             }
             Self::Update {
@@ -583,7 +634,8 @@ impl StrategyRequest {
                     && instruments.as_ref().is_none_or(|values| {
                         !values.is_empty() && values.len() <= 32 && values.iter().all(|v| name(v))
                     })
-                    && timeframe_ms.is_none_or(|value| value >= 1000)
+                    && timeframe_ms
+                        .is_none_or(|value| StrategyTimeframe::from_millis(value).is_some())
             }
         }
     }

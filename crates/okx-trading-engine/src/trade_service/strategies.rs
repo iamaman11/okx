@@ -5,7 +5,95 @@ use okx_ipc_contracts::trading::{CapitalDirection, StrategyConfigurationV1, Stra
 #[path = "strategy_contract_tests.rs"]
 mod strategy_contract_tests;
 
+const MAX_STRATEGY_OBSERVATIONS: usize = 2_048;
+const STRATEGY_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+fn safe_strategy_reason(reason: &str) -> String {
+    if reason.len() <= 80
+        && !reason.is_empty()
+        && reason
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        reason.to_owned()
+    } else {
+        "STRATEGY_TURN_FAILED".into()
+    }
+}
+
 impl TradeService {
+    async fn strategy_runtime_observation(&self, account: &str, instance: &str) -> Value {
+        let observations = self.strategy_observations.lock().await;
+        let Some(value) = observations.get(&(account.to_owned(), instance.to_owned())) else {
+            return json!({"state":"NOT_OBSERVED","history":"UNKNOWN","durable":false,
+                "financial_effect":"NOT_EVALUATED"});
+        };
+        json!({
+            "state":if value.last_turn_ok {"TURN_RETURNED_OK"} else {"TURN_RETURNED_ERROR"},
+            "history":"UNKNOWN",
+            "durable":false,
+            "financial_effect":"NOT_EVALUATED",
+            "policy_revision":value.policy_revision,
+            "last_attempt_ms":value.last_attempt_ms,
+            "last_success_ms":value.last_success_ms,
+            "last_failure_ms":value.last_failure_ms,
+            "last_failure_reason":value.last_failure_reason
+        })
+    }
+
+    async fn record_strategy_turn(
+        &self,
+        account: &str,
+        instance: &str,
+        policy_revision: i64,
+        failure: Option<&str>,
+    ) {
+        let observed_at = now();
+        let observed_instant = Instant::now();
+        let reason = failure.map(safe_strategy_reason);
+        let mut observations = self.strategy_observations.lock().await;
+        let key = (account.to_owned(), instance.to_owned());
+        if observations.len() >= MAX_STRATEGY_OBSERVATIONS && !observations.contains_key(&key) {
+            observations.clear();
+        }
+        let value = observations.entry(key).or_insert(StrategyTurnObservation {
+            policy_revision,
+            last_attempt_ms: observed_at,
+            last_success_ms: None,
+            last_turn_ok: false,
+            last_failure_reason: None,
+            last_failure_ms: None,
+            next_log_at: observed_instant,
+        });
+        let report = reason.as_ref().is_some_and(|current| {
+            value.last_turn_ok
+                || value.last_failure_reason.as_ref() != Some(current)
+                || observed_instant >= value.next_log_at
+        });
+        value.last_attempt_ms = observed_at;
+        value.policy_revision = policy_revision;
+        value.last_turn_ok = reason.is_none();
+        if let Some(current) = reason.as_ref() {
+            value.last_failure_reason = Some(current.clone());
+            value.last_failure_ms = Some(observed_at);
+            if report {
+                value.next_log_at = observed_instant + STRATEGY_ERROR_LOG_INTERVAL;
+            }
+        } else {
+            value.last_success_ms = Some(observed_at);
+        }
+        drop(observations);
+        if report {
+            tracing::warn!(
+                account,
+                instance,
+                policy_revision,
+                reason = %reason.unwrap_or_default(),
+                "live strategy turn failed"
+            );
+        }
+    }
+
     pub async fn strategies(
         &self,
         account: &str,
@@ -24,11 +112,16 @@ impl TradeService {
             let result = match request {
                 StrategyRequest::Status { instance_id } => {
                     let instance_id = instance_id.clone();
-                    r.execution
+                    let mut status = r
+                        .execution
                         .store
-                        .strategy_status(deadline(), instance_id, now())
+                        .strategy_status(deadline(), instance_id.clone(), now())
                         .await
-                        .map_err(err)?
+                        .map_err(err)?;
+                    status["runtime_observation"] = self
+                        .strategy_runtime_observation(&account_key, &instance_id)
+                        .await;
+                    status
                 }
                 _ => {
                     json!({"instances":r.execution.store.strategy_instances(deadline()).await.map_err(err)?})
@@ -562,9 +655,28 @@ impl TradeService {
                 let Some(r) = self.accounts.resolve(&config.alias).await else {
                     return;
                 };
-                if let Ok(instances) = r.execution.store.strategy_instances(deadline()).await {
-                    for instance in instances.into_iter().filter(|i| i.enabled) {
-                        let _ = self.strategy_turn(&r, &instance).await;
+                let account = r.configuration.account_key.wire();
+                match r.execution.store.strategy_instances(deadline()).await {
+                    Ok(instances) => {
+                        for instance in instances.into_iter().filter(|i| i.enabled) {
+                            let result = self.strategy_turn(&r, &instance).await;
+                            self.record_strategy_turn(
+                                &account,
+                                &instance.instance_id,
+                                instance.policy_revision,
+                                result.as_ref().err().map(String::as_str),
+                            )
+                            .await;
+                        }
+                    }
+                    Err(_) => {
+                        self.record_strategy_turn(
+                            &account,
+                            "__strategy_catalog__",
+                            0,
+                            Some("STRATEGY_SQL_READ_FAILED"),
+                        )
+                        .await;
                     }
                 }
             })

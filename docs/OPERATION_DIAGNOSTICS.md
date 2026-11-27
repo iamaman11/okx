@@ -22,6 +22,12 @@ window*, **not** “the request had no effect.” If more than one job matches,
 exact `job_id`. Older jobs can still be inspected by their ID if retained in
 the projection; otherwise the diagnostic cannot infer their state.
 
+For live strategies, the existing `strategies.status` includes
+`data.runtime_observation`: the last observed turn, bounded failure reason and
+timestamps for the current Engine process. `durable=false`, `history=UNKNOWN`
+and `financial_effect=NOT_EVALUATED` mean this is **not** an exchange receipt,
+durable decision history or proof that a trade did not occur.
+
 For Research and Engine `operation` explain reads, Edge adds
 `operation_trace` (`okx.operation-trace-summary/v1`) alongside the untouched
 owner `data`. It contains the owner, typed reference kind, current observed
