@@ -4,8 +4,9 @@
 // unchanged workspace dependencies after every fresh GitHub checkout.
 //
 // This is deliberately NOT a generic restore-mtime script: only exact Git
-// blobs present in the known successful main seed may be retimed. Changed
-// files, manifests, missing cache units and untrusted cache scopes fail closed.
+// blobs present in the known successful main seed may be retimed. Windows
+// checkout CRLF is accepted only when removing CR before LF reproduces that
+// same exact Git blob. Everything else fails closed.
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -32,7 +33,8 @@ function sameManifests(root, seed) {
   // A Cargo profile, lock, config or build-script change invalidates this
   // optimization, regardless of the cache action's reported hit.
   const tracked = [
-    'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo',
+    'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo', '.gitattributes',
+    ':(glob)crates/**/.gitattributes',
     ':(glob)crates/**/Cargo.toml', ':(glob)crates/**/build.rs',
   ];
   try { git(root, ['diff', '--quiet', seed, 'HEAD', '--', ...tracked]); return true; }
@@ -53,6 +55,26 @@ function sourceTree(root, ref) {
 function gitBlobHash(bytes) {
   return crypto.createHash('sha1')
     .update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+}
+function checkoutBlobMatches(bytes, expected) {
+  if (gitBlobHash(bytes) === expected) return 'EXACT';
+  // The hosted Windows checkout can materialize a tracked LF Git blob as
+  // CRLF even with a clean Git index. Admit only this one byte-level checkout
+  // transformation; a source edit or any other filter output stays unsafe.
+  const normalized = Buffer.allocUnsafe(bytes.length);
+  let written = 0;
+  let crlfPairs = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 13 && i + 1 < bytes.length && bytes[i + 1] === 10) {
+      crlfPairs++;
+      continue;
+    }
+    normalized[written++] = bytes[i];
+  }
+  if (crlfPairs && gitBlobHash(normalized.subarray(0, written)) === expected) {
+    return 'CHECKOUT_CRLF';
+  }
+  return null;
 }
 function depInfoAnchor(root, profile, name) {
   // Cargo 1.100's verified Windows layout for this repository. Never use the
@@ -81,6 +103,7 @@ function inspect(root, seed, profile) {
   const changes = [];
   const retime = [];
   const noAnchor = [];
+  let checkoutCrlf = 0;
   for (const name of CRATES) {
     const prefix = `crates/${name}/src/`;
     const paths = [...current.keys()].filter(value => value.startsWith(prefix));
@@ -97,9 +120,11 @@ function inspect(root, seed, profile) {
       if (!file.isFile() || file.isSymbolicLink() || info.mode !== '100644') {
         throw Error('RESEARCH_CACHE_NONREGULAR_SOURCE');
       }
-      if (gitBlobHash(fs.readFileSync(abs)) !== info.sha) {
+      const match = checkoutBlobMatches(fs.readFileSync(abs), info.sha);
+      if (!match) {
         throw Error('RESEARCH_CACHE_WORKTREE_MISMATCH');
       }
+      if (match === 'CHECKOUT_CRLF') checkoutCrlf++;
       const seeded = baseline.get(relative);
       if (!seeded || seeded.sha !== info.sha || seeded.mode !== info.mode) {
         changes.push(relative);
@@ -115,7 +140,7 @@ function inspect(root, seed, profile) {
       }
     }
   }
-  return {retime, changes, noAnchor};
+  return {retime, changes, noAnchor, checkoutCrlf};
 }
 function reconcile({
   root, profile, expectedHead, exactCacheHit, researchOnly,
@@ -141,7 +166,7 @@ function reconcile({
   }
   if (!commitExists(root, seed)) return skip('SEED_COMMIT_UNAVAILABLE');
   if (!sameManifests(root, seed)) return skip('CARGO_INPUTS_DIFFER_FROM_SEED');
-  const {retime, changes, noAnchor} = inspect(root, seed, profile);
+  const {retime, changes, noAnchor, checkoutCrlf} = inspect(root, seed, profile);
   // Full preflight is complete before the first write. A failure while
   // updating a checkout timestamp must fail CI rather than mask stale units.
   for (const item of retime) {
@@ -151,7 +176,7 @@ function reconcile({
     }
   }
   return {state: 'NORMALIZED', reason: null, normalized: retime.length,
-    changed: changes.length, noAnchor};
+    changed: changes.length, noAnchor, checkoutCrlf};
 }
 function main() {
   const args = Object.fromEntries(process.argv.slice(2).map(arg => {
@@ -167,7 +192,7 @@ function main() {
     exactCacheHit: args.cacheHit,
     researchOnly: args.researchOnly,
   });
-  const summary = `Research trusted Cargo freshness: ${outcome.state} ${outcome.reason || 'EXACT_SEED_CONTENT'}, normalized=${outcome.normalized}, changed=${outcome.changed}, missing_anchor=${outcome.noAnchor.length}`;
+  const summary = `Research trusted Cargo freshness: ${outcome.state} ${outcome.reason || 'EXACT_SEED_CONTENT'}, normalized=${outcome.normalized}, changed=${outcome.changed}, checkout_crlf=${outcome.checkoutCrlf || 0}, missing_anchor=${outcome.noAnchor.length}`;
   process.stdout.write(summary + '\n');
   if (process.env.GITHUB_STEP_SUMMARY) {
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary + '\n');
@@ -179,4 +204,4 @@ if (require.main === module) {
     process.exitCode = 1;
   }
 }
-module.exports = {reconcile, inspect, gitBlobHash, TRUSTED_MAIN_SEED, CRATES};
+module.exports = {reconcile, inspect, gitBlobHash, checkoutBlobMatches, TRUSTED_MAIN_SEED, CRATES};
