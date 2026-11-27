@@ -160,10 +160,10 @@ fn wait_owned_child(
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
         let outcome = unsafe { WaitForSingleObject(child.as_raw_handle() as _, millis) };
-        if outcome == WAIT_OBJECT_0 {
-            if let Ok(status) = child.wait() {
-                return Ok(Some(status));
-            }
+        if outcome == WAIT_OBJECT_0
+            && let Ok(status) = child.wait()
+        {
+            return Ok(Some(status));
         }
     }
     #[cfg(not(windows))]
@@ -3100,13 +3100,16 @@ mod tests {
         }
         // This child exits successfully while its grandchild retains both
         // logging pipes. The caller must not report a false PASS or hang.
-        Command::new("cmd")
+        let mut grandchild = Command::new("cmd")
             .arg("/C")
             .arg("ping -n 30 127.0.0.1 >nul")
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
             .expect("fixture grandchild launched");
+        // Nonblocking reap only: it must still own the inherited pipes when
+        // this fixture exits, so the calling Job can prove descendant cleanup.
+        let _ = grandchild.try_wait();
     }
 
     #[cfg(windows)]
