@@ -126,6 +126,13 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
  const result=isObject(rawResult)?rawResult:undefined;
  const failure=isObject(frame.failure)?frame.failure:undefined;
  const status=normalizedStatus(outer,frame,result);
+ // Only this versioned native preflight failure carries a bounded, typed
+ // operator identity. Never copy an arbitrary native failure message to MCP.
+ const graphRejection=native&&frame.status==='failed'&&status==='failed'&&
+   frame.result===null&&failure?.retryable===false&&
+   failure.code==='GRAPH_OPERATOR_NOT_INCREMENTAL'&&typeof failure.message==='string'&&failure.message.length<=96
+   ?/^graph_preflight:steps\[([a-z0-9_]{1,32})\]\.op=(rolling_pearson|rolling_stddev|rolling_zscore)$/.exec(failure.message)
+   :null;
  const job=jobState(result??{});
  const reason=stringField(failure??{},'code')??stringField(result??{},'reason_code')??
    stringField(result??{},'reason')??stringField(frame,'reason_code')??stringField(frame,'reason')??
@@ -145,6 +152,10 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
    projected.retryable=status==='unknown'?false:!!(frame.retryable??failure?.retryable??outer.retryable);
    projected.next_action=(frame.next_action??outer.next_action??
      (status==='unknown'?'inspect_exact_intent':'inspect_diagnostics')) as Json;
+   if(graphRejection){
+     projected.diagnostic={stage:'graph_preflight',step_id:graphRejection[1],operator:graphRejection[2]};
+     projected.next_action='choose_supported_graph_operator';
+   }
  }
  const jobId=stringField(result??{},'job_id')??(job?stringField(result??{},'id'):undefined)??stringField(frame,'job_id');
  if(jobId)projected.job_id=jobId;
