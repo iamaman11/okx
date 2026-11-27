@@ -1064,7 +1064,10 @@ fn legacy_null_semantic_hash_does_not_attest_retry_request_after_reopen() {
     jobs.db
         .lock()
         .unwrap()
-        .execute("UPDATE research_jobs SET semantic_hash=NULL WHERE id=?1", [&hash])
+        .execute(
+            "UPDATE research_jobs SET semantic_hash=NULL WHERE id=?1",
+            [&hash],
+        )
         .unwrap();
 
     let retry = InvocationId::new("req_unproven_legacy_retry".into()).unwrap();
