@@ -1298,10 +1298,19 @@ jobs:
         run: |
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
           "Research IPC Cargo cache exact hit: ${{ steps.research-ipc-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          . ./scripts/research-cargo-fingerprint-evidence.ps1
+          Write-ResearchCargoMtimeSnapshot -Profile debug
+          $fingerprintCounts = New-ResearchCargoFingerprintCounts
           # The existing 10-second Hello/command deadlines are unchanged. A
           # failing, skipped or filtered Windows IPC witness blocks Ready.
-          $ipcOutput = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1
+          # Cargo 1.100 documents this module at INFO. Only this command sees
+          # the diagnostic env; setting it at job scope would change cache keys.
+          $env:CARGO_LOG = 'cargo::compiler::fingerprint=info'
+          $ipcOutput = & cargo test --locked -p okx-research-service --test ipc_process -- --nocapture --test-threads 1 2>&1 |
+            ForEach-Object { if (-not (Test-ResearchCargoFingerprintLogLine -Line $_ -Counts $fingerprintCounts)) { $_ } }
           $code = $LASTEXITCODE
+          Remove-Item Env:CARGO_LOG
+          Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job ipc
           $ipcOutput | Out-Host
           if ($code -ne 0) { exit $code }
           if (($ipcOutput -join "`n") -notmatch 'test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
@@ -1389,14 +1398,23 @@ jobs:
           # One isolated Cargo target root for the owner test profile.
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
           "Research Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          . ./scripts/research-cargo-fingerprint-evidence.ps1
+          & ./scripts/test-research-cargo-fingerprint-evidence.ps1
+          Write-ResearchCargoMtimeSnapshot -Profile debug
           # The Native Linux job is intentionally skipped for Research-only
           # changes. Preserve its Rust formatting gate in this owner job.
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # This is the REQUIRED Ready gate for Research owners.
           # A failing primitive test must fail Ready even if release compiled.
-          cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $fingerprintCounts = New-ResearchCargoFingerprintCounts
+          $env:CARGO_LOG = 'cargo::compiler::fingerprint=info'
+          cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings 2>&1 |
+            ForEach-Object { if (-not (Test-ResearchCargoFingerprintLogLine -Line $_ -Counts $fingerprintCounts)) { $_ } }
+          $clippyCode = $LASTEXITCODE
+          Remove-Item Env:CARGO_LOG
+          Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job owner
+          if ($clippyCode -ne 0) { exit $clippyCode }
           $ownerLog = Join-Path $env:RUNNER_TEMP 'research-native-owner-tests.log'
           cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis 2>&1 |
             Tee-Object -FilePath $ownerLog
@@ -1582,11 +1600,19 @@ jobs:
           # Engine bytes or compiles Agent/CONTROL/Launcher. GitHub provenance
           # and exact main-tree promotion are independently verified by CONTROL.
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
+          . ./scripts/research-cargo-fingerprint-evidence.ps1
+          Write-ResearchCargoMtimeSnapshot -Profile release
+          $fingerprintCounts = New-ResearchCargoFingerprintCounts
           # Cargo timing report is diagnostic only, not part of the trusted
           # three-file component ZIP or its exact SHA-256 release provenance.
+          $env:CARGO_LOG = 'cargo::compiler::fingerprint=info'
           cargo build --locked --release -p okx-research-service --bin okx-research-service --timings 2>&1 |
+            ForEach-Object { if (-not (Test-ResearchCargoFingerprintLogLine -Line $_ -Counts $fingerprintCounts)) { $_ } } |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'research-only-build.log')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $buildCode = $LASTEXITCODE
+          Remove-Item Env:CARGO_LOG
+          Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job release
+          if ($buildCode -ne 0) { exit $buildCode }
           $timingReports = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'cargo-timings') -Filter '*.html' -File -ErrorAction SilentlyContinue)
           if ($timingReports.Count -lt 1) { throw 'RESEARCH_CARGO_TIMING_EVIDENCE_MISSING' }
           Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'release\okx-research-service.exe') (Join-Path $dist 'okx-research-service.exe')

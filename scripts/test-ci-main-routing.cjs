@@ -11,6 +11,10 @@ const root = path.join(__dirname, '..', '.github', 'workflows');
 const workflows = fs.readdirSync(root).filter(x => /\.ya?ml$/.test(x));
 const source = fs.readFileSync(path.join(root, 'ci.yml'), 'utf8').replaceAll('\r\n', '\n');
 const researchRelease = fs.readFileSync(path.join(root, '..', '..', 'scripts', 'prepare-research-release.ps1'), 'utf8').replaceAll('\r\n', '\n');
+const researchFingerprint = fs.readFileSync(path.join(root, '..', '..', 'scripts',
+  'research-cargo-fingerprint-evidence.ps1'), 'utf8').replaceAll('\r\n', '\n');
+const researchFingerprintFixture = fs.readFileSync(path.join(root, '..', '..', 'scripts',
+  'test-research-cargo-fingerprint-evidence.ps1'), 'utf8').replaceAll('\r\n', '\n');
 const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
   'okx-research-service', 'tests', 'ipc_process.rs'), 'utf8').replaceAll('\r\n', '\n');
 const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
@@ -143,6 +147,76 @@ function validate(yaml, fileNames) {
   const research = job('research_service_tests_windows');
   const researchIpc = job('research_ipc_windows');
   const researchComponent = job('research_component_release_windows');
+  assert.match(research, /& \.\/scripts\/test-research-cargo-fingerprint-evidence\.ps1/,
+    'RESEARCH_OWNER_MUST_EXECUTE_SYNTHETIC_FINGERPRINT_PARSER');
+  assert.doesNotMatch(researchIpc, /test-research-cargo-fingerprint-evidence\.ps1/);
+  assert.doesNotMatch(researchComponent, /test-research-cargo-fingerprint-evidence\.ps1/);
+  assert.match(researchFingerprintFixture, /RESEARCH_FINGERPRINT_SYNTHETIC_PARSER=PASS/);
+  assert.match(researchFingerprintFixture, /FsStatusOutdated/);
+  assert.match(researchFingerprintFixture, /UnitDependencyInfoChanged/);
+  assert.match(researchFingerprintFixture, /fingerprint error for okx-research-service/);
+  assert.match(researchFingerprintFixture, /fingerprint error for untrusted-other/);
+  assert.match(researchFingerprintFixture, /fingerprint error for okx-research v0\.1\.0/);
+  assert.match(researchFingerprintFixture, /checking a different unit/);
+  assert.match(researchFingerprintFixture, /RESEARCH_FINGERPRINT_REASON_CLASSIFICATION_MISMATCH/);
+  // Cargo fingerprint logging cannot be configured at job scope, because
+  // Swatinem/rust-cache includes env variables in its key. Three commands
+  // only get bounded INFO logs after cache restoration, and raw traces may
+  // never enter the build artifact uploaded for provenance/timings.
+  for (const [id, stepName, profile, exitCapture, jobLabel] of [
+    ['research_ipc_windows', 'All ten real Research child IPC process tests', 'debug', 'code', 'ipc'],
+    ['research_service_tests_windows', 'Fresh Strategy Core, Research and Worker owner checks', 'debug', 'clippyCode', 'owner'],
+    ['research_component_release_windows', 'Build self-contained Research-only Windows component', 'release', 'buildCode', 'release'],
+  ]) {
+    const block = job(id);
+    const cache = block.indexOf('uses: Swatinem/rust-cache@');
+    const stepStart = block.indexOf(`      - name: ${stepName}`);
+    assert.ok(cache >= 0 && stepStart > cache, `FINGERPRINT_MUST_FOLLOW_CACHE_RESTORE:${id}`);
+    assert.doesNotMatch(block.slice(0, cache), /CARGO_LOG/, `FINGERPRINT_CANNOT_CHANGE_CACHE_KEY:${id}`);
+    const nextStep = block.indexOf('\n      - ', stepStart + 12);
+    const step = block.slice(stepStart, nextStep < 0 ? undefined : nextStep);
+    assert.match(step, /\. \.\/scripts\/research-cargo-fingerprint-evidence\.ps1/,
+      `FINGERPRINT_BOUNDED_COLLECTOR_REQUIRED:${id}`);
+    assert.ok(step.includes(`Write-ResearchCargoMtimeSnapshot -Profile ${profile}`),
+      `FINGERPRINT_PRE_BUILD_MTIME_REQUIRED:${id}`);
+    assert.match(step, /^          \$env:CARGO_LOG = 'cargo::compiler::fingerprint=info'$/m,
+      `FINGERPRINT_LOGGER_MUST_MATCH_CARGO_1_100:${id}`);
+    assert.equal((step.match(/\$env:CARGO_LOG =/g) || []).length, 1,
+      `FINGERPRINT_ONLY_ONE_COMMAND:${id}`);
+    assert.match(step, /ForEach-Object \{ if \(-not \(Test-ResearchCargoFingerprintLogLine -Line \$_ -Counts \$fingerprintCounts\)\) \{ \$_ \} \}/,
+      `FINGERPRINT_RAW_LOG_MUST_BE_FILTERED:${id}`);
+    assert.ok(step.includes(`$${exitCapture} = $LASTEXITCODE`),
+      `FINGERPRINT_MUST_SAVE_REAL_CARGO_EXIT:${id}`);
+    assert.ok(step.indexOf(`$${exitCapture} = $LASTEXITCODE`) < step.indexOf('Remove-Item Env:CARGO_LOG'),
+      `FINGERPRINT_MUST_PRESERVE_NATIVE_EXIT:${id}`);
+    assert.ok(step.includes(`Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job ${jobLabel}`),
+      `FINGERPRINT_REASONS_NOT_SUMMARIZED:${id}`);
+    assert.match(step, /Remove-Item Env:CARGO_LOG/,
+      `FINGERPRINT_ENV_MUST_BE_UNSET_AFTER_COMMAND:${id}`);
+    assert.match(step, new RegExp(`if \\(\\$${exitCapture} -ne 0\\) \\{ exit \\$${exitCapture} \\}`),
+      `FINGERPRINT_CANNOT_SUPPRESS_CARGO_FAILURE:${id}`);
+  }
+  assert.match(researchComponent, /cargo build[^\n]*2>&1 \|\n\s+ForEach-Object[^\n]+\|\n\s+Tee-Object -FilePath/,
+    'RELEASE_FINGERPRINT_RAW_PATHS_MUST_NOT_ENTER_UPLOADED_BUILD_LOG');
+  assert.match(researchFingerprint, /Select-Object -First 513/);
+  assert.match(researchFingerprint, /Select-Object -First 33/);
+  assert.match(researchFingerprint, /source_utc=\{1:yyyy-MM-ddTHH:mm:ss\.fffZ\}/);
+  assert.match(researchFingerprint, /Sort-Object -Property LastWriteTimeUtc -Descending/);
+  assert.match(researchFingerprint, /illustrative mtime sample/);
+  assert.match(researchFingerprint, /NOT per-unit freshness proof/);
+  assert.match(researchFingerprint, /fingerprint \(dirty\|error\) for/);
+  assert.match(researchFingerprint, /UnitDependencyInfoChanged/);
+  assert.match(researchFingerprint, /FsStatusOutdated/);
+  assert.match(researchFingerprint, /PrecalculatedComponentsChanged/);
+  assert.doesNotMatch(researchFingerprint, /LocalFingerprintChanged/);
+  assert.match(researchFingerprint, /pending_kind = \$null/);
+  assert.match(researchFingerprint, /Counts\.pending_crate = \$null/);
+  assert.doesNotMatch(researchFingerprint, /Write-Host \$value|Add-Content[^\n]*\$value|Set-ItemProperty|Set-Content|Remove-Item/,
+    'RAW_FINGERPRINT_LOG_OR_TARGET_MUTATION_FORBIDDEN');
+  for (const [id] of nativeCacheJobs) {
+    if (['research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) continue;
+    assert.doesNotMatch(job(id), /CARGO_LOG/, `FINGERPRINT_MUST_NOT_SCOPE_TO_OTHER_NATIVE_JOB:${id}`);
+  }
   assert.match(research, /prefix-key: v1-rust/);
   assert.match(research, /shared-key: research-service-windows/);
   assert.match(research, /save-if: false/,
@@ -1310,6 +1384,66 @@ assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
   'cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis',
   'cargo test --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis'), workflows));
+for (const id of ['research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows']) {
+  for (const [before, after, reason] of [
+    ["$env:CARGO_LOG = 'cargo::compiler::fingerprint=info'", "$env:CARGO_LOG = 'cargo::core::compiler::fingerprint=info'", 'FINGERPRINT_WRONG_MODULE'],
+    ['Write-ResearchCargoMtimeSnapshot', 'Skip-ResearchCargoMtimeSnapshot', 'FINGERPRINT_MTIME_REMOVED'],
+    ['Test-ResearchCargoFingerprintLogLine', 'Write-Output', 'FINGERPRINT_RAW_LOG_EXPOSED'],
+    ['Remove-Item Env:CARGO_LOG', 'Write-Host CARGO_LOG_LEFT_SET', 'FINGERPRINT_ENV_LEAKED'],
+  ]) {
+    const mutated = changeJobInput(source, id, before, after);
+    assert.throws(() => validate(mutated, workflows), reason + ':' + id);
+  }
+}
+assert.throws(() => validate(changeJobInput(source, 'research_component_release_windows',
+  '$buildCode = $LASTEXITCODE', '$buildCode = 0'), workflows),
+  'RELEASE_CARGO_FAILURE_CANNOT_BE_IGNORED');
+assert.throws(() => validate(changeJobInput(source, 'research_ipc_windows',
+  '$code = $LASTEXITCODE', '$code = 0'), workflows),
+  'IPC_CARGO_FAILURE_CANNOT_BE_IGNORED');
+assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
+  '& ./scripts/test-research-cargo-fingerprint-evidence.ps1',
+  'Write-Host SKIPPED_PARSER_FIXTURE'), workflows),
+  'RESEARCH_OWNER_CANNOT_SKIP_WINDOWS_PARSER_TEST');
+// Cargo 1.100 reports absent/corrupt cache artifacts via an adjacent
+// `fingerprint error for ...` / `err: ...` pair, not a `dirty: ...` reason.
+// Require per-crate bounded categorization, with no raw debug-error output.
+function validateFingerprintErrorEvidence(script) {
+  assert.match(script, /fingerprint \(dirty\|error\) for/,
+    'CACHE_MISS_ERROR_HEADER_REQUIRED');
+  assert.match(script, /\$Counts\.workspace\[\$crate\]\.error_headers\+\+/,
+    'CACHE_MISS_ERROR_PER_CRATE_REQUIRED');
+  assert.match(script, /\$Counts\.pending_kind -eq 'error'/,
+    'CACHE_MISS_ERROR_ADJACENCY_REQUIRED');
+  assert.match(script, /\\berr:\\s\*/,
+    'CACHE_MISS_ERROR_REASON_REQUIRED');
+  assert.match(script, /'missing'/,
+    'CACHE_MISS_ERROR_MISSING_CATEGORY_REQUIRED');
+  assert.match(script, /'corrupt'/,
+    'CACHE_MISS_ERROR_CORRUPT_CATEGORY_REQUIRED');
+  assert.match(script, /'other'/,
+    'CACHE_MISS_ERROR_OTHER_CATEGORY_REQUIRED');
+  assert.match(script, /error_reasons\[\$reason\]\+\+/,
+    'CACHE_MISS_ERROR_REASON_INCREMENT_REQUIRED');
+  assert.match(script, /paired_error_reasons=\$errorSummary/,
+    'CACHE_MISS_ERROR_SUMMARY_REQUIRED');
+  assert.match(script, /NOT per-unit freshness proof/,
+    'MTIME_SAMPLE_MUST_NOT_CLAIM_UNIT_FRESHNESS_PROOF');
+}
+validateFingerprintErrorEvidence(researchFingerprint);
+for (const [before, after, reason] of [
+  ['fingerprint (dirty|error) for', 'fingerprint dirty for', 'ERROR_HEADERS_MUST_NOT_DISAPPEAR'],
+  ['$Counts.workspace[$crate].error_headers++', 'Write-Host raw_error', 'ERROR_COUNT_MUST_BE_PER_CRATE'],
+  ["$Counts.pending_kind -eq 'error'", "$Counts.pending_kind -eq 'dirty'", 'ERROR_REASON_MUST_PAIR_TO_ERROR_HEADER'],
+  ["'missing'", "'other'", 'MISSING_ARTIFACT_MUST_BE_CLASSIFIED'],
+  ["'corrupt'", "'other'", 'CORRUPT_ARTIFACT_MUST_BE_CLASSIFIED'],
+  ['error_reasons[$reason]++', 'raw_error_count++', 'ERROR_REASON_COUNTS_MUST_BE_BOUNDED'],
+  ['paired_error_reasons=$errorSummary', 'raw_error=$value', 'RAW_ERROR_MUST_NEVER_BE_SERIALIZED'],
+  ['NOT per-unit freshness proof', 'proves every Cargo unit fresh', 'SAMPLE_MUST_BE_LABELED_ILLUSTRATIVE'],
+]) {
+  assert.ok(researchFingerprint.includes(before), `ERROR_EVIDENCE_MUTATION_NOT_FOUND:${reason}`);
+  assert.throws(() => validateFingerprintErrorEvidence(researchFingerprint.replace(before, after)), reason);
+}
 for (const profile of ['DEV', 'TEST']) {
   assert.throws(() => validate(changeJobInput(source, 'trading_engine_build_windows',
     `CARGO_PROFILE_${profile}_DEBUG: 0`, `CARGO_PROFILE_${profile}_DEBUG: ''`), workflows));
