@@ -32,10 +32,13 @@ async fn graph_preflight_rejects_unsupported_operator_without_job_or_venue_get()
         "costs":{"maker_fee_bps":0,"taker_fee_bps":10,"slippage_bps":5,
             "funding_mode":"zero_assumption"},
         "data_mode":"counterfactual"
-    })).unwrap();
+    }))
+    .unwrap();
     assert!(request.valid());
-    assert_eq!(service.research(request).await.unwrap_err(),
-        "composition.stream:OPERATOR_NOT_INCREMENTAL");
+    assert_eq!(
+        service.research(request).await.unwrap_err(),
+        "composition.stream:OPERATOR_NOT_INCREMENTAL"
+    );
     assert!(service.jobs.snapshot().is_empty());
     assert!(transport.routes.lock().unwrap().is_empty());
     drop(service);
@@ -626,10 +629,13 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
         "costs":{"maker_fee_bps":8,"taker_fee_bps":10,"slippage_bps":5,
             "funding_mode":"zero_assumption"},
         "data_mode":"counterfactual","seed":7
-    })).unwrap();
+    }))
+    .unwrap();
     assert!(graph_request.valid());
     let graph_job = service.research(graph_request).await.unwrap()["id"]
-        .as_str().unwrap().to_owned();
+        .as_str()
+        .unwrap()
+        .to_owned();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let state = service.jobs.get(&graph_job).unwrap();
@@ -639,23 +645,58 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
                 _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
             }
         }
-    }).await.unwrap();
-    let graph_result = service.research(ResearchRequest::Result {
-        job_id: graph_job.clone(), cursor: None, limit: 20,
-        view: ResearchResultView::Summary,
-    }).await.unwrap();
-    assert!(graph_result["metadata"]["summary"]["trades"].as_u64().unwrap() > 0);
-    assert_eq!(graph_result["metadata"]["graph_signal"]["signal_step"], "entry");
-    assert_eq!(graph_result["metadata"]["economic_audit"]["net_exact"],
-        graph_result["metadata"]["summary"]["pnl_exact"]);
-    let graph_experiment: serde_json::Value = service.artifacts.read_evidence_json(
-        graph_result["metadata"]["experiment_artifact"].as_str().unwrap()).unwrap();
-    assert_eq!(graph_experiment["graph_spec"]["graph"]["signal_step"], "entry");
+    })
+    .await
+    .unwrap();
+    let graph_result = service
+        .research(ResearchRequest::Result {
+            job_id: graph_job.clone(),
+            cursor: None,
+            limit: 20,
+            view: ResearchResultView::Summary,
+        })
+        .await
+        .unwrap();
+    assert!(
+        graph_result["metadata"]["summary"]["trades"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        graph_result["metadata"]["graph_signal"]["signal_step"],
+        "entry"
+    );
+    assert_eq!(
+        graph_result["metadata"]["economic_audit"]["net_exact"],
+        graph_result["metadata"]["summary"]["pnl_exact"]
+    );
+    let graph_experiment: serde_json::Value = service
+        .artifacts
+        .read_evidence_json(
+            graph_result["metadata"]["experiment_artifact"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        graph_experiment["graph_spec"]["graph"]["signal_step"],
+        "entry"
+    );
     assert!(graph_experiment.get("spec").is_none());
-    let exported = service.research(ResearchRequest::Result {
-        job_id: graph_job, cursor: None, limit: 20, view: ResearchResultView::Export,
-    }).await.unwrap();
-    assert_eq!(exported["integrity"]["reexecution"]["quality"], "verified_reexecution");
+    let exported = service
+        .research(ResearchRequest::Result {
+            job_id: graph_job,
+            cursor: None,
+            limit: 20,
+            view: ResearchResultView::Export,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        exported["integrity"]["reexecution"]["quality"],
+        "verified_reexecution"
+    );
     let before = service.jobs.snapshot().len();
     if let ResearchRequest::Backtest { strategy_id, .. } = &mut request {
         *strategy_id = "unregistered_source_code".into();

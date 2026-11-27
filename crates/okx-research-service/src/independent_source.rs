@@ -28,9 +28,9 @@ pub(crate) const MAX_PUBLIC_INSTRUMENTS_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 fn public_body_limit(path: &str, parameters: &[(&str, String)]) -> usize {
     if path == "/api/v5/public/instruments"
-        && parameters
-            .iter()
-            .any(|(name, value)| *name == "instType" && matches!(value.as_str(), "SWAP" | "FUTURES"))
+        && parameters.iter().any(|(name, value)| {
+            *name == "instType" && matches!(value.as_str(), "SWAP" | "FUTURES")
+        })
         && !parameters.iter().any(|(name, _)| *name == "instId")
     {
         MAX_PUBLIC_INSTRUMENTS_BYTES
