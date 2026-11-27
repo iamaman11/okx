@@ -270,7 +270,7 @@ means proven reusable binary bytes, not a runtime library. Existing
 
 ## CI job names and exact ownership
 
-One `.github/workflows/ci.yml` contains **15 job definitions**. GitHub renders
+One `.github/workflows/ci.yml` contains **19 job definitions**. GitHub renders
 all of their names even when the selected component route correctly skips a
 job. Four Windows regression matrix cells and at most two manual cache
 profiles can add displayed rows; they are **not extra application components**.
@@ -288,13 +288,29 @@ protection and accepted-artifact verification use the **displayed names**.
 | `cloudflare-mcp` | Edge affected: TypeScript/MCP/DO/public-contract checks on Ubuntu |
 | `host-windows` | Ready Host/CONTROL or mixed Host+Research, Windows: Clippy, tests and two Host EXE builds, no Engine build. Restores the existing trusted-main Engine-test cache read-only instead of saving a separate ephemeral PR Host cache |
 | `engine-windows` | Fresh Full/Engine route, Windows: exact 62 financial contracts / 107 witnesses, recovery/resource proof and two independent T10 heavy-Research process/WSS tests using a non-shipping Research-owned fixture |
+| `engine-isolation-windows` | Fresh Full/Engine route, Windows: separate real-process, SQLite crash/recovery and isolated Native/MCP/WSS safety contracts |
 | `trading-engine-regressions-windows (suite)` | Fresh Full/Engine route: four parallel Windows suites for Engine, Host, Execution and Research; Host also runs the unchanged native `--all-targets` Clippy with `-D warnings` after its tests |
-| `research-windows` | Fresh Research-only or mixed Host+Research PR, Windows: Research owner/IPC/WSS tests and scoped Research release evidence; no Engine build on Research-only |
+| `research-windows` | Fresh Research-only or mixed Host+Research PR, Windows: Research owner tests and runtime safety evidence; no Engine build on Research-only |
+| `research-ipc-windows` | Fresh Research-only, Windows: real typed Research IPC, socket and MCP/WSS process contracts at the exact PR head |
+| `research-clippy-windows` | Fresh Research-only, Windows: independent Research Clippy with warnings denied |
+| `research-component-windows` | Fresh Research-only, Windows: standalone Research release executable and exact-head component artifact; no Engine build |
 | `ci` | Non-Draft, Ubuntu: **single required branch-protection status**; direct fail-closed evaluation of all applicable owner and portable/architecture/audit/Edge results; on accepted main requires the redundant audit to be explicitly skipped; no compilation |
 | `trading-engine-build-windows` | Fresh Full/Engine route, Windows: Engine-only or full four-EXE release artifact with exact SHA/tree |
 | `warm-windows-cargo-cache (profile)` | **Manual** accepted-main cache seed (`trusted_main_cache_prime` YAML ID); choose `tests`, `release`, `research` (one Windows runner) or `both` (two Engine runners, default). The `research` option primes Research-only Clippy/tests/release without Engine compilation; no automatic Research cache job. Compilation only, never acceptance/publish |
 | `publish-accepted-windows-release` | Accepted Full main tree, isolated write permission: publish immutable verified four-EXE PR artifact without rebuilding or installing |
 | `publish-accepted-research-component` | Accepted Research-only main tree, isolated write permission: publish exact three-file Research artifact and origin/readback without rebuilding |
+
+An **Engine-only** Ready PR creates `okx-engine-component-<HEAD>` with a
+versioned `okx.windows.engine-component/v2` proof,
+`release_is_complete=false` and `installed_state_unchanged=true`. The Actions
+artifact is retained for 14 days; it is an owner-scoped test/build witness,
+**not** a complete four-executable installation release. The accepted `main`
+run reuses that exact first-attempt Ready evidence and skips Rust compilation,
+financial tests and both release publishers. Only Full Ready may publish a
+verified `native-base-<main SHA>` four-owner release; only Research-only may
+publish a standalone Research component. A persistent, independently installable
+Engine release would require its own explicit provenance/installation contract;
+it must not be inferred from the Engine-only Ready artifact.
 
 The old `all26-slice-targeted.yml` workflow and Native/Worker JS case adapters
 were retired: their `--case` invocation was already guaranteed to fail after
