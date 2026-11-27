@@ -204,6 +204,7 @@ impl HostControlError {
             Self::SecretStore(_) => "SECRET_STORE_ERROR",
             Self::GithubTokenNotFound => "GITHUB_TOKEN_NOT_FOUND",
             Self::InvalidGithubToken => "INVALID_GITHUB_TOKEN",
+            Self::InvalidAttestorToken => "INVALID_ATTESTOR_TOKEN",
             Self::UnsupportedPlatform => "UNSUPPORTED_PLATFORM",
             Self::InvalidPollInterval => "INVALID_POLL_INTERVAL",
             Self::RepositoryMissing => "REPOSITORY_MISSING",

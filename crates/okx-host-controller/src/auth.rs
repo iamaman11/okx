@@ -1,4 +1,6 @@
-use zeroize::{Zeroize, Zeroizing};
+#[cfg(windows)]
+use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::{HostControlError, HostControlResult};
 
