@@ -83,6 +83,7 @@ jobs:
           set -euo pipefail
           node scripts/test-ci-main-routing.cjs
           node scripts/test-ci-component-impact.cjs
+          node scripts/test-research-trusted-cargo-freshness.cjs
           node scripts/test-ci-cargo-closure-proof.cjs "$RUNNER_TEMP/dependency-graph.json"
           files=()
           if [[ "${{ github.event_name }}" == 'pull_request' ]]; then
@@ -1311,6 +1312,14 @@ jobs:
             # The offline *probe* is optional; only the real build is gated.
             $global:LASTEXITCODE = 0
           }
+      - name: Retain only byte-identical Research IPC Cargo fingerprints
+        shell: pwsh
+        env:
+          OKX_RESEARCH_PR_SHA: ${{ github.event.pull_request.head.sha }}
+          OKX_RESEARCH_ONLY: ${{ needs.component_impact.outputs.research_only }}
+        run: |
+          node scripts/research-trusted-cargo-freshness.cjs "profile=debug" "head=$env:OKX_RESEARCH_PR_SHA" "cacheHit=${{ steps.research-ipc-cache.outputs.cache-hit }}" "researchOnly=$env:OKX_RESEARCH_ONLY"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: All ten real Research child IPC process tests
         shell: pwsh
         run: |
@@ -1436,6 +1445,14 @@ jobs:
             "Research owner Cargo registry: incomplete cache; ordinary online fallback" >> $env:GITHUB_STEP_SUMMARY
             $global:LASTEXITCODE = 0
           }
+      - name: Retain only byte-identical Research owner Cargo fingerprints
+        shell: pwsh
+        env:
+          OKX_RESEARCH_PR_SHA: ${{ github.event.pull_request.head.sha }}
+          OKX_RESEARCH_ONLY: ${{ needs.component_impact.outputs.research_only }}
+        run: |
+          node scripts/research-trusted-cargo-freshness.cjs "profile=debug" "head=$env:OKX_RESEARCH_PR_SHA" "cacheHit=${{ steps.research-cache.outputs.cache-hit }}" "researchOnly=$env:OKX_RESEARCH_ONLY"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Fresh Strategy Core, Research and Worker owner checks
         shell: pwsh
         run: |
@@ -1644,6 +1661,14 @@ jobs:
             "Research release Cargo registry: incomplete cache; ordinary online fallback" >> $env:GITHUB_STEP_SUMMARY
             $global:LASTEXITCODE = 0
           }
+      - name: Retain only byte-identical Research release Cargo fingerprints
+        shell: pwsh
+        env:
+          OKX_RESEARCH_PR_SHA: ${{ github.event.pull_request.head.sha }}
+          OKX_RESEARCH_ONLY: ${{ needs.component_impact.outputs.research_only }}
+        run: |
+          node scripts/research-trusted-cargo-freshness.cjs "profile=release" "head=$env:OKX_RESEARCH_PR_SHA" "cacheHit=${{ steps.research-release-cache.outputs.cache-hit }}" "researchOnly=$env:OKX_RESEARCH_ONLY"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: cloudflare/okx-mcp/.node-version

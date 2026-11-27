@@ -15,6 +15,8 @@ const researchFingerprint = fs.readFileSync(path.join(root, '..', '..', 'scripts
   'research-cargo-fingerprint-evidence.ps1'), 'utf8').replaceAll('\r\n', '\n');
 const researchFingerprintFixture = fs.readFileSync(path.join(root, '..', '..', 'scripts',
   'test-research-cargo-fingerprint-evidence.ps1'), 'utf8').replaceAll('\r\n', '\n');
+const trustedCargoFreshness = fs.readFileSync(path.join(root, '..', '..', 'scripts',
+  'research-trusted-cargo-freshness.cjs'), 'utf8').replaceAll('\r\n', '\n');
 const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
   'okx-research-service', 'tests', 'ipc_process.rs'), 'utf8').replaceAll('\r\n', '\n');
 const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
@@ -180,6 +182,44 @@ function validate(yaml, fileNames) {
   const research = job('research_service_tests_windows');
   const researchIpc = job('research_ipc_windows');
   const researchComponent = job('research_component_release_windows');
+  assert.match(audit, /node scripts\/test-research-trusted-cargo-freshness\.cjs/,
+    'TRUSTED_CARGO_FRESHNESS_NEGATIVE_FIXTURES_REQUIRED');
+  assert.match(trustedCargoFreshness,
+    /const TRUSTED_MAIN_SEED = 'c95acdbd9fe426f064414661293452e48d2690e1';/,
+    'CARGO_MTIME_TRUST_ANCHOR_MUST_MATCH_ACCEPTED_SEED');
+  assert.match(trustedCargoFreshness, /target', profile, 'build', name/,
+    'CARGO100_UNIT_FINGERPRINTS_REQUIRED');
+  assert.match(trustedCargoFreshness, /gitBlobHash\(fs\.readFileSync\(abs\)\) !== info\.sha/,
+    'CARGO_MTIME_DISK_BYTES_MUST_MATCH_PR_TREE');
+  assert.match(trustedCargoFreshness, /file\.mtimeMs <= anchor\.newest/,
+    'CHANGED_SOURCE_MUST_BE_NEWER_THAN_ALL_CACHED_UNITS');
+  for (const [id, cacheId, label, profile, buildLabel] of [
+    ['research_ipc_windows', 'research-ipc-cache', 'IPC', 'debug', 'All ten real Research child IPC process tests'],
+    ['research_service_tests_windows', 'research-cache', 'owner', 'debug', 'Fresh Strategy Core, Research and Worker owner checks'],
+    ['research_component_release_windows', 'research-release-cache', 'release', 'release', 'Build self-contained Research-only Windows component'],
+  ]) {
+    const block = job(id);
+    const marker = `      - name: Retain only byte-identical Research ${label} Cargo fingerprints`;
+    const start = block.indexOf(marker);
+    const cache = block.indexOf('uses: Swatinem/rust-cache@');
+    const build = block.indexOf(`      - name: ${buildLabel}`);
+    assert.ok(cache >= 0 && start > cache && build > start,
+      `TRUSTED_MTIME_MUST_FOLLOW_RESTORE_AND_PRECEDE_BUILD:${id}`);
+    assert.equal(block.split(marker).length, 2, `TRUSTED_MTIME_ONLY_ONE_STEP:${id}`);
+    const step = block.slice(start, block.indexOf('\n      - ', start + marker.length));
+    assert.match(step, /OKX_RESEARCH_PR_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+    assert.match(step, /OKX_RESEARCH_ONLY: \$\{\{ needs\.component_impact\.outputs\.research_only \}\}/);
+    assert.ok(step.includes(`"profile=${profile}"`), `TRUSTED_MTIME_WRONG_PROFILE:${id}`);
+    assert.ok(step.includes(`"cacheHit=\${{ steps.${cacheId}.outputs.cache-hit }}"`),
+      `TRUSTED_MTIME_REQUIRES_EXACT_CACHE_HIT:${id}`);
+    assert.match(step, /if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+      `TRUSTED_MTIME_FAILURE_MUST_BLOCK_BUILD:${id}`);
+  }
+  for (const [id, block] of map) {
+    if (['research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) continue;
+    assert.doesNotMatch(block, /node scripts\/research-trusted-cargo-freshness\.cjs/,
+      `TRUSTED_MTIME_FORBIDDEN_IN_UNRELATED_JOB:${id}`);
+  }
   assert.match(research, /& \.\/scripts\/test-research-cargo-fingerprint-evidence\.ps1/,
     'RESEARCH_OWNER_MUST_EXECUTE_SYNTHETIC_FINGERPRINT_PARSER');
   assert.doesNotMatch(researchIpc, /test-research-cargo-fingerprint-evidence\.ps1/);
