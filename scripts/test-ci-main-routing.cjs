@@ -189,8 +189,12 @@ function validate(yaml, fileNames) {
     'CARGO_MTIME_TRUST_ANCHOR_MUST_MATCH_ACCEPTED_SEED');
   assert.match(trustedCargoFreshness, /target', profile, 'build', name/,
     'CARGO100_UNIT_FINGERPRINTS_REQUIRED');
-  assert.match(trustedCargoFreshness, /gitBlobHash\(fs\.readFileSync\(abs\)\) !== info\.sha/,
-    'CARGO_MTIME_DISK_BYTES_MUST_MATCH_PR_TREE');
+  assert.match(trustedCargoFreshness, /checkoutBlobMatches\(fs\.readFileSync\(abs\), info\.sha\)/,
+    'CARGO_MTIME_DISK_BYTES_MUST_MATCH_PR_TREE_WITH_ONLY_CHECKOUT_CRLF');
+  assert.match(trustedCargoFreshness, /gitBlobHash\(normalized\.subarray\(0, written\)\) === expected/,
+    'CARGO_MTIME_CRLF_MUST_REPRODUCE_EXACT_GIT_BLOB');
+  assert.match(trustedCargoFreshness, /'\.gitattributes'/,
+    'CARGO_MTIME_GIT_ATTRIBUTES_MUST_STAY_TRUSTED');
   assert.match(trustedCargoFreshness, /file\.mtimeMs <= anchor\.newest/,
     'CHANGED_SOURCE_MUST_BE_NEWER_THAN_ALL_CACHED_UNITS');
   for (const [id, cacheId, label, profile, buildLabel] of [

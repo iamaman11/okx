@@ -515,12 +515,39 @@ async fn risk_book_contract_native_public_cohort_denied_b_does_not_block_held_a_
         .unwrap()
         .unwrap();
     let reads_before_diagnostic = fixture.feed.requests.lock().unwrap().clone();
-    let explanation = crate::diagnostics::native_intent::read(
-        &b,
-        fixture.owner.installation_id(),
-        &format!("intent:{}", b_denied.intent_id),
-    )
-    .await;
+    let reference = format!("intent:{}", b_denied.intent_id);
+    let started = Instant::now();
+    let explanation = loop {
+        let observed = crate::diagnostics::native_intent::read(
+            &b,
+            fixture.owner.installation_id(),
+            &reference,
+        )
+        .await;
+        if observed["state"] != "NOT_EVALUATED" {
+            break observed;
+        }
+        // The read-only API explicitly permits a finite queue/storage miss
+        // while the independent financial owner is busy. Never mistake this
+        // for a rejected trade, and retry only its documented transient codes.
+        assert!(
+            matches!(
+                observed["reason_code"].as_str(),
+                Some(
+                    "UNIFIED_FINANCE_DIAGNOSTIC_TIMEOUT"
+                        | "ACCOUNT_QUEUE_DEADLINE"
+                        | "ACCOUNT_STORAGE_DEADLINE"
+                        | "ACCOUNT_STORAGE_BACKPRESSURE"
+                )
+            ),
+            "non-retryable diagnostic failure: {observed}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "durable denial was not observable within bounded retries: {observed}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(explanation["state"], "REJECTED");
     assert_eq!(
         explanation["reason_code"],

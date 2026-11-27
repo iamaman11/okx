@@ -5,7 +5,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
-const {reconcile, CRATES} = require('./research-trusted-cargo-freshness.cjs');
+const {reconcile, gitBlobHash, checkoutBlobMatches, CRATES} =
+  require('./research-trusted-cargo-freshness.cjs');
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'okx-trusted-cargo-freshness-'));
 const git = (...args) => execFileSync('git', args, {
@@ -85,6 +86,15 @@ try {
   assert.ok(fs.statSync(candidate).mtimeMs < anchor);
   assert.equal(fs.statSync(changed).mtimeMs, safeChangedBefore,
     'changed Research test source must stay newer than cached dep-info');
+
+  // Windows materializes clean, unchanged LF Git blobs using CRLF source
+  // bytes. A raw disk hash must differ, but only CRLF normalization may pass.
+  const seedSource = fs.readFileSync(candidate);
+  const crlfSource = Buffer.from(seedSource.toString('utf8').replaceAll('\n', '\r\n'));
+  const expectedBlob = gitBlobHash(seedSource);
+  assert.notEqual(gitBlobHash(crlfSource), expectedBlob);
+  assert.equal(checkoutBlobMatches(crlfSource, expectedBlob), 'CHECKOUT_CRLF');
+  assert.equal(checkoutBlobMatches(Buffer.concat([crlfSource, Buffer.from('tampered')]), expectedBlob), null);
 
   // Current on-disk bytes, not merely a claimed Git tree, must match.
   fs.writeFileSync(candidate, 'pub fn tampered() {}\n');
