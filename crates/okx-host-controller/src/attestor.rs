@@ -15,7 +15,7 @@ use okx_host_protocol::ResearchRuntimeStatus;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout},
 };
 use tokio_tungstenite::{
     connect_async_with_config,
@@ -36,6 +36,9 @@ const MAX_CHALLENGES_PER_SESSION: usize = 128;
 const MAX_CHALLENGE_FUTURE_MS: u64 = 3000;
 const STATUS_TIMEOUT: Duration = Duration::from_millis(850);
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+const INITIAL_RETRY_SECONDS: u64 = 2;
+const MAX_RETRY_SECONDS: u64 = 60;
+const STABLE_SESSION_BACKOFF_RESET: Duration = Duration::from_secs(30);
 
 pub struct ObservationRequest {
     reply: oneshot::Sender<Option<ResearchRuntimeStatus>>,
@@ -308,23 +311,83 @@ async fn run_session(
     }
 }
 
+// A long-lived session must not inherit an hour-old failure backoff after a
+// normal reconnect. Quick failures retain the same bounded exponential delay.
+fn retry_after_session(current: u64, elapsed: Duration) -> (u64, u64) {
+    let wait = if elapsed >= STABLE_SESSION_BACKOFF_RESET {
+        INITIAL_RETRY_SECONDS
+    } else {
+        current
+    };
+    (wait, wait.saturating_mul(2).min(MAX_RETRY_SECONDS))
+}
+
 /// Best-effort by construction: a missing or disconnected attestor never
 /// changes CONTROL lifecycle, GitHub owner, or existing Research transport.
 pub async fn run(token: Zeroizing<String>, requests: mpsc::Sender<ObservationRequest>) {
-    let mut retry_seconds = 2u64;
+    let mut retry_seconds = INITIAL_RETRY_SECONDS;
     loop {
-        let outcome = run_session(&token, &requests).await;
+        if requests.is_closed() {
+            return;
+        }
+        let started = Instant::now();
+        let outcome = tokio::select! {
+            outcome = run_session(&token, &requests) => outcome,
+            _ = requests.closed() => return,
+        };
         if let Err(code) = outcome {
             eprintln!("CONTROL attestor unavailable: {code}; read-only evidence remains partial");
         }
-        sleep(Duration::from_secs(retry_seconds)).await;
-        retry_seconds = (retry_seconds * 2).min(60);
+        let (wait, next) = retry_after_session(retry_seconds, started.elapsed());
+        retry_seconds = next;
+        tokio::select! {
+            _ = sleep(Duration::from_secs(wait)) => {},
+            _ = requests.closed() => return,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attestor_reconnect_backoff_recovers_after_stable_session() {
+        let mut current = INITIAL_RETRY_SECONDS;
+        for expected in [2, 4, 8, 16, 32, 60, 60] {
+            let (wait, next) = retry_after_session(current, Duration::from_secs(1));
+            assert_eq!(wait, expected);
+            current = next;
+        }
+        assert_eq!(current, MAX_RETRY_SECONDS);
+        let (wait, next) = retry_after_session(current, STABLE_SESSION_BACKOFF_RESET);
+        assert_eq!(wait, INITIAL_RETRY_SECONDS);
+        assert_eq!(next, 4);
+        assert_eq!(
+            retry_after_session(
+                current,
+                STABLE_SESSION_BACKOFF_RESET - Duration::from_nanos(1)
+            ),
+            (MAX_RETRY_SECONDS, MAX_RETRY_SECONDS)
+        );
+        assert_eq!(retry_after_session(next, Duration::ZERO), (4, 8));
+    }
+
+    #[tokio::test]
+    async fn dropped_control_owner_stops_attestor_without_reconnecting() {
+        let (requests, receiver) = mpsc::channel(1);
+        drop(receiver);
+        assert!(
+            timeout(
+                Duration::from_millis(100),
+                // Invalid HTTP header prevents any accidental outbound connection
+                // if owner-closure handling ever regresses.
+                run(Zeroizing::new("invalid\nheader".to_owned()), requests)
+            )
+            .await
+            .is_ok()
+        );
+    }
 
     #[tokio::test]
     async fn missing_initial_hello_ack_times_out_before_attestation() {
@@ -341,6 +404,79 @@ mod tests {
             read_hello_ack(&mut closed, Duration::from_millis(20)).await,
             Err("ATTESTOR_ACK_CLOSED")
         );
+    }
+
+    #[tokio::test]
+    async fn initial_hello_ack_rejects_foreign_and_malformed_frames() {
+        let valid = serde_json::json!({
+            "type": "hello_ack",
+            "schema": FRAME_SCHEMA,
+            "session_id": "control_0123456789abcdef",
+            "connection_generation": 7,
+        });
+        let mut reader =
+            futures_util::stream::iter([Ok::<_, ()>(Message::Text(valid.to_string().into()))]);
+        assert_eq!(
+            read_hello_ack(&mut reader, Duration::from_millis(20)).await,
+            Ok(("control_0123456789abcdef".into(), 7))
+        );
+
+        let mut broken = futures_util::stream::iter([Err::<Message, ()>(())]);
+        assert_eq!(
+            read_hello_ack(&mut broken, Duration::from_millis(20)).await,
+            Err("ATTESTOR_ACK_READ_FAILED")
+        );
+
+        let challenge = valid_challenge(1_800_000_000_000);
+        let wrong_first_type = serde_json::json!({
+            "type": "observe_research",
+            "schema": FRAME_SCHEMA,
+            "request_id": challenge.request_id,
+            "nonce": challenge.nonce,
+            "session_id": challenge.session_id,
+            "connection_generation": challenge.connection_generation,
+            "research_session_id": challenge.research_session_id,
+            "research_connection_generation": challenge.research_connection_generation,
+            "deadline_ms": challenge.deadline_ms,
+        });
+        let mut wrong_schema = valid.clone();
+        wrong_schema["schema"] = "foreign-schema".into();
+        let mut zero_generation = valid.clone();
+        zero_generation["connection_generation"] = 0.into();
+        let mut invalid_session = valid.clone();
+        invalid_session["session_id"] = "control_short".into();
+        let mut injected_owner = valid.clone();
+        injected_owner["owner"] = "CONTROL".into();
+        let mut unknown_type = valid.clone();
+        unknown_type["type"] = "start_research".into();
+        for (frame, expected) in [
+            (wrong_first_type, "ATTESTOR_ACK_REQUIRED"),
+            (wrong_schema, "ATTESTOR_ACK_INVALID"),
+            (zero_generation, "ATTESTOR_ACK_INVALID"),
+            (invalid_session, "ATTESTOR_ACK_INVALID"),
+            (injected_owner, "ATTESTOR_INVALID_FRAME"),
+            (unknown_type, "ATTESTOR_INVALID_FRAME"),
+        ] {
+            let mut reader =
+                futures_util::stream::iter([Ok::<_, ()>(Message::Text(frame.to_string().into()))]);
+            assert_eq!(
+                read_hello_ack(&mut reader, Duration::from_millis(20)).await,
+                Err(expected)
+            );
+        }
+        for (frame, expected) in [
+            (Message::Binary(vec![0].into()), "ATTESTOR_NON_TEXT_FRAME"),
+            (
+                Message::Text("x".repeat(MAX_FRAME_BYTES + 1).into()),
+                "ATTESTOR_OVERSIZED_FRAME",
+            ),
+        ] {
+            let mut reader = futures_util::stream::iter([Ok::<_, ()>(frame)]);
+            assert_eq!(
+                read_hello_ack(&mut reader, Duration::from_millis(20)).await,
+                Err(expected)
+            );
+        }
     }
 
     fn valid_challenge(now_ms: u64) -> Challenge {

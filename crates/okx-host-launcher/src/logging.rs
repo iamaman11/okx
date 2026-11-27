@@ -11,6 +11,8 @@ use std::{
 pub const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 pub const LOG_FILES: usize = 10;
 const LINE_BYTES: usize = 8192;
+// A repeatedly interrupted pipe must not keep a drain thread alive forever.
+const MAX_CONSECUTIVE_INTERRUPTED_READS: usize = 16;
 #[derive(Clone, Debug)]
 pub struct LogHealth(Arc<AtomicBool>);
 impl Default for LogHealth {
@@ -179,21 +181,45 @@ impl RotatingLog {
         }
     }
 }
+fn update_log(log: &Mutex<RotatingLog>, update: impl FnOnce(&mut RotatingLog)) {
+    let mut writer = match log.lock() {
+        Ok(writer) => writer,
+        Err(poisoned) => {
+            // Keep consuming the child's pipe, but never report a poisoned
+            // log as a complete observation of the child process.
+            let writer = poisoned.into_inner();
+            writer.health.partial();
+            writer
+        }
+    };
+    update(&mut writer);
+}
+
 pub fn drain<R: Read>(mut reader: R, log: Arc<Mutex<RotatingLog>>) {
     let mut block = [0u8; 4096];
+    let mut interrupted_reads = 0;
     loop {
         match reader.read(&mut block) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(n) => {
-                if let Ok(mut writer) = log.lock() {
-                    writer.append(&block[..n]);
-                }
+                interrupted_reads = 0;
+                update_log(&log, |writer| writer.append(&block[..n]));
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::Interrupted
+                    && interrupted_reads < MAX_CONSECUTIVE_INTERRUPTED_READS =>
+            {
+                interrupted_reads += 1;
+            }
+            Err(_) => {
+                // EOF is the only clean end of the stream. Failed reads lose
+                // child output and must veto fully_observed in CONTROL.
+                update_log(&log, |writer| writer.health.partial());
+                break;
             }
         }
     }
-    if let Ok(mut writer) = log.lock() {
-        writer.finish();
-    }
+    update_log(&log, RotatingLog::finish);
 }
 pub fn spawn_drain<R: Read + Send + 'static>(
     reader: R,
@@ -289,6 +315,101 @@ mod tests {
             Arc::new(Mutex::new(writer)),
         );
         assert_eq!(read.load(Ordering::Relaxed), 1024 * 1024);
+        assert!(!health.complete());
+    }
+    #[test]
+    fn failed_pipe_read_marks_observation_partial_and_preserves_prior_lines() {
+        struct BrokenPipe(usize);
+        impl Read for BrokenPipe {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    self.0 = 1;
+                    let content = b"observed child output\n";
+                    bytes[..content.len()].copy_from_slice(content);
+                    Ok(content.len())
+                } else {
+                    Err(io::Error::other("simulated pipe read failure"))
+                }
+            }
+        }
+        let path = path("pipe-read-error");
+        let log = RotatingLog::open(&path).unwrap();
+        let health = log.health();
+        drain(BrokenPipe(0), Arc::new(Mutex::new(log)));
+        assert_eq!(fs::read_to_string(path).unwrap(), "observed child output\n");
+        assert!(!health.complete());
+    }
+    #[test]
+    fn transient_interrupted_read_resumes_without_losing_completeness() {
+        struct InterruptedOnce(usize);
+        impl Read for InterruptedOnce {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                match self.0 {
+                    0 => {
+                        self.0 += 1;
+                        Err(io::ErrorKind::Interrupted.into())
+                    }
+                    1 => {
+                        self.0 += 1;
+                        let content = b"complete child output\n";
+                        bytes[..content.len()].copy_from_slice(content);
+                        Ok(content.len())
+                    }
+                    _ => Ok(0),
+                }
+            }
+        }
+        let path = path("pipe-interrupted");
+        let log = RotatingLog::open(&path).unwrap();
+        let health = log.health();
+        drain(InterruptedOnce(0), Arc::new(Mutex::new(log)));
+        assert_eq!(fs::read_to_string(path).unwrap(), "complete child output\n");
+        assert!(health.complete());
+    }
+    #[test]
+    fn repeated_interrupted_reads_are_bounded_and_partial() {
+        use std::sync::atomic::AtomicUsize;
+        struct AlwaysInterrupted(Arc<AtomicUsize>);
+        impl Read for AlwaysInterrupted {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(io::ErrorKind::Interrupted.into())
+            }
+        }
+        let path = path("pipe-always-interrupted");
+        let log = RotatingLog::open(&path).unwrap();
+        let health = log.health();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        drain(
+            AlwaysInterrupted(attempts.clone()),
+            Arc::new(Mutex::new(log)),
+        );
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            MAX_CONSECUTIVE_INTERRUPTED_READS + 1
+        );
+        assert!(!health.complete());
+    }
+    #[test]
+    fn poisoned_log_mutex_keeps_draining_but_never_claims_complete() {
+        let path = path("poisoned-log");
+        let log = RotatingLog::open(&path).unwrap();
+        let health = log.health();
+        let shared = Arc::new(Mutex::new(log));
+        let poisoned = shared.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned.lock().unwrap();
+                panic!("simulate poisoned log writer");
+            })
+            .join()
+            .is_err()
+        );
+        drain(io::Cursor::new(b"output after poisoned mutex\n"), shared);
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "output after poisoned mutex\n"
+        );
         assert!(!health.complete());
     }
     #[test]
