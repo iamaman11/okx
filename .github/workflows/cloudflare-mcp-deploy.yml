@@ -43,6 +43,7 @@ jobs:
         shell: bash
         env:
           OKX_RESEARCH_RUNTIME_TOKEN_SHA256: ${{ secrets.OKX_RESEARCH_RUNTIME_TOKEN_SHA256 }}
+          OKX_CONTROL_ATTEST_TOKEN_SHA256: ${{ secrets.OKX_CONTROL_ATTEST_TOKEN_SHA256 }}
         run: |
           set -euo pipefail
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN missing"; exit 20; }
@@ -55,6 +56,15 @@ jobs:
           test "$OKX_RESEARCH_RUNTIME_TOKEN_SHA256" != "$engine_fingerprint" || {
             echo 'Research and Engine fingerprints must be distinct'; exit 29;
           }
+          if test -n "$OKX_CONTROL_ATTEST_TOKEN_SHA256"; then
+            [[ "$OKX_CONTROL_ATTEST_TOKEN_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo 'protected CONTROL attestor fingerprint invalid'; exit 30;
+            }
+            if test "$OKX_CONTROL_ATTEST_TOKEN_SHA256" = "$engine_fingerprint" ||
+               test "$OKX_CONTROL_ATTEST_TOKEN_SHA256" = "$OKX_RESEARCH_RUNTIME_TOKEN_SHA256"; then
+              echo 'CONTROL attestor fingerprint must differ from runtime owners'; exit 31;
+            fi
+          fi
 
       - name: One-time v2 installation input preflight
         shell: bash
@@ -85,6 +95,7 @@ jobs:
         shell: bash
         env:
           OKX_RESEARCH_RUNTIME_TOKEN_SHA256: ${{ secrets.OKX_RESEARCH_RUNTIME_TOKEN_SHA256 }}
+          OKX_CONTROL_ATTEST_TOKEN_SHA256: ${{ secrets.OKX_CONTROL_ATTEST_TOKEN_SHA256 }}
         run: |
           set -euo pipefail
           test "${GITHUB_REF}" = "refs/heads/main" || { echo "must deploy exact main"; exit 21; }
@@ -92,8 +103,8 @@ jobs:
           [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid tree"; exit 22; }
           echo "WORKER_DEPLOY_SOURCE_TREE=$SOURCE_TREE"
           # Build one complete, checked configuration. --var replaces config vars.
-          node scripts/release-config.mjs "$SOURCE_TREE" wrangler.release.jsonc
           trap 'rm -f wrangler.release.jsonc' EXIT
+          node scripts/release-config.mjs "$SOURCE_TREE" wrangler.release.jsonc
           npx wrangler deploy --config wrangler.release.jsonc
 
       - name: Initialize isolated clean-v2 governance once
