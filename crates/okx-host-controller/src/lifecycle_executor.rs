@@ -811,8 +811,8 @@ impl HostExecutor {
             NATIVE_IDENTITY_TIMEOUT,
         )
         .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
-        let identity: NativeAgentIdentity =
-            serde_json::from_slice(&output).map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
+        let identity: NativeAgentIdentity = serde_json::from_slice(&output)
+            .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
         if identity.schema != "okx.agent.identity/v1"
             || identity.key_id != "agent-key-1"
             || identity.public_key.is_empty()
@@ -1624,7 +1624,10 @@ fn run_logged_child(
     command_name: &'static str,
 ) -> HostControlResult<()> {
     let job = AgentJob::new()?;
-    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
     job.assign(&mut child)?;
     let stdout = child
         .stdout
@@ -2995,10 +2998,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn logged_child_bounded_completion_and_failure_codes() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-logged-child-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-logged-child-test-{}", std::process::id()));
         let mut success = Command::new("cmd");
         success.arg("/C").arg("echo completed");
         run_logged_child(
@@ -3111,10 +3112,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn logged_child_with_inherited_pipe_descendant_is_not_pass() {
-        let root = std::env::temp_dir().join(format!(
-            "okx-logged-descendant-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("okx-logged-descendant-test-{}", std::process::id()));
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .arg("logged_child_inherited_pipe_fixture")
@@ -3147,9 +3146,10 @@ mod tests {
     #[test]
     fn oversized_native_mutation_receipt_is_unknown_not_retryable() {
         let mut command = Command::new("cmd");
-        command
-            .arg("/C")
-            .arg(format!("echo {}", "x".repeat(NATIVE_REPLY_MAX_BYTES as usize + 64)));
+        command.arg("/C").arg(format!(
+            "echo {}",
+            "x".repeat(NATIVE_REPLY_MAX_BYTES as usize + 64)
+        ));
         let error = bounded_native_output(&mut command, Duration::from_secs(15))
             .expect_err("an oversized receipt cannot confirm a completed native effect");
         assert_eq!(error.code(), "NATIVE_STORAGE_OUTCOME_UNKNOWN");

@@ -758,8 +758,8 @@ mod identity_probe_cli_contract_tests {
             })
         );
         assert!(!present_json.to_string().contains("private"));
-        let missing = identity_probe_reply(Err(AgentError::IdentityNotFound("agent-key-1".into())))
-            .unwrap();
+        let missing =
+            identity_probe_reply(Err(AgentError::IdentityNotFound("agent-key-1".into()))).unwrap();
         assert_eq!(
             serde_json::to_value(missing).unwrap(),
             serde_json::json!({"schema": IDENTITY_PROBE_SCHEMA_V1, "state": "MISSING"})
