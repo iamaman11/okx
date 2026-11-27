@@ -75,6 +75,9 @@ pub enum HostControlError {
     #[error("required command failed: {0}")]
     CommandFailed(&'static str),
 
+    #[error("required command timed out or did not finish draining: {0}")]
+    CommandTimedOut(&'static str),
+
     #[error("okx-agent.exe is not built")]
     AgentBinaryMissing,
 
@@ -213,6 +216,7 @@ impl HostControlError {
             Self::BranchMismatch => "BRANCH_MISMATCH",
             Self::MainNotSynced => "MAIN_NOT_SYNCED",
             Self::CommandFailed(_) => "COMMAND_FAILED",
+            Self::CommandTimedOut(_) => "COMMAND_TIMED_OUT",
             Self::AgentBinaryMissing => "AGENT_BINARY_MISSING",
             Self::AgentRunning => "AGENT_RUNNING",
             Self::InvalidInstallSource => "INVALID_INSTALL_SOURCE",

@@ -85,11 +85,18 @@ impl AgentJob {
 
         let ok = unsafe { AssignProcessToJobObject(self.handle, child.as_raw_handle() as _) };
         if ok == 0 {
+            let error = std::io::Error::last_os_error().to_string();
             let _ = child.kill();
-            let _ = child.wait();
-            return Err(HostControlError::JobAssignment(
-                std::io::Error::last_os_error().to_string(),
-            ));
+            // Assignment failed, so the Job cannot guarantee termination.
+            // Never block indefinitely reaping a child that resists kill.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while let Ok(None) = child.try_wait() {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            return Err(HostControlError::JobAssignment(error));
         }
 
         Ok(())

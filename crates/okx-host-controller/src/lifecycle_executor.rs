@@ -2,9 +2,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Command, ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
     },
     time::{Duration, Instant},
@@ -47,7 +48,52 @@ const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
 const NATIVE_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(300);
 const ENGINE_CONTRACT_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_CREDENTIAL_TIMEOUT: Duration = Duration::from_secs(15);
+const NATIVE_IDENTITY_TIMEOUT: Duration = Duration::from_secs(15);
+const WORKSPACE_TEST_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+const LOG_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const CHILD_REAP_GRACE: Duration = Duration::from_secs(1);
 const NATIVE_REPLY_MAX_BYTES: u64 = 4096;
+const IDENTITY_PROBE_SCHEMA_V1: &str = "okx.agent.identity-probe/v1";
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct NativeAgentIdentity {
+    schema: String,
+    key_id: String,
+    public_key: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "state", deny_unknown_fields)]
+enum NativeIdentityProbe {
+    #[serde(rename = "PRESENT")]
+    Present {
+        schema: String,
+        identity: NativeAgentIdentity,
+    },
+    #[serde(rename = "MISSING")]
+    Missing { schema: String },
+}
+
+fn parse_identity_probe(bytes: &[u8]) -> HostControlResult<Option<Value>> {
+    let probe: NativeIdentityProbe = serde_json::from_slice(bytes).map_err(|_| {
+        HostControlError::ArtifactVerification("native identity probe response invalid")
+    })?;
+    match probe {
+        NativeIdentityProbe::Missing { schema } if schema == IDENTITY_PROBE_SCHEMA_V1 => Ok(None),
+        NativeIdentityProbe::Present { schema, identity }
+            if schema == IDENTITY_PROBE_SCHEMA_V1
+                && identity.schema == "okx.agent.identity/v1"
+                && identity.key_id == "agent-key-1"
+                && !identity.public_key.is_empty() =>
+        {
+            Ok(Some(serde_json::to_value(identity)?))
+        }
+        _ => Err(HostControlError::ArtifactVerification(
+            "native identity probe response invalid",
+        )),
+    }
+}
 
 fn validate_engine_contract(bytes: &[u8]) -> HostControlResult<()> {
     #[derive(serde::Deserialize)]
@@ -79,9 +125,69 @@ fn inspect_engine_contract(binary: &Path) -> HostControlResult<()> {
     validate_engine_contract(&bytes)
 }
 
-/// Run the existing installed Agent exactly once, without a pipe deadlock.
-/// Windows waits on the native process handle; an ephemeral OS Job owns every
-fn bounded_native_output(command: &mut Command, timeout: Duration) -> HostControlResult<Vec<u8>> {
+/// Termination is best effort. A finite reap prevents an OS cleanup failure
+/// from turning an already uncertain native outcome into a host hang.
+fn terminate_owned_child(child: &mut Child, job: &AgentJob) {
+    let _ = job.terminate();
+    let _ = child.kill();
+    // Cleanup must not reintroduce an unlimited wait if the OS refuses to
+    // terminate the process. Child and Job handles are then simply dropped.
+    let reap_deadline = Instant::now() + CHILD_REAP_GRACE;
+    while let Ok(None) = child.try_wait() {
+        if Instant::now() >= reap_deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_owned_child(
+    child: &mut Child,
+    job: &AgentJob,
+    timeout: Duration,
+) -> HostControlResult<Option<ExitStatus>> {
+    let millis: u32 = timeout
+        .as_millis()
+        .try_into()
+        .map_err(|_| HostControlError::ControlResponseBudgetInvariant)?;
+    if millis == 0 {
+        return Err(HostControlError::ControlResponseBudgetInvariant);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+        let outcome = unsafe { WaitForSingleObject(child.as_raw_handle() as _, millis) };
+        if outcome == WAIT_OBJECT_0
+            && let Ok(status) = child.wait()
+        {
+            return Ok(Some(status));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(Some(status)),
+                Err(_) => break,
+                Ok(None) if Instant::now() >= deadline => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
+    terminate_owned_child(child, job);
+    Ok(None)
+}
+
+/// One native receipt with explicit exit status. Read-only callers may
+/// distinguish a failed command; mutating callers require proven success.
+fn bounded_native_status_output(
+    command: &mut Command,
+    timeout: Duration,
+) -> HostControlResult<(ExitStatus, Vec<u8>)> {
     #[cfg(not(windows))]
     {
         let _ = (command, timeout);
@@ -89,15 +195,8 @@ fn bounded_native_output(command: &mut Command, timeout: Duration) -> HostContro
     }
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
-        use windows_sys::Win32::System::Threading::WaitForSingleObject;
-
-        let millis: u32 = timeout
-            .as_millis()
-            .try_into()
-            .map_err(|_| HostControlError::ControlResponseBudgetInvariant)?;
-        if millis == 0 {
+        // Validate the deadline before creating a receipt or spawning a child.
+        if timeout.is_zero() || timeout.as_millis() > u32::MAX as u128 {
             return Err(HostControlError::ControlResponseBudgetInvariant);
         }
         let mut nonce = [0u8; 16];
@@ -115,40 +214,64 @@ fn bounded_native_output(command: &mut Command, timeout: Duration) -> HostContro
             .write(true)
             .create_new(true)
             .open(&output_path)?;
-        let result = (|| -> HostControlResult<Vec<u8>> {
+        let result = (|| -> HostControlResult<(ExitStatus, Vec<u8>)> {
             let job = AgentJob::new()?;
             let mut child = command
+                .stdin(Stdio::null())
                 .stdout(Stdio::from(receipt.try_clone()?))
                 .stderr(Stdio::null())
                 .spawn()?;
-            job.assign(&mut child)?;
-            let outcome = unsafe { WaitForSingleObject(child.as_raw_handle() as _, millis) };
-            if outcome != WAIT_OBJECT_0 {
-                let error = std::io::Error::last_os_error();
-                // The temporary KILL_ON_JOB_CLOSE Job also owns descendants.
-                let _ = child.kill();
-                let _ = child.wait();
-                if outcome == WAIT_TIMEOUT {
-                    return Err(HostControlError::NativeStorageOutcomeUnknown);
-                }
-                return Err(error.into());
-            }
-            if !child.wait()?.success() {
+            // Spawn already happened: even failed Job assignment may follow a
+            // credential/SQL side effect, so this is never a retryable error.
+            job.assign(&mut child)
+                .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
+            let status = wait_owned_child(&mut child, &job, timeout)?
+                .ok_or(HostControlError::NativeStorageOutcomeUnknown)?;
+            if !job.is_empty().unwrap_or(false) {
+                let _ = job.terminate();
                 return Err(HostControlError::NativeStorageOutcomeUnknown);
             }
-            if receipt.metadata()?.len() > NATIVE_REPLY_MAX_BYTES {
-                return Err(HostControlError::ControlResponseBudgetInvariant);
+            if receipt
+                .metadata()
+                .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?
+                .len()
+                > NATIVE_REPLY_MAX_BYTES
+            {
+                return Err(HostControlError::NativeStorageOutcomeUnknown);
             }
-            receipt.rewind()?;
+            receipt
+                .rewind()
+                .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
             let mut bytes = Vec::new();
-            receipt.read_to_end(&mut bytes)?;
-            Ok(bytes)
+            receipt
+                .read_to_end(&mut bytes)
+                .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
+            Ok((status, bytes))
         })();
         drop(receipt);
-        // an owner marker, restart signal, authorization or replay target.
+        // A temporary output receipt is never an owner/replay marker.
         let _ = fs::remove_file(output_path);
         result
     }
+}
+
+fn bounded_native_output(command: &mut Command, timeout: Duration) -> HostControlResult<Vec<u8>> {
+    let (status, bytes) = bounded_native_status_output(command, timeout)?;
+    if !status.success() {
+        return Err(HostControlError::NativeStorageOutcomeUnknown);
+    }
+    Ok(bytes)
+}
+
+fn bounded_native_identity_output(
+    command: &mut Command,
+    timeout: Duration,
+) -> HostControlResult<Vec<u8>> {
+    let (status, bytes) = bounded_native_status_output(command, timeout)?;
+    if !status.success() {
+        return Err(HostControlError::CommandFailed("okx-trading-engine"));
+    }
+    Ok(bytes)
 }
 
 /// Credential bytes enter a verified native child only after CONTROL assigns
@@ -165,10 +288,6 @@ fn bounded_native_secret_input(
     }
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-        use windows_sys::Win32::System::Threading::WaitForSingleObject;
-
         let millis: u32 = timeout
             .as_millis()
             .try_into()
@@ -194,33 +313,17 @@ fn bounded_native_secret_input(
             input.write_all(b"\n")
         })();
         if write.is_err() {
-            let _ = job.terminate();
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_owned_child(&mut child, &job);
             // Child may have consumed some or all of the credential before
             // closing stdin; a failed write is not proof of no external effect.
             return Err(HostControlError::NativeStorageOutcomeUnknown);
         }
 
-        let outcome = unsafe { WaitForSingleObject(child.as_raw_handle() as _, millis) };
-        if outcome != WAIT_OBJECT_0 {
-            let _ = job.terminate();
-            let _ = child.kill();
-            let _ = child.wait();
-            // The child already received the secret. A timeout, failed wait or
-            // abandoned wait all leave its external effect unproven.
-            return Err(HostControlError::NativeStorageOutcomeUnknown);
-        }
-        let status = match child.wait() {
-            Ok(status) => status,
-            Err(_) => {
-                let _ = job.terminate();
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(HostControlError::NativeStorageOutcomeUnknown);
-            }
-        };
-        if !status.success() {
+        // The child already received the secret. Even a failed native wait or
+        // exit-status read leaves the external outcome unknown.
+        let status = wait_owned_child(&mut child, &job, timeout)?;
+        if !status.is_some_and(|status| status.success()) || !job.is_empty().unwrap_or(false) {
+            terminate_owned_child(&mut child, &job);
             return Err(HostControlError::NativeStorageOutcomeUnknown);
         }
         Ok(())
@@ -690,16 +793,32 @@ impl HostExecutor {
 
     fn init_agent_identity(&mut self) -> HostControlResult<Value> {
         self.require_agent_binary()?;
-
-        if let Ok(identity) = self.read_agent_identity() {
+        let probe = bounded_native_identity_output(
+            self.agent_command().arg("identity-probe"),
+            NATIVE_IDENTITY_TIMEOUT,
+        )?;
+        if let Some(identity) = parse_identity_probe(&probe)? {
             return Ok(json!({
                 "disposition": "EXISTING",
                 "identity": identity
             }));
         }
 
-        let output = self.agent_output(&["init-key"])?;
-        let identity: Value = serde_json::from_slice(&output.stdout)?;
+        // Only a verified MISSING probe can create a key. After the native
+        // invocation begins, even failed output parsing is an unknown effect.
+        let output = bounded_native_output(
+            self.agent_command().arg("init-key"),
+            NATIVE_IDENTITY_TIMEOUT,
+        )
+        .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
+        let identity: NativeAgentIdentity = serde_json::from_slice(&output)
+            .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
+        if identity.schema != "okx.agent.identity/v1"
+            || identity.key_id != "agent-key-1"
+            || identity.public_key.is_empty()
+        {
+            return Err(HostControlError::NativeStorageOutcomeUnknown);
+        }
 
         Ok(json!({
             "disposition": "CREATED",
@@ -932,16 +1051,15 @@ impl HostExecutor {
             command.arg("--account-key").arg(key);
         }
         let bytes = bounded_native_output(&mut command, NATIVE_INITIALIZATION_TIMEOUT)?;
-        let reply: Value = serde_json::from_slice(&bytes)?;
+        let reply: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
         if reply["installation_id"] != installation
             || reply["operation_id"] != operation
             || reply["release"] != release
             || reply["status"] != "completed"
             || account.is_some_and(|key| reply["account_key"] != key)
         {
-            return Err(HostControlError::ArtifactVerification(
-                "native initialization receipt binding invalid",
-            ));
+            return Err(HostControlError::NativeStorageOutcomeUnknown);
         }
         Ok(reply)
     }
@@ -1001,10 +1119,11 @@ impl HostExecutor {
         if let Some(o) = operation {
             command.arg("--operation-id").arg(o);
         }
-        Ok(serde_json::from_slice(&bounded_native_output(
+        serde_json::from_slice(&bounded_native_output(
             &mut command,
             NATIVE_INITIALIZATION_TIMEOUT,
-        )?)?)
+        )?)
+        .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)
     }
 
     fn acceptance_kill_agent(&mut self) -> HostControlResult<Value> {
@@ -1065,24 +1184,17 @@ impl HostExecutor {
 
     fn read_agent_identity(&self) -> HostControlResult<Value> {
         self.require_agent_binary()?;
-        let output = self.agent_output(&["identity"])?;
-        Ok(serde_json::from_slice(&output.stdout)?)
+        let output = bounded_native_identity_output(
+            self.agent_command().arg("identity"),
+            NATIVE_IDENTITY_TIMEOUT,
+        )?;
+        Ok(serde_json::from_slice(&output)?)
     }
 
     fn agent_command(&self) -> Command {
         let mut command = hidden_command(self.agent_binary());
         command.current_dir(self.runtime_dir());
         command
-    }
-
-    fn agent_output(&self, args: &[&str]) -> HostControlResult<std::process::Output> {
-        let output = self.agent_command().args(args).output()?;
-
-        if !output.status.success() {
-            return Err(HostControlError::CommandFailed("okx-trading-engine"));
-        }
-
-        Ok(output)
     }
 
     pub fn fetch_origin_main_tree(&self) -> HostControlResult<String> {
@@ -1446,31 +1558,15 @@ impl HostExecutor {
         let err_log = okx_host_launcher::logging::RotatingLog::open(
             self.runtime_dir().join(format!("{log_name}.stderr")),
         )?;
-        let mut child = hidden_command(program)
-            .args(args)
-            .current_dir(&self.repo_root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(HostControlError::InvalidExecutionPath)?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or(HostControlError::InvalidExecutionPath)?;
-        let out_thread = okx_host_launcher::logging::spawn_drain(stdout, out_log);
-        let err_thread = okx_host_launcher::logging::spawn_drain(stderr, err_log);
-        let status = child.wait()?;
-        let _ = out_thread.join();
-        let _ = err_thread.join();
-
-        if status.success() {
-            Ok(())
-        } else {
-            Err(HostControlError::CommandFailed(command_name))
-        }
+        let mut command = hidden_command(program);
+        command.args(args).current_dir(&self.repo_root);
+        run_logged_child(
+            &mut command,
+            out_log,
+            err_log,
+            WORKSPACE_TEST_TIMEOUT,
+            command_name,
+        )
     }
 
     fn agent_binary(&self) -> PathBuf {
@@ -1484,6 +1580,105 @@ impl HostExecutor {
     fn agent_provenance(&self) -> InstalledAgentProvenanceStore {
         InstalledAgentProvenanceStore::at(self.runtime_root.join("installed-agent.json"))
     }
+}
+
+fn joined_log_drains_within(
+    stdout: std::thread::JoinHandle<()>,
+    stderr: std::thread::JoinHandle<()>,
+    grace: Duration,
+) -> bool {
+    let deadline = Instant::now() + grace;
+    while !stdout.is_finished() || !stderr.is_finished() {
+        if Instant::now() >= deadline {
+            // No unconditional join: an escaped pipe holder must not block
+            // CONTROL forever. Job ownership handles native descendants.
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out_ok = stdout.join().is_ok();
+    let err_ok = stderr.join().is_ok();
+    out_ok && err_ok
+}
+
+struct EofObservedReader<R> {
+    input: R,
+    eof: Arc<AtomicBool>,
+}
+
+impl<R: Read> Read for EofObservedReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let count = self.input.read(buffer)?;
+        if count == 0 {
+            self.eof.store(true, Ordering::Release);
+        }
+        Ok(count)
+    }
+}
+
+fn run_logged_child(
+    command: &mut Command,
+    out_log: okx_host_launcher::logging::RotatingLog,
+    err_log: okx_host_launcher::logging::RotatingLog,
+    timeout: Duration,
+    command_name: &'static str,
+) -> HostControlResult<()> {
+    let job = AgentJob::new()?;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    job.assign(&mut child)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(HostControlError::InvalidExecutionPath)?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or(HostControlError::InvalidExecutionPath)?;
+    let out_eof = Arc::new(AtomicBool::new(false));
+    let err_eof = Arc::new(AtomicBool::new(false));
+    let out_thread = okx_host_launcher::logging::spawn_drain(
+        EofObservedReader {
+            input: stdout,
+            eof: Arc::clone(&out_eof),
+        },
+        out_log,
+    );
+    let err_thread = okx_host_launcher::logging::spawn_drain(
+        EofObservedReader {
+            input: stderr,
+            eof: Arc::clone(&err_eof),
+        },
+        err_log,
+    );
+
+    let status = wait_owned_child(&mut child, &job, timeout)?;
+    #[cfg(windows)]
+    let quiescent = job.is_empty().unwrap_or(false);
+    #[cfg(not(windows))]
+    let quiescent = true;
+    if !quiescent {
+        terminate_owned_child(&mut child, &job);
+    }
+    // Even an exited cargo parent may have descendants retaining pipe writes.
+    // Closing the ephemeral Job before joining the readers guarantees those
+    // owned descendants cannot hold the pipe open indefinitely.
+    drop(job);
+    let drained = joined_log_drains_within(out_thread, err_thread, LOG_DRAIN_TIMEOUT);
+    if status.is_none()
+        || !quiescent
+        || !drained
+        || !out_eof.load(Ordering::Acquire)
+        || !err_eof.load(Ordering::Acquire)
+    {
+        return Err(HostControlError::CommandTimedOut(command_name));
+    }
+    if !status.is_some_and(|status| status.success()) {
+        return Err(HostControlError::CommandFailed(command_name));
+    }
+    Ok(())
 }
 
 const ENGINE_AGENT_ARGS: &[&str] = &[
@@ -2758,6 +2953,188 @@ mod tests {
         );
     }
 
+    #[test]
+    fn identity_probe_accepts_only_explicit_versioned_missing_or_present() {
+        let missing = br#"{"schema":"okx.agent.identity-probe/v1","state":"MISSING"}"#;
+        assert!(parse_identity_probe(missing).unwrap().is_none());
+
+        let present = br#"{"schema":"okx.agent.identity-probe/v1","state":"PRESENT","identity":{"schema":"okx.agent.identity/v1","key_id":"agent-key-1","public_key":"nonempty"}}"#;
+        let identity = parse_identity_probe(present).unwrap().unwrap();
+        assert_eq!(identity["key_id"], "agent-key-1");
+
+        for invalid in [
+            br#"{"schema":"okx.agent.identity-probe/v0","state":"MISSING"}"#.as_slice(),
+            br#"{"schema":"okx.agent.identity-probe/v1","state":"MISSING","identity":{"schema":"okx.agent.identity/v1","key_id":"agent-key-1","public_key":"x"}}"#,
+            br#"{"schema":"okx.agent.identity-probe/v1","state":"PRESENT"}"#,
+            br#"{"schema":"okx.agent.identity-probe/v1","state":"UNKNOWN"}"#,
+            br#"{"schema":"okx.agent.identity-probe/v1","state":"PRESENT","identity":{"schema":"okx.agent.identity/v1","key_id":"wrong-key","public_key":"x"}}"#,
+            br#"{"schema":"okx.agent.identity-probe/v1","state":"PRESENT","identity":{"schema":"okx.agent.identity/v1","key_id":"agent-key-1","public_key":"x","private_key":"NO"}}"#,
+        ] {
+            let error = parse_identity_probe(invalid).expect_err("no implicit CREATE on bad probe");
+            assert_eq!(error.code(), "ARTIFACT_VERIFICATION_FAILED");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absent_identity_probe_nonzero_is_not_a_storage_mutation_result() {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("exit /b 1");
+        let error = bounded_native_identity_output(&mut command, Duration::from_secs(15))
+            .expect_err("nonzero native identity probe is not a valid MISSING reply");
+        assert_eq!(error.code(), "COMMAND_FAILED");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn identity_probe_timeout_is_not_interpreted_as_missing() {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("ping -n 30 127.0.0.1 >nul");
+        let error = bounded_native_identity_output(&mut command, Duration::from_millis(30))
+            .expect_err("a hung read-only probe cannot authorize initialization");
+        assert_eq!(error.code(), "NATIVE_STORAGE_OUTCOME_UNKNOWN");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn logged_child_bounded_completion_and_failure_codes() {
+        let root =
+            std::env::temp_dir().join(format!("okx-logged-child-test-{}", std::process::id()));
+        let mut success = Command::new("cmd");
+        success.arg("/C").arg("echo completed");
+        run_logged_child(
+            &mut success,
+            okx_host_launcher::logging::RotatingLog::open(root.join("pass.log")).unwrap(),
+            okx_host_launcher::logging::RotatingLog::open(root.join("pass.err")).unwrap(),
+            Duration::from_secs(15),
+            "test fixture",
+        )
+        .expect("completed child has terminal status and drained logs");
+
+        let mut failed = Command::new("cmd");
+        failed.arg("/C").arg("exit /b 7");
+        let error = run_logged_child(
+            &mut failed,
+            okx_host_launcher::logging::RotatingLog::open(root.join("fail.log")).unwrap(),
+            okx_host_launcher::logging::RotatingLog::open(root.join("fail.err")).unwrap(),
+            Duration::from_secs(15),
+            "test fixture",
+        )
+        .expect_err("failed cargo child is not PASS");
+        assert_eq!(error.code(), "COMMAND_FAILED");
+
+        let mut hung = Command::new("cmd");
+        hung.arg("/C").arg("ping -n 30 127.0.0.1 >nul");
+        let error = run_logged_child(
+            &mut hung,
+            okx_host_launcher::logging::RotatingLog::open(root.join("hung.log")).unwrap(),
+            okx_host_launcher::logging::RotatingLog::open(root.join("hung.err")).unwrap(),
+            Duration::from_millis(30),
+            "test fixture",
+        )
+        .expect_err("a hung cargo child must be stopped");
+        assert_eq!(error.code(), "COMMAND_TIMED_OUT");
+    }
+
+    #[test]
+    fn logged_pipe_drain_deadline_does_not_join_a_stuck_reader() {
+        let (tx, rx) = mpsc::channel::<()>();
+        let stuck = std::thread::spawn(move || {
+            let _ = rx.recv();
+        });
+        let finished = std::thread::spawn(|| {});
+        let began = Instant::now();
+        assert!(!joined_log_drains_within(
+            finished,
+            stuck,
+            Duration::from_millis(30)
+        ));
+        assert!(began.elapsed() < Duration::from_secs(2));
+        drop(tx);
+    }
+
+    #[test]
+    fn logged_pipe_observation_requires_real_eof_not_failed_read() {
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("injected log pipe loss"))
+            }
+        }
+        let failed_eof = Arc::new(AtomicBool::new(false));
+        let mut failed = EofObservedReader {
+            input: FailedRead,
+            eof: Arc::clone(&failed_eof),
+        };
+        assert!(failed.read(&mut [0u8; 1]).is_err());
+        assert!(!failed_eof.load(Ordering::Acquire));
+
+        let good_eof = Arc::new(AtomicBool::new(false));
+        let mut good = EofObservedReader {
+            input: io::Cursor::new(b"x"),
+            eof: Arc::clone(&good_eof),
+        };
+        assert_eq!(good.read(&mut [0u8; 1]).unwrap(), 1);
+        assert!(!good_eof.load(Ordering::Acquire));
+        assert_eq!(good.read(&mut [0u8; 1]).unwrap(), 0);
+        assert!(good_eof.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn workspace_timeout_has_a_distinct_non_storage_error_code() {
+        assert_eq!(
+            HostControlError::CommandTimedOut("cargo test").code(),
+            "COMMAND_TIMED_OUT"
+        );
+        assert_ne!(
+            HostControlError::CommandTimedOut("cargo test").code(),
+            HostControlError::NativeStorageOutcomeUnknown.code()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn logged_child_inherited_pipe_fixture() {
+        if std::env::var_os("OKX_INHERITED_PIPE_FIXTURE").is_none() {
+            return;
+        }
+        // This child exits successfully while its grandchild retains both
+        // logging pipes. The caller must not report a false PASS or hang.
+        let mut grandchild = Command::new("cmd")
+            .arg("/C")
+            .arg("ping -n 30 127.0.0.1 >nul")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("fixture grandchild launched");
+        // Nonblocking reap only: it must still own the inherited pipes when
+        // this fixture exits, so the calling Job can prove descendant cleanup.
+        let _ = grandchild.try_wait();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn logged_child_with_inherited_pipe_descendant_is_not_pass() {
+        let root =
+            std::env::temp_dir().join(format!("okx-logged-descendant-test-{}", std::process::id()));
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("logged_child_inherited_pipe_fixture")
+            .arg("--nocapture")
+            .env("OKX_INHERITED_PIPE_FIXTURE", "1");
+        let started = Instant::now();
+        let error = run_logged_child(
+            &mut command,
+            okx_host_launcher::logging::RotatingLog::open(root.join("stdout.log")).unwrap(),
+            okx_host_launcher::logging::RotatingLog::open(root.join("stderr.log")).unwrap(),
+            Duration::from_secs(15),
+            "test fixture",
+        )
+        .expect_err("a successful parent with an active grandchild is not terminal PASS");
+        assert_eq!(error.code(), "COMMAND_TIMED_OUT");
+        assert!(started.elapsed() < Duration::from_secs(22));
+    }
+
     #[cfg(windows)]
     #[test]
     fn timed_out_native_cutover_is_typed_unknown_not_replayed() {
@@ -2765,6 +3142,19 @@ mod tests {
         command.arg("/C").arg("ping -n 30 127.0.0.1 >nul");
         let error = bounded_native_output(&mut command, Duration::from_millis(30))
             .expect_err("the child must be terminated and its outcome uncertain");
+        assert_eq!(error.code(), "NATIVE_STORAGE_OUTCOME_UNKNOWN");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn oversized_native_mutation_receipt_is_unknown_not_retryable() {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(format!(
+            "echo {}",
+            "x".repeat(NATIVE_REPLY_MAX_BYTES as usize + 64)
+        ));
+        let error = bounded_native_output(&mut command, Duration::from_secs(15))
+            .expect_err("an oversized receipt cannot confirm a completed native effect");
         assert_eq!(error.code(), "NATIVE_STORAGE_OUTCOME_UNKNOWN");
     }
     #[cfg(windows)]
