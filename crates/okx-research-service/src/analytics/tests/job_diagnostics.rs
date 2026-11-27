@@ -585,7 +585,11 @@ fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
     assert_eq!(unambiguous["matched_request_id"], shared.as_str());
     assert_eq!(unambiguous["retained"], 1);
 
-    projection.publish(snapshot(&second_job, unrelated, vec![shared.clone()]));
+    projection.publish(snapshot(
+        &second_job,
+        unrelated.clone(),
+        vec![shared.clone()],
+    ));
     let collision = projection.read_by_invocation(shared.as_str());
     assert_eq!(collision["state"], "NOT_EVALUATED");
     assert_eq!(collision["reason_code"], "AMBIGUOUS_REQUEST_ORIGIN");
@@ -598,6 +602,21 @@ fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
     // an arbitrary winner for the colliding external request identity.
     assert_eq!(projection.read(&original_job)["job"]["id"], original_job);
     assert_eq!(projection.read(&second_job)["job"]["id"], second_job);
+
+    // Replacing a snapshot must also replace its aliases. An old retry
+    // identity cannot survive a catalog projection refresh as a phantom
+    // collision; the other job's proven original identity stays intact.
+    projection.publish(snapshot(&second_job, unrelated.clone(), vec![]));
+    let restored = projection.read_by_invocation(shared.as_str());
+    assert_eq!(restored["state"], "OBSERVED");
+    assert_eq!(restored["reason_code"], "JOB_SNAPSHOT");
+    assert_eq!(restored["matched_request_id"], shared.as_str());
+    assert_eq!(restored["job"]["id"], original_job);
+    assert_eq!(restored["retained"], 2);
+    assert_eq!(
+        projection.read_by_invocation(unrelated.as_str())["job"]["id"],
+        second_job
+    );
 }
 
 #[test]
