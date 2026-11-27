@@ -172,6 +172,55 @@ fn completed_sha256_result_reference_survives_restart_without_leaking_bad_refere
     assert!(interrupted_proof["job"]["result_ref"].is_null());
 }
 #[test]
+fn legacy_bare_result_ref_rejects_64_byte_non_hex_secret_across_restart() {
+    let (jobs, path) = jobs("legacy-bare-result-guard");
+    let valid_id = "7".repeat(64);
+    let invalid_id = "8".repeat(64);
+    let valid = "a".repeat(64);
+    let marker = "DO_NOT_DISCLOSE_64_BYTE_SECRET";
+    let invalid = format!("{marker}{}", "x".repeat(64 - marker.len()));
+    assert_eq!(invalid.len(), 64);
+
+    for (id, label, artifact) in [
+        (&valid_id, "valid-legacy-bare-hex", &valid),
+        (&invalid_id, "invalid-legacy-bare-hex", &invalid),
+    ] {
+        jobs.enqueue(label.into(), id.clone()).unwrap();
+        jobs.update(id, JobState::Completed, Some(artifact.clone()), None)
+            .unwrap();
+    }
+
+    let assert_projection = |jobs: &Jobs| {
+        let accepted = jobs.diagnostic_readback(&valid_id);
+        assert_eq!(accepted["job"]["state"], "completed");
+        assert_eq!(accepted["job"]["result_ref"], valid);
+
+        let rejected = jobs.diagnostic_readback(&invalid_id);
+        assert_eq!(rejected["job"]["state"], "completed");
+        assert!(rejected["job"]["result_ref"].is_null());
+        assert!(!rejected.to_string().contains(marker));
+        // The catalog still owns its original data; only the read-only
+        // diagnostic projection is prohibited from exposing a false digest.
+        assert_eq!(
+            jobs.get(&invalid_id).unwrap().artifact.as_deref(),
+            Some(invalid.as_str())
+        );
+    };
+
+    assert_projection(&jobs);
+    drop(jobs);
+    let reopened = Jobs::open(path).unwrap();
+    assert_projection(&reopened);
+    assert_eq!(
+        reopened.diagnostic_readback(&valid_id)["job"]["origin"],
+        "durable_startup_subset"
+    );
+    assert_eq!(
+        reopened.diagnostic_readback(&invalid_id)["job"]["origin"],
+        "durable_startup_subset"
+    );
+}
+#[test]
 fn t14_partial_artifact_is_never_advertised_as_a_completed_result() {
     let (jobs, file) = jobs("partial-result");
     let pending_id = "a".repeat(64);
