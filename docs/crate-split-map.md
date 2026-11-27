@@ -95,11 +95,11 @@ RiskBook, финансовый SQLite/WAL, допуск и исполнение 
 | Изменение Ready PR | Маршрут и результат |
 | --- | --- |
 | Только `crates/okx-strategy-core/src/time_series.rs`, возможно с документацией | `RESEARCH_OWNER_ONLY` → `research-windows`. Engine/Execution не компилируются; выпускается самостоятельный Research EXE и трёхфайловый архив без Engine/Host |
-| Только Rust-код `crates/okx-host-protocol/src/` или `crates/okx-host-controller/src/` | `HOST_WINDOWS_OWNER_AND_CONSUMER`, scope `host-controller` → `host-windows`. Clippy и тесты охватывают новый протокол, Launcher, Controller и Rust Bridge; артефакт проверки содержит хэши двух host-бинарников |
-| Только Rust-код `crates/okx-host-launcher/src/` | Тот же Windows job и набор проверок, scope `host-launcher` |
-| Только Rust-код Research и Host в одном PR | `research-host`: обе проверки владельцев параллельно. Свежие бинарники Research и Host сохраняются с SHA и деревом исходников. Принятый Engine сверяется с опубликованной базой и Windows Cargo-графом, включая тесты |
+| Только явно разрешённый read-only `crates/okx-host-controller/src/attestor.rs` или тестовые Rust-файлы Host Controller/Host protocol | `HOST_WINDOWS_OWNER_AND_CONSUMER`, scope `host-controller` → параллельные `host-windows` (строгий неустановочный ZIP двух Host EXE) и `host-contracts-windows` (Clippy, тесты протокола, Launcher, Controller и Rust Bridge) |
+| Только `crates/okx-host-launcher/src/logging.rs`, `stdio_capture.rs` или тестовые Rust-файлы Launcher | Та же пара независимых Windows-проверок, scope `host-launcher`; произвольные изменения Launcher entrypoint/lifecycle выбирают полный маршрут |
+| Только Research и явно разрешённые Host-файлы в одном PR | `research-host`: `research-windows`, `host-windows` и `host-contracts-windows`; свежие Research и Host свидетельства сохраняются с SHA и деревом. Движок не пересобирается при доказанном неизменном Windows Cargo-графе |
 | Только документация или только Cloudflare MCP | Существующий маршрут соответствующего компонента, без запуска Windows-сборки |
-| Общий IPC, Domain Core, Engine/Execution, корневой Cargo, манифест нового Host-протокола, CI или неполный diff | Полный маршрут с финансовыми проверками. Для разрешённых манифестов Research или Host Controller/Launcher есть отдельный допуск по совпадению Windows Cargo closures |
+| Общий IPC и Host protocol implementation, недопущенный Host runtime/entrypoint/lifecycle, Domain Core, Engine/Execution, корневой Cargo, CI или неполный diff | Полный маршрут с финансовыми проверками. Для разрешённых манифестов Research или Host Controller/Launcher есть отдельный допуск только при доказанном совпадении Windows Cargo closures |
 
 Единый [workflow](../.github/workflows/ci.yml) выдаёт один целевой обязательный
 статус `ci`. `select-checks` выбирает владельцев; промежуточные

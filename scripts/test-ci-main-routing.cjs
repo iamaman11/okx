@@ -110,6 +110,7 @@ function checkAcceptedMainJqFixtures(yaml) {
 checkAcceptedMainJqFixtures(source);
 const windowsIpcSummary = String.raw`test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`;
 const nativeCacheJobs = [
+  ['host_component_release_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
   ['host_controller_launcher_checks', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_acceptance_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_isolation_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
@@ -147,9 +148,9 @@ function validate(yaml, fileNames) {
   assert.equal(map.size, entries.length, 'DUPLICATE_JOB_ID');
   // Finance, independent regressions and release share a single workflow.
   // The only cache-only job primes exact accepted main, outside the PR gate.
-  // One additional independently required Research-only Clippy owner. No
-  // duplicate CI aggregator or new finance runner is permitted.
-  assert.ok(map.size <= 19, 'OBSOLETE_JOB_GRAPH_REGRESSION');
+  // Host release and typed contracts run independently. No duplicate CI
+  // aggregator or finance runner is permitted.
+  assert.ok(map.size <= 20, 'OBSOLETE_JOB_GRAPH_REGRESSION');
   for (const unused of ['required_classify', 'research_package_proof', 'draft-trading-migration-512',
     'draft-riskbook-migration-510', 'trading_safety_acceptance_windows', 'cloudflare_deploy', 'readonly_observer',
     'production_recovery_promote', 'named_validate', 'all26_windows_targeted', 'required_linux', 'required_windows']) {
@@ -172,7 +173,7 @@ function validate(yaml, fileNames) {
     assert.ok(step.split('\n').includes(`          shared-key: ${shared}`), `NATIVE_CACHE_PROFILE:${id}`);
     assert.ok(step.split('\n').includes(`          save-if: ${save}`), `SCOPED_CACHE_WRITER:${id}`);
     assert.match(step, /^          cache-on-failure: false$/m);
-    if (['host_controller_launcher_checks', 'trading_engine_acceptance_windows', 'trading_engine_isolation_windows',
+    if (['host_component_release_windows', 'host_controller_launcher_checks', 'trading_engine_acceptance_windows', 'trading_engine_isolation_windows',
       'trading_engine_regressions_windows',
       'trading_engine_build_windows', 'research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) {
       for (const profile of ['DEV', 'TEST'])
@@ -568,30 +569,52 @@ function validate(yaml, fileNames) {
   assert.match(researchRelease, /AMBIGUOUS_NEAREST_NATIVE_BASE/);
   assert.match(researchRelease, /\$scopeArgs \+= '--engine-only'/);
   assert.doesNotMatch(researchRelease, /gh release delete|--cleanup-tag/);
-  const host = job('host_controller_launcher_checks');
-  assert.match(host, /id: host-test-cache/);
-  assert.match(host, /Host Cargo cache exact hit: \$\{\{ steps\.host-test-cache\.outputs\.cache-hit \}\}/);
-  assert.match(host, /cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
-  assert.match(host, /cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
-  assert.doesNotMatch(host, /cargo build --locked --release -p okx-trading-engine/);
-  assert.match(host, /schema = 'okx\.windows\.host-component\/v1'/);
-  assert.match(host, /ci_status_policy = 'okx\.github\.actions\.host-ready\/v1'/);
-  assert.match(host, /release_is_complete = \$false/);
-  assert.match(host, /installation_allowed = \$false/);
-  assert.match(host, /python3 -B scripts\/verify_host_component_release\.py \$dist \$head \$tree/);
-  assert.match(host, /HOST_RELEASE_CHECKOUT_DIRTY_BEFORE_BUILD/);
-  assert.match(host, /HOST_RELEASE_CHECKOUT_DIRTY_AFTER_BUILD/,
+  const hostRelease = job('host_component_release_windows');
+  const hostContracts = job('host_controller_launcher_checks');
+  assert.match(hostRelease, /id: host-release-cache/);
+  assert.match(hostRelease, /Host release Cargo cache exact hit: \$\{\{ steps\.host-release-cache\.outputs\.cache-hit \}\}/);
+  assert.match(hostContracts, /id: host-test-cache/);
+  assert.match(hostContracts, /Host tests Cargo cache exact hit: \$\{\{ steps\.host-test-cache\.outputs\.cache-hit \}\}/);
+  assert.match(hostContracts, /cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
+  assert.match(hostContracts, /cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
+  assert.doesNotMatch(hostRelease, /cargo test --locked|cargo clippy --locked|test-windows-unify-root\.ps1/,
+    'HOST_RELEASE_MUST_NOT_SHARE_PR_TEST_RUNNER');
+  assert.doesNotMatch(hostContracts, /cargo build --locked --release|okx-host-component-\$\{\{|host-component-proof|target\/release/,
+    'HOST_CONTRACTS_MUST_NOT_PRODUCE_RELEASE_BYTES');
+  assert.doesNotMatch(hostContracts, /actions\/upload-artifact/,
+    'HOST_CONTRACTS_MUST_NOT_UPLOAD_UNVERIFIED_RELEASE_BYTES');
+  const hostOwnerIf = "if: needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.component_scope == 'host-controller' || needs.component_impact.outputs.component_scope == 'host-launcher' || needs.component_impact.outputs.component_scope == 'research-host')";
+  for (const block of [hostRelease, hostContracts]) {
+    assert.match(block, /^    needs: component_impact$/m,
+      'HOST_RELEASE_AND_CONTRACTS_MUST_RUN_IN_PARALLEL');
+    assert.ok(block.includes('    ' + hostOwnerIf + '\n'),
+      'HOST_RELEASE_AND_CONTRACTS_MUST_HAVE_EXACT_SAME_SCOPES');
+    assert.match(block, /^          persist-credentials: false$/m,
+      'HOST_PR_CHECKOUT_MUST_NOT_KEEP_WRITE_CREDENTIALS');
+    assert.match(block, /^          toolchain: 1\.100\.0$/m,
+      'HOST_RUNNERS_MUST_SHARE_PINNED_COMPILER');
+    assert.doesNotMatch(block, /cargo build --locked --release -p okx-trading-engine/);
+    assert.doesNotMatch(block, /gh release (create|upload)|gh api .*\/releases/,
+      'HOST_CHECKS_MUST_NOT_PUBLISH_ACCEPTED_RELEASES');
+  }
+  assert.match(hostRelease, /cargo build --locked --release -p okx-host-launcher -p okx-host-controller/);
+  assert.match(hostRelease, /schema = 'okx\.windows\.host-component\/v1'/);
+  assert.match(hostRelease, /ci_status_policy = 'okx\.github\.actions\.host-ready\/v1'/);
+  assert.match(hostRelease, /release_is_complete = \$false/);
+  assert.match(hostRelease, /installation_allowed = \$false/);
+  assert.match(hostRelease, /python3 -B scripts\/verify_host_component_release\.py \$dist \$head \$tree/);
+  assert.match(hostRelease, /HOST_RELEASE_CHECKOUT_DIRTY_BEFORE_BUILD/);
+  assert.match(hostRelease, /HOST_RELEASE_CHECKOUT_DIRTY_AFTER_BUILD/,
     'HOST_BUILD_SCRIPT_MUST_NOT_MUTATE_RECORDED_SOURCE');
-  assert.match(host, /HOST_RUST_VERSION_NOT_EXACT_PIN/);
-  assert.match(host, /name: okx-host-component-\$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
-  const buildIndex = host.indexOf('      - name: Build both Windows host executables without Engine');
-  const uploadIndex = host.indexOf('      - name: Retain exact Host-only bytes');
-  const testsIndex = host.indexOf('      - name: Verify architecture and formatting');
-  assert.ok(buildIndex >= 0 && buildIndex < uploadIndex && uploadIndex < testsIndex,
-    'HOST_ARTIFACT_MUST_BE_UPLOADED_BEFORE_PR_CODE_CAN_POISON_RELEASE_BYTES');
-  assert.match(host, /if: github\.event_name == 'pull_request' && \(needs\.component_impact\.outputs\.component_scope == 'host-controller' \|\| needs\.component_impact\.outputs\.component_scope == 'host-launcher'\)/,
+  assert.match(hostRelease, /HOST_RUST_VERSION_NOT_EXACT_PIN/);
+  assert.match(hostRelease, /name: okx-host-component-\$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+  const buildIndex = hostRelease.indexOf('      - name: Build both Windows host executables without Engine');
+  const uploadIndex = hostRelease.indexOf('      - name: Retain exact Host-only bytes');
+  assert.ok(buildIndex >= 0 && buildIndex < uploadIndex,
+    'HOST_ARTIFACT_MUST_BE_BUILT_AND_UPLOADED_FROM_ISOLATED_PRODUCER');
+  assert.match(hostRelease, /if: github\.event_name == 'pull_request' && \(needs\.component_impact\.outputs\.component_scope == 'host-controller' \|\| needs\.component_impact\.outputs\.component_scope == 'host-launcher'\)/,
     'HOST_ARTIFACT_MUST_NOT_BE_EMITTED_FROM_FULL_OR_MIXED_SCOPE');
-  assert.doesNotMatch(host, /gh release create|gh release upload|gh api .*\/releases/,
+  assert.doesNotMatch(hostRelease, /gh release create|gh release upload|gh api .*\/releases/,
     'UNPROVEN_HOST_BYTES_MUST_NOT_BECOME_AN_ACCEPTED_RELEASE');
   const names = {
     rust_tests_linux: 'rust-tests-linux',
@@ -601,7 +624,8 @@ function validate(yaml, fileNames) {
     research_service_tests_windows: 'research-windows',
     research_ipc_windows: 'research-ipc-windows',
     research_component_release_windows: 'research-component-windows',
-    host_controller_launcher_checks: 'host-windows',
+    host_component_release_windows: 'host-windows',
+    host_controller_launcher_checks: 'host-contracts-windows',
     cloudflare_mcp_contracts: 'cloudflare-mcp',
   };
   for (const [id, display] of Object.entries(names)) {
@@ -874,7 +898,7 @@ function validate(yaml, fileNames) {
   const requiredCi = job('required_ci');
   assert.match(requiredCi, /^    name: ci$/m);
   const directOwners = ['component_impact', 'dependency-audit', 'architecture_contracts',
-    'rust_tests_linux', 'cloudflare_mcp_contracts', 'host_controller_launcher_checks',
+    'rust_tests_linux', 'cloudflare_mcp_contracts', 'host_component_release_windows', 'host_controller_launcher_checks',
     'trading_engine_acceptance_windows', 'trading_engine_isolation_windows', 'trading_engine_regressions_windows',
     'trading_engine_build_windows', 'research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows', 'research_component_release_windows'];
   assert.ok(requiredCi.includes('needs: [' + directOwners.join(', ') + ']'),
@@ -902,7 +926,8 @@ function validate(yaml, fileNames) {
     "check_result '${{ needs.research_clippy_windows.result }}' skipped research-clippy-windows",
     "check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows",
     "check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows",
-    "check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows",
+    "check_result '${{ needs.host_component_release_windows.result }}' success host-windows",
+    "check_result '${{ needs.host_controller_launcher_checks.result }}' success host-contracts-windows",
     'test \'${{ needs.component_impact.outputs.reason }}\' = \'merged tree exactly matches successful PR head tree\'',
     "test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_OWNER_ONLY",
     "test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_HOST_OWNER_CHECKS",
@@ -925,6 +950,8 @@ function validate(yaml, fileNames) {
     ['research_clippy_windows', 'skipped', 4],
     ['research_component_release_windows', 'success', 1],
     ['research_component_release_windows', 'skipped', 4],
+    ['host_component_release_windows', 'success', 2],
+    ['host_component_release_windows', 'skipped', 3],
     ['host_controller_launcher_checks', 'success', 2],
     ['host_controller_launcher_checks', 'skipped', 3],
   ]) {
@@ -1225,8 +1252,10 @@ for (const [old, replacement, reason] of [
     'true', 'RESEARCH_IPC_OWNER'],
   ["check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows",
     'true', 'RESEARCH_RELEASE_OWNER'],
-  ["check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows",
-    'true', 'HOST_OWNER'],
+  ["check_result '${{ needs.host_component_release_windows.result }}' success host-windows",
+    'true', 'HOST_RELEASE_OWNER'],
+  ["check_result '${{ needs.host_controller_launcher_checks.result }}' success host-contracts-windows",
+    'true', 'HOST_CONTRACTS_OWNER'],
 ]) {
   assert.throws(() => validate(changeJobInput(source, 'required_ci', old, replacement), workflows),
     'SINGLE_CI_CANNOT_IGNORE_' + reason);
@@ -1725,6 +1754,39 @@ function changeJobInput(yaml, id, before, after) {
   const block = yaml.slice(start, end);
   assert.ok(block.includes(before), `MISSING_CACHE_INPUT:${id}`);
   return yaml.slice(0, start) + block.replace(before, after) + yaml.slice(end);
+}
+// The two Host jobs must stay independent, preserve identical conservative
+// owner routing, and remain separately mandatory in the one required ci.
+for (const id of ['host_component_release_windows', 'host_controller_launcher_checks']) {
+  assert.throws(() => validate(changeJobInput(source, id,
+    'needs: component_impact', 'needs: [component_impact, host_controller_launcher_checks]'), workflows),
+    'HOST_JOB_MUST_NOT_WAIT_FOR_ANOTHER_HOST_JOB');
+  assert.throws(() => validate(changeJobInput(source, id,
+    "needs.component_impact.outputs.component_scope == 'research-host'",
+    "needs.component_impact.outputs.component_scope == 'not-research-host'"), workflows),
+    'MIXED_RESEARCH_HOST_MUST_RUN_BOTH_HOST_JOBS');
+  assert.throws(() => validate(changeJobInput(source, id,
+    'persist-credentials: false', 'persist-credentials: true'), workflows),
+    'HOST_PR_CHECKOUT_MUST_NOT_RETAIN_TOKEN');
+  assert.throws(() => validate(changeJobInput(source, id,
+    'toolchain: 1.100.0', 'toolchain: stable'), workflows),
+    'HOST_PR_COMPILER_PIN_MUST_NOT_DRIFT');
+}
+assert.throws(() => validate(changeJobInput(source, 'host_component_release_windows',
+  'cargo build --locked --release -p okx-host-launcher -p okx-host-controller',
+  'Write-Host skipped-host-release'), workflows),
+  'HOST_BINARY_PRODUCER_MUST_EXECUTE');
+assert.throws(() => validate(changeJobInput(source, 'host_controller_launcher_checks',
+  'cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp',
+  'Write-Host skipped-host-contracts'), workflows),
+  'HOST_TYPED_CONTRACTS_MUST_EXECUTE');
+for (const [owner, name] of [
+  ['host_component_release_windows', 'host-windows'],
+  ['host_controller_launcher_checks', 'host-contracts-windows'],
+]) {
+  const scopedSkip = "check_result '${{ needs." + owner + ".result }}' skipped " + name;
+  assert.throws(() => validate(changeJobInput(source, 'required_ci', scopedSkip, 'true'), workflows),
+    'CI_MUST_REJECT_UNEXPECTED_HOST_SKIP');
 }
 for (const [id, prefix, , save] of nativeCacheJobs) {
   for (const [before, after] of [

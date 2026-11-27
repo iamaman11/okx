@@ -359,7 +359,7 @@ def _self_test() -> None:
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
     assert "--filter-platform x86_64-pc-windows-msvc" in workflow
     protected = workflow.split("\n  required_ci:\n", 1)[1].split("\n  trading_engine_build_windows:\n", 1)[0]
-    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_ipc_windows, research_clippy_windows, research_service_tests_windows, research_component_release_windows]" in protected
+    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_component_release_windows, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_ipc_windows, research_clippy_windows, research_service_tests_windows, research_component_release_windows]" in protected
     assert "check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows" in protected
     assert protected.count("check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows") == 4
     for owner in ("trading_engine_acceptance_windows", "trading_engine_isolation_windows",
@@ -377,21 +377,42 @@ def _self_test() -> None:
     assert "Mandatory current Rust financial property acceptance" in finance, "FINANCE_COLLECTOR_MUST_REMAIN"
     assert "MCP DO WSS Native finance under isolated Research load" not in finance, "FINANCE_RUNNER_MUST_ISOLATE_CLOCKS"
     assert "['dependency-audit'].result }}\" success dependency-audit" in protected
-    host = workflow.split("\n  host_controller_launcher_checks:\n", 1)[1].split("\n  trading_engine_acceptance_windows:\n", 1)[0]
-    assert "needs.component_impact.outputs.component_scope == 'host-controller'" in host
-    assert "needs.component_impact.outputs.component_scope == 'host-launcher'" in host
-    assert "cargo build --locked --release -p okx-host-launcher -p okx-host-controller" in host
-    assert "cargo build --locked --release -p okx-trading-engine" not in host
-    assert "one_process_job_can_be_terminated_without_touching_the_other" in host, "HOST_RESEARCH_ENGINE_PROCESS_JOB_ISOLATION_REQUIRED"
-    assert "nested_job_assignment_waits_for_parent_ready_receipt" in host, "HOST_RESEARCH_NESTED_JOB_READINESS_REQUIRED"
-    assert "research_control_root_is_independent_and_start_requires_verified_installation" in host, "HOST_RESEARCH_INSTALLATION_IDENTITY_REQUIRED"
-    assert "corrupted_and_hash_mismatched_research_image_never_launch" in host, "HOST_RESEARCH_FAIL_CLOSED_START_REQUIRED"
-    assert "research_state_is_strict_and_independent_of_engine_state" in host, "HOST_RESEARCH_OWNER_STATE_SEPARATION_REQUIRED"
-    assert "typed_research_rollback_requires_two_distinct_exact_hashes" in host, "HOST_RESEARCH_ROLLBACK_IDENTITY_REQUIRED"
-    assert "standalone_research_lifecycle_requires_exact_image_and_process_generation" in host, "HOST_LIFECYCLE_TYPED_WITNESS_REQUIRED"
-    assert "standalone_research_status_is_typed_and_does_not_claim_edge_online" in host, "HOST_RESEARCH_STATUS_TYPED_WITNESS_REQUIRED"
-    assert "research_token_provision_command_has_no_bearer_fields" in host, "HOST_RESEARCH_SECRET_WIRE_WITNESS_REQUIRED"
-    assert "control_bridge_denies_research_mutations_before_network" in host, "HOST_BRIDGE_MUTATION_DENIAL_WITNESS_REQUIRED"
+    host_release = workflow.split("\n  host_component_release_windows:\n", 1)[1].split("\n  host_controller_launcher_checks:\n", 1)[0]
+    host_contracts = workflow.split("\n  host_controller_launcher_checks:\n", 1)[1].split("\n  trading_engine_acceptance_windows:\n", 1)[0]
+    for block in (host_release, host_contracts):
+        for scope in ("host-controller", "host-launcher", "research-host"):
+            assert f"needs.component_impact.outputs.component_scope == '{scope}'" in block, f"HOST_SCOPE_NOT_IN_BOTH:{scope}"
+        assert "cargo build --locked --release -p okx-trading-engine" not in block, "HOST_MUST_NOT_RECOMPILE_ENGINE"
+    assert "name: host-windows" in host_release, "HOST_RELEASE_OWNER_NAME_REQUIRED"
+    assert "name: host-contracts-windows" in host_contracts, "HOST_CONTRACTS_OWNER_NAME_REQUIRED"
+    assert "cargo build --locked --release -p okx-host-launcher -p okx-host-controller" in host_release
+    assert "cargo build --locked --release" not in host_contracts, "HOST_TESTS_MUST_NOT_BUILD_RELEASE"
+    assert "cargo test --locked" not in host_release and "cargo clippy --locked" not in host_release, "HOST_PRODUCER_ISOLATION_REQUIRED"
+    assert "shared-key: trading-engine-release-windows" in host_release, "HOST_RELEASE_TRUSTED_CACHE_REQUIRED"
+    assert "save-if: false" in host_release and "save-if: false" in host_contracts, "HOST_PR_CACHE_WRITE_FORBIDDEN"
+    assert "installation_allowed = $false" in host_release, "HOST_COMPONENT_MUST_REMAIN_NONINSTALLABLE"
+    for witness in (
+        "one_process_job_can_be_terminated_without_touching_the_other",
+        "nested_job_assignment_waits_for_parent_ready_receipt",
+        "research_control_root_is_independent_and_start_requires_verified_installation",
+        "corrupted_and_hash_mismatched_research_image_never_launch",
+        "research_state_is_strict_and_independent_of_engine_state",
+        "control_reconciles_research_when_engine_image_is_incompatible",
+        "independent_engine_runtime_receipt_is_strict",
+        "typed_research_rollback_requires_two_distinct_exact_hashes",
+        "standalone_research_lifecycle_requires_exact_image_and_process_generation",
+        "standalone_research_status_is_typed_and_does_not_claim_edge_online",
+        "research_token_provision_command_has_no_bearer_fields",
+        "control_bridge_denies_research_mutations_before_network",
+    ):
+        assert witness in host_contracts, f"HOST_CONTRACT_WITNESS_NOT_RUN:{witness}"
+    for owner, display in (
+        ("host_component_release_windows", "host-windows"),
+        ("host_controller_launcher_checks", "host-contracts-windows"),
+    ):
+        result = f"needs.{owner}.result"
+        assert protected.count(f"check_result '${{{{ {result} }}}}' success {display}") == 2, f"CI_HOST_SUCCESS_BRANCHES_MISSING:{owner}"
+        assert protected.count(f"check_result '${{{{ {result} }}}}' skipped {display}") == 3, f"CI_HOST_SKIP_BRANCHES_MISSING:{owner}"
     research_ipc = workflow.split("\n  research_ipc_windows:\n", 1)[1].split("\n  research_clippy_windows:\n", 1)[0]
     research_clippy = workflow.split("\n  research_clippy_windows:\n", 1)[1].split("\n  research_service_tests_windows:\n", 1)[0]
     research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  research_component_release_windows:\n", 1)[0]
