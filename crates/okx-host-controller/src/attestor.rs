@@ -10,7 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::{Sink, SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use okx_host_protocol::ResearchRuntimeStatus;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -180,6 +180,37 @@ fn connection_id() -> Result<String, &'static str> {
     Ok(id)
 }
 
+// Keep the initial hello/ack boundary independently testable without a
+// network connection. Production always supplies ACK_TIMEOUT (5 seconds).
+async fn read_hello_ack<S, E>(
+    reader: &mut S,
+    deadline: Duration,
+) -> Result<(String, u64), &'static str>
+where
+    S: Stream<Item = Result<Message, E>> + Unpin,
+{
+    let first = timeout(deadline, reader.next())
+        .await
+        .map_err(|_| "ATTESTOR_ACK_TIMEOUT")?
+        .ok_or("ATTESTOR_ACK_CLOSED")?
+        .map_err(|_| "ATTESTOR_ACK_READ_FAILED")?;
+    let IncomingFrame::HelloAck {
+        schema,
+        session_id,
+        connection_generation,
+    } = parse_frame(first)?
+    else {
+        return Err("ATTESTOR_ACK_REQUIRED");
+    };
+    if schema != FRAME_SCHEMA
+        || !bounded_identifier(&session_id, "control_", 128)
+        || connection_generation == 0
+    {
+        return Err("ATTESTOR_ACK_INVALID");
+    }
+    Ok((session_id, connection_generation))
+}
+
 async fn run_session(
     token: &str,
     requests: &mpsc::Sender<ObservationRequest>,
@@ -212,25 +243,7 @@ async fn run_session(
     )
     .await?;
 
-    let first = timeout(ACK_TIMEOUT, reader.next())
-        .await
-        .map_err(|_| "ATTESTOR_ACK_TIMEOUT")?
-        .ok_or("ATTESTOR_ACK_CLOSED")?
-        .map_err(|_| "ATTESTOR_ACK_READ_FAILED")?;
-    let IncomingFrame::HelloAck {
-        schema,
-        session_id,
-        connection_generation,
-    } = parse_frame(first)?
-    else {
-        return Err("ATTESTOR_ACK_REQUIRED");
-    };
-    if schema != FRAME_SCHEMA
-        || !bounded_identifier(&session_id, "control_", 128)
-        || connection_generation == 0
-    {
-        return Err("ATTESTOR_ACK_INVALID");
-    }
+    let (session_id, connection_generation) = read_hello_ack(&mut reader, ACK_TIMEOUT).await?;
 
     let mut nonces = HashSet::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
@@ -312,6 +325,23 @@ pub async fn run(token: Zeroizing<String>, requests: mpsc::Sender<ObservationReq
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_initial_hello_ack_times_out_before_attestation() {
+        // Pending means the authenticated socket never sends its first ACK;
+        // no network, credential, CONTROL process, or Research state is used.
+        let mut silent = futures_util::stream::pending::<Result<Message, ()>>();
+        assert_eq!(ACK_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(
+            read_hello_ack(&mut silent, Duration::from_millis(20)).await,
+            Err("ATTESTOR_ACK_TIMEOUT")
+        );
+        let mut closed = futures_util::stream::empty::<Result<Message, ()>>();
+        assert_eq!(
+            read_hello_ack(&mut closed, Duration::from_millis(20)).await,
+            Err("ATTESTOR_ACK_CLOSED")
+        );
+    }
 
     fn valid_challenge(now_ms: u64) -> Challenge {
         Challenge {

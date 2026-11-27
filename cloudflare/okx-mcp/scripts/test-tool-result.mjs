@@ -54,6 +54,16 @@ try {
     });
     executed++;
   }
+  // Run actual workerd + SQLite Durable Object admission and negative
+  // CONTROL/Research WebSocket scenarios from the locked Miniflare build.
+  // The integration entrypoint exists only in src/integration, not index.ts.
+  execFileSync(process.execPath, [resolve("scripts/test-control-attestor-do.mjs")], {
+    stdio: "inherit",
+    // workerd/SQLite is a subprocess, so a deadlocked Miniflare start,
+    // dispatchFetch or dispose must not occupy the entire CI job budget.
+    timeout: 120_000,
+    killSignal: "SIGKILL",
+  });
   // The very same immutable inputs, canonical JSON and literal SHA256
   // are consumed by Rust protocol tests through include_str!.
   const fixture=JSON.parse(readFileSync(resolve(

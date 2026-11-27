@@ -106,6 +106,40 @@ async function run(fault: Fault = "none") {
     getControlClosed: () => controlClosed, env};
 }
 
+// Forged first hello frames must not establish an authenticated CONTROL
+// attestor generation, emit hello_ack, or touch runtime/finance state.
+for (const [caseName, forgedHello] of [
+  ["short id", {schema: CONTROL_ATTEST_FRAME_SCHEMA, type: "hello_control", connection_id: "short"}],
+  ["owner claim", {schema: CONTROL_ATTEST_FRAME_SCHEMA, type: "hello_control",
+    connection_id: "control_0123456789abcdef", owner: "engine"}],
+  ["foreign schema", {schema: FRAME_SCHEMA, type: "hello_control",
+    connection_id: "control_0123456789abcdef"}],
+  ["foreign type", {schema: CONTROL_ATTEST_FRAME_SCHEMA, type: "hello_research",
+    connection_id: "control_0123456789abcdef"}],
+] as const) {
+  let attachment: any = {role: "control-attestor", admittedCredentialFingerprint: controlHash,
+    sessionId: "control_session_forged", generation: 90, hello: false, connectedAtMs: Date.now()};
+  const sent: string[] = [];
+  const closed: Array<{code: number; reason: string}> = [];
+  const socket: any = {
+    deserializeAttachment: () => ({...attachment}),
+    serializeAttachment: (value: any) => {attachment = {...value};},
+    send: (raw: string) => {sent.push(raw);},
+    close: (code: number, reason: string) => {closed.push({code, reason});},
+  };
+  const state: any = {
+    storage: {get: async () => {throw Error("forged CONTROL hello touched DO storage");}},
+    getWebSockets: (tag: string) => tag === "attestor" ? [socket] : [],
+  };
+  const runtime = new RuntimeSession(state, {
+    CONTROL_ATTEST_TOKEN_SHA256: controlHash, RUNTIME_TOKEN_SHA256: runtimeHash,
+    RESEARCH_RUNTIME_TOKEN_SHA256: researchHash,
+  } as any);
+  await runtime.webSocketMessage(socket, JSON.stringify(forgedHello));
+  check(closed.length === 1 && closed[0].code === 1008 && sent.length === 0 &&
+    attachment.hello === false, `forged initial CONTROL hello rejected: ${caseName}`);
+}
+
 const ok = await run();
 check(ok.observed.status === "PASS" && ok.observed.reason_code === null &&
   ok.observed.pid === 332 && ok.observed.active_worker_sha256 === workerSha &&
