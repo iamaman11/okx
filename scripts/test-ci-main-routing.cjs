@@ -216,6 +216,8 @@ function validate(yaml, fileNames) {
   // Short stable job display names are the only accepted Ready-v3 status roster.
   const classify = job('component_impact');
   assert.match(classify, /^    name: select-checks$/m);
+  assert.match(classify, /python3 -B scripts\/test_verify_host_component_release\.py/,
+    'HOST_COMPONENT_STRICT_BYTE_NEGATIVE_TESTS_MUST_RUN_ON_FULL_BOOTSTRAP');
   assert.match(classify, /component_scope: \$\{\{ steps.proven_scope.outputs.scope \}\}/);
   assert.match(classify, /python3 -B scripts\/check_ci_native_scope\.py --github-plan/);
   assert.match(classify, /plan_args\+=\(--allow-dependency-candidate\)/);
@@ -572,6 +574,22 @@ function validate(yaml, fileNames) {
   assert.match(host, /cargo clippy --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
   assert.match(host, /cargo test --locked -p okx-host-protocol -p okx-host-launcher -p okx-host-controller -p okx-bridge-mcp/);
   assert.doesNotMatch(host, /cargo build --locked --release -p okx-trading-engine/);
+  assert.match(host, /schema = 'okx\.windows\.host-component\/v1'/);
+  assert.match(host, /ci_status_policy = 'okx\.github\.actions\.host-ready\/v1'/);
+  assert.match(host, /release_is_complete = \$false/);
+  assert.match(host, /installation_allowed = \$false/);
+  assert.match(host, /python3 -B scripts\/verify_host_component_release\.py \$dist \$head \$tree/);
+  assert.match(host, /HOST_RELEASE_CHECKOUT_DIRTY_BEFORE_BUILD/);
+  assert.match(host, /name: okx-host-component-\$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+  const buildIndex = host.indexOf('      - name: Build both Windows host executables without Engine');
+  const uploadIndex = host.indexOf('      - name: Retain exact Host-only bytes');
+  const testsIndex = host.indexOf('      - name: Verify architecture and formatting');
+  assert.ok(buildIndex >= 0 && buildIndex < uploadIndex && uploadIndex < testsIndex,
+    'HOST_ARTIFACT_MUST_BE_UPLOADED_BEFORE_PR_CODE_CAN_POISON_RELEASE_BYTES');
+  assert.match(host, /if: github\.event_name == 'pull_request' && \(needs\.component_impact\.outputs\.component_scope == 'host-controller' \|\| needs\.component_impact\.outputs\.component_scope == 'host-launcher'\)/,
+    'HOST_ARTIFACT_MUST_NOT_BE_EMITTED_FROM_FULL_OR_MIXED_SCOPE');
+  assert.doesNotMatch(host, /gh release create|gh release upload|gh api .*\/releases/,
+    'UNPROVEN_HOST_BYTES_MUST_NOT_BECOME_AN_ACCEPTED_RELEASE');
   const names = {
     rust_tests_linux: 'rust-tests-linux',
     trading_engine_acceptance_windows: 'engine-windows',
@@ -1443,6 +1461,16 @@ assert.throws(() => validate(source.replace('NO_EXACT_FIRST_ATTEMPT_FULL_NATIVE_
 assert.throws(() => validate(source.replace('RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED', 'BYPASS'), workflows));
 assert.throws(() => validate(source.replace('name: okx-research-component-${{ github.event.pull_request.head.sha }}',
   'name: okx-windows-bundle-${{ github.event.pull_request.head.sha }}'), workflows));
+assert.throws(() => validate(source.replace("schema = 'okx.windows.host-component/v1'",
+  "schema = 'okx.windows.native/v1'"), workflows),
+  'HOST_COMPONENT_SCHEMA_CANNOT_IMPERSONATE_NATIVE_RELEASESET');
+assert.throws(() => validate(source.replace('installation_allowed = $false',
+  'installation_allowed = $true'), workflows),
+  'HOST_COMPONENT_MUST_REMAIN_NON_INSTALLABLE');
+assert.throws(() => validate(source.replace(
+  "needs.component_impact.outputs.component_scope == 'host-launcher')\n        uses: actions/upload-artifact",
+  "needs.component_impact.outputs.component_scope == 'full')\n        uses: actions/upload-artifact"), workflows),
+  'HOST_COMPONENT_CANNOT_BE_MINTED_FROM_FULL_SCOPE');
 assert.throws(() => validate(source.replace('test "sha256:$digest" = \'${{ steps.select.outputs.digest }}\'',
   'true'), workflows));
 assert.throws(() => validate(source.replace('RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED',
