@@ -429,8 +429,28 @@ fn c17_restart_interrupts_incomplete_without_resurrecting_it() {
         )
         .unwrap();
     assert!(matches!(Jobs::open(file.clone()), Err(e) if e == "RESEARCH_ROOT_LOCKED"));
+    // The handover is valid only when this test owns the final root-lock
+    // handle; a retained clone would be a real lifecycle bug, not a reason
+    // to tolerate the next open failing.
+    assert_eq!(std::sync::Arc::strong_count(&before._root_lock), 1);
     drop(before);
-    let after = Jobs::open(file).unwrap();
+    // A brief OS lock-release delay is not a second owner. Retry only the
+    // exact ownership conflict for a bounded time; every other error and a
+    // persistently held root lock still fail the crash-recovery contract.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    let after = loop {
+        match Jobs::open(file.clone()) {
+            Ok(after) => break after,
+            Err(error) if error == "RESEARCH_ROOT_LOCKED" => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "research catalog root lock remained held after owner drop"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("research catalog did not unlock after owner drop: {error}"),
+        }
+    };
     assert_eq!(after.get("queued").unwrap().state, State::Interrupted);
     assert_eq!(after.get("running").unwrap().state, State::Interrupted);
     assert_eq!(
