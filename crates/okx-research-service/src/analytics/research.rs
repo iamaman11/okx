@@ -405,93 +405,106 @@ impl AnalyticsService {
         cancel: Arc<cpu_executor::Cancel>,
         observation: Option<(Arc<candidate_progress::Tracker>, usize)>,
     ) -> Result<String, String> {
-        let (instruments, ms, start, end, strategy, variants, graph_signal, costs, mode, seed, is_grid) =
-            match request {
-                ResearchRequest::Backtest {
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    strategy_id,
-                    parameters,
-                    costs,
-                    data_mode,
-                    seed,
-                    ..
-                } => (
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    Some(strategy_id),
-                    vec![parameters],
-                    None,
-                    costs,
-                    data_mode,
-                    seed,
-                    false,
-                ),
-                ResearchRequest::Grid {
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    Some(strategy_id),
-                    variants,
-                    None,
-                    costs,
-                    data_mode,
-                    seed,
-                    ..
-                } => (
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    strategy_id,
-                    variants,
-                    costs,
-                    data_mode,
-                    seed,
-                    true,
-                ),
-                ResearchRequest::GraphBacktest {
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    graph_signal,
-                    costs,
-                    data_mode,
-                    seed,
-                    ..
-                } => (
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    None,
-                    Vec::new(),
-                    Some(graph_signal),
-                    costs,
-                    data_mode,
-                    seed,
-                    false,
-                ),
-                _ => unreachable!(),
-            };
+        let (
+            instruments,
+            ms,
+            start,
+            end,
+            strategy,
+            variants,
+            graph_signal,
+            costs,
+            mode,
+            seed,
+            is_grid,
+        ) = match request {
+            ResearchRequest::Backtest {
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                strategy_id,
+                parameters,
+                costs,
+                data_mode,
+                seed,
+                ..
+            } => (
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                Some(strategy_id),
+                vec![parameters],
+                None,
+                costs,
+                data_mode,
+                seed,
+                false,
+            ),
+            ResearchRequest::Grid {
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                strategy_id,
+                variants,
+                costs,
+                data_mode,
+                seed,
+                ..
+            } => (
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                Some(strategy_id),
+                variants,
+                None,
+                costs,
+                data_mode,
+                seed,
+                true,
+            ),
+            ResearchRequest::GraphBacktest {
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                graph_signal,
+                costs,
+                data_mode,
+                seed,
+                ..
+            } => (
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                None,
+                Vec::new(),
+                Some(graph_signal),
+                costs,
+                data_mode,
+                seed,
+                false,
+            ),
+            _ => unreachable!(),
+        };
         if instruments.len() != 1 {
             return Err("REPLAY_REQUIRES_EXACTLY_ONE_INSTRUMENT".into());
         }
-        if strategy.as_deref().is_some_and(|name| !matches!(
-            name,
-            "ema_cross_v1"
-                | "ema_momentum_confirm_v1"
-                | okx_analysis::operators::BREAKOUT_STRATEGY_ID
-                | "no_trade"
-                | "close_momentum"
-                | "two_bar_momentum"
-        )) {
+        if strategy.as_deref().is_some_and(|name| {
+            !matches!(
+                name,
+                "ema_cross_v1"
+                    | "ema_momentum_confirm_v1"
+                    | okx_analysis::operators::BREAKOUT_STRATEGY_ID
+                    | "no_trade"
+                    | "close_momentum"
+                    | "two_bar_momentum"
+            )
+        }) {
             return Err("UNSUPPORTED_STRATEGY".into());
         }
         if matches!(mode, ResearchDataMode::HistoricalObserved) {
@@ -731,8 +744,14 @@ impl AnalyticsService {
                     // job catalog, and its ID comes from the existing store.
                     let policy = if is_grid {
                         let named = spec.as_ref().ok_or("REPLAY_NAMED_SPEC_MISSING")?;
-                        Some(replay::grid_policy(bars.len(), &named.strategy_id, &variants)?)
-                    } else { None };
+                        Some(replay::grid_policy(
+                            bars.len(),
+                            &named.strategy_id,
+                            &variants,
+                        )?)
+                    } else {
+                        None
+                    };
                     let mut economic_basis = economic_basis;
                     if let Some(reference_capture) = reference_capture {
                         let id = store.publish_evidence(&reference_capture).map_err(|e|e.to_string())?.0;
@@ -757,23 +776,51 @@ impl AnalyticsService {
                         "result_role":"counterfactual_research_only"
                     });
                     if let Some(graph) = &graph_spec {
-                        experiment_inputs.as_object_mut().ok_or("REPLAY_INPUTS_INVALID")?.remove("spec");
+                        experiment_inputs
+                            .as_object_mut()
+                            .ok_or("REPLAY_INPUTS_INVALID")?
+                            .remove("spec");
                         experiment_inputs["graph_spec"] = json!(graph);
-                        experiment_inputs["graph_warmup_bars"] = json!(graph_warmup.ok_or("GRAPH_WARMUP_MISSING")?);
+                        experiment_inputs["graph_warmup_bars"] =
+                            json!(graph_warmup.ok_or("GRAPH_WARMUP_MISSING")?);
                     }
                     let experiment = store.publish_evidence(&experiment_inputs).map_err(|e|e.to_string())?.0;
-                    let(result,grid,score_start)=if let Some(graph)=&graph_spec {
-                        let warmup=graph_warmup.ok_or("GRAPH_WARMUP_MISSING")?;
-                        (replay::replay_graph(&bars,graph,warmup,bars.len(),&cancelled)?,None,warmup)
+                    let (result, grid, score_start) = if let Some(graph) = &graph_spec {
+                        let warmup = graph_warmup.ok_or("GRAPH_WARMUP_MISSING")?;
+                        (
+                            replay::replay_graph(&bars, graph, warmup, bars.len(), &cancelled)?,
+                            None,
+                            warmup,
+                        )
                     } else {
-                        let named=spec.as_ref().ok_or("REPLAY_NAMED_SPEC_MISSING")?;
+                        let named = spec.as_ref().ok_or("REPLAY_NAMED_SPEC_MISSING")?;
                         if is_grid {
-                            let g=replay::grid_with_observer(&bars,named,&variants,&cancelled,&|value|{if let Some((tracker,index))=&observation {tracker.observe(*index,value)}})?;
-                            let split=g.split_index;
-                            (g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":named.seed,"strategy_id":named.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})),split)
+                            let g = replay::grid_with_observer(
+                                &bars,
+                                named,
+                                &variants,
+                                &cancelled,
+                                &|value| {
+                                    if let Some((tracker, index)) = &observation {
+                                        tracker.observe(*index, value)
+                                    }
+                                },
+                            )?;
+                            let split = g.split_index;
+                            (
+                                g.test,
+                                Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":named.seed,"strategy_id":named.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})),
+                                split,
+                            )
                         } else {
-                            let warmup=first.ok_or("EMPTY_VARIANTS")?.warmup_for(&named.strategy_id)?;
-                            (replay::replay(&bars,named,warmup,bars.len(),&cancelled)?,None,warmup)
+                            let warmup = first
+                                .ok_or("EMPTY_VARIANTS")?
+                                .warmup_for(&named.strategy_id)?;
+                            (
+                                replay::replay(&bars, named, warmup, bars.len(), &cancelled)?,
+                                None,
+                                warmup,
+                            )
                         }
                     };
                     let audit = okx_research::economic_audit::audit_graph_replay(

@@ -133,12 +133,11 @@ impl GraphSignalSpec {
             && self.graph.steps.iter().all(|step| {
                 valid_step_id(&step.id)
                     && valid_source_ref(&step.input)
-                    && step
-                        .other
-                        .as_deref()
-                        .is_none_or(valid_source_ref)
+                    && step.other.as_deref().is_none_or(valid_source_ref)
                     && step.when.as_deref().is_none_or(valid_step_id)
-                    && step.period.is_none_or(|period| (1..=1000).contains(&period))
+                    && step
+                        .period
+                        .is_none_or(|period| (1..=1000).contains(&period))
                     && step.threshold.is_none_or(f64::is_finite)
                     && step.op != SeriesOp::ForwardReturnLabel
             })
@@ -253,8 +252,11 @@ mod tests {
         ] {
             let mut changed = wire.clone();
             changed[field] = bad;
-            assert!(!serde_json::from_value::<GraphSignalSpec>(changed)
-                .is_ok_and(|spec| spec.valid_structure()), "{field}");
+            assert!(
+                !serde_json::from_value::<GraphSignalSpec>(changed)
+                    .is_ok_and(|spec| spec.valid_structure()),
+                "{field}"
+            );
         }
         let mut unknown = wire.clone();
         unknown["unexpected"] = serde_json::json!("forbidden");
@@ -262,14 +264,21 @@ mod tests {
 
         let mut future = wire.clone();
         future["graph"]["steps"][1]["op"] = serde_json::json!("forward_return_label");
-        assert!(!serde_json::from_value::<GraphSignalSpec>(future)
-            .unwrap().valid_structure());
+        assert!(
+            !serde_json::from_value::<GraphSignalSpec>(future)
+                .unwrap()
+                .valid_structure()
+        );
 
         let mut oversized = wire;
         oversized["graph"]["steps"] = serde_json::json!(vec![
-            serde_json::json!({"id":"a","op":"returns_series","input":"close"});33
+            serde_json::json!({"id":"a","op":"returns_series","input":"close"});
+            33
         ]);
-        assert!(!serde_json::from_value::<GraphSignalSpec>(oversized)
-            .unwrap().valid_structure());
+        assert!(
+            !serde_json::from_value::<GraphSignalSpec>(oversized)
+                .unwrap()
+                .valid_structure()
+        );
     }
 }

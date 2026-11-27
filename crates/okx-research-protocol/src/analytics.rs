@@ -1,6 +1,6 @@
 //! Public compact analytics contract. No transport or financial logic.
-use crate::strategy_contract::{CompositionRequest, GraphSignalSpec};
 pub use crate::strategy_contract::{BreakoutParameters, EmaParameters, StrategyParameters};
+use crate::strategy_contract::{CompositionRequest, GraphSignalSpec};
 use okx_research_domain::numeric::is_positive_decimal;
 use serde::{Deserialize, Serialize};
 
@@ -1129,7 +1129,13 @@ mod graph_backtest_contract_tests {
     fn graph_backtest_is_one_strict_typed_public_request_not_executable_code() {
         let parsed: ResearchRequest = serde_json::from_value(wire()).unwrap();
         assert!(parsed.valid());
-        if let ResearchRequest::GraphBacktest { graph_signal, seed, instruments, .. } = parsed {
+        if let ResearchRequest::GraphBacktest {
+            graph_signal,
+            seed,
+            instruments,
+            ..
+        } = parsed
+        {
             assert_eq!(seed, 0);
             assert_eq!(instruments.len(), 2);
             assert!(graph_signal.valid_structure());
@@ -1145,28 +1151,40 @@ mod graph_backtest_contract_tests {
     fn graph_backtest_rejects_noncausal_oversized_or_ambiguous_envelopes() {
         for (field, bad) in [
             ("instruments", serde_json::json!([])),
-            ("instruments", serde_json::json!(["BTC-USDT","BTC-USDT"])),
+            ("instruments", serde_json::json!(["BTC-USDT", "BTC-USDT"])),
             ("timeframe_ms", serde_json::json!(12345)),
             ("end_ms", serde_json::json!(0)),
             ("start_ms", serde_json::json!(90000001)),
         ] {
             let mut invalid = wire();
             invalid[field] = bad;
-            assert!(!serde_json::from_value::<ResearchRequest>(invalid)
-                .is_ok_and(|request| request.valid()), "{field}");
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(invalid)
+                    .is_ok_and(|request| request.valid()),
+                "{field}"
+            );
         }
         let mut oversized = wire();
-        oversized["instruments"] = serde_json::json!(vec!["BTC-USDT";9]);
-        assert!(!serde_json::from_value::<ResearchRequest>(oversized)
-            .unwrap().valid());
+        oversized["instruments"] = serde_json::json!(vec!["BTC-USDT"; 9]);
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(oversized)
+                .unwrap()
+                .valid()
+        );
         let mut future = wire();
         future["graph_signal"]["graph"]["steps"][0]["op"] =
             serde_json::json!("forward_return_label");
-        assert!(!serde_json::from_value::<ResearchRequest>(future)
-            .unwrap().valid());
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(future)
+                .unwrap()
+                .valid()
+        );
         let mut expensive = wire();
         expensive["end_ms"] = serde_json::json!(900000 * 600000u64);
-        assert!(!serde_json::from_value::<ResearchRequest>(expensive)
-            .unwrap().valid());
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(expensive)
+                .unwrap()
+                .valid()
+        );
     }
 }

@@ -232,7 +232,10 @@ mod tests {
         let mut flatten = spec();
         flatten.missing = MissingSignalPolicy::Flat;
         assert_eq!(
-            CheckedGraphSignal::compile(flatten, 3).unwrap().target(&unknown).unwrap(),
+            CheckedGraphSignal::compile(flatten, 3)
+                .unwrap()
+                .target(&unknown)
+                .unwrap(),
             Some(0)
         );
         let mut wrong = unknown.clone();

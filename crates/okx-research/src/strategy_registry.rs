@@ -1,8 +1,8 @@
 //! Causal replay for registered and composed research signals.
 //! Signals at close t execute at open t+1 through one money ledger.
+use crate::graph_signal::{GraphSignalSpec, compiled_graph};
 #[cfg(test)]
 use okx_analysis::operators::EmaParameters;
-use crate::graph_signal::{GraphSignalSpec, compiled_graph};
 use okx_analysis::operators::{StrategyKernel, StrategyParameters};
 use okx_analysis::query_plan::ClosedBar;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -760,7 +760,7 @@ fn hash_chunks<T: Serialize>(values: &[T], cancel: &impl Fn() -> bool) -> Result
 mod tests {
     use super::*;
     use crate::economic_audit::{audit_graph_replay, audit_replay};
-    use crate::graph_signal::{MissingSignalPolicy, GRAPH_SIGNAL_VERSION};
+    use crate::graph_signal::{GRAPH_SIGNAL_VERSION, MissingSignalPolicy};
     use okx_analysis::query_plan::COMPOSITION_VERSION;
     #[test]
     fn t13_streaming_dataset_hash_matches_original_replay_digest_at_page_boundaries() {
@@ -865,7 +865,10 @@ mod tests {
         );
         assert_eq!(composed.summary.pnl_exact, original.summary.pnl_exact);
         assert_eq!(composed.summary.fees_exact, original.summary.fees_exact);
-        assert_eq!(composed.summary.funding_exact, original.summary.funding_exact);
+        assert_eq!(
+            composed.summary.funding_exact,
+            original.summary.funding_exact
+        );
         assert_ne!(composed.summary.funding_exact, "0");
         assert_ne!(composed.hash, original.hash);
         assert_eq!(composed.trades[0].time, series[3].time);
@@ -880,8 +883,10 @@ mod tests {
         )
         .unwrap();
         let checked_named =
-            audit_replay(&series, &named, &original, "USDT", 3, series.len(), &|| false)
-                .unwrap();
+            audit_replay(&series, &named, &original, "USDT", 3, series.len(), &|| {
+                false
+            })
+            .unwrap();
         assert_eq!(checked_graph.net_exact, checked_named.net_exact);
         assert_eq!(checked_graph.fees_exact, checked_named.fees_exact);
     }
@@ -903,7 +908,9 @@ mod tests {
         graph.graph.missing = MissingSignalPolicy::Flat;
         assert_ne!(
             first.hash,
-            replay_graph(&series, &graph, 2, series.len(), &|| false).unwrap().hash
+            replay_graph(&series, &graph, 2, series.len(), &|| false)
+                .unwrap()
+                .hash
         );
     }
 
@@ -928,7 +935,8 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "id":"future", "op":"forward_return_label", "input":"close",
                 "when":"positive", "period":2
-            })).unwrap(),
+            }))
+            .unwrap(),
         );
         assert_eq!(
             replay_graph(&series, &graph, 3, series.len(), &|| false).unwrap_err(),
