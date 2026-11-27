@@ -585,7 +585,11 @@ fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
     assert_eq!(unambiguous["matched_request_id"], shared.as_str());
     assert_eq!(unambiguous["retained"], 1);
 
-    projection.publish(snapshot(&second_job, unrelated.clone(), vec![shared.clone()]));
+    projection.publish(snapshot(
+        &second_job,
+        unrelated.clone(),
+        vec![shared.clone()],
+    ));
     let collision = projection.read_by_invocation(shared.as_str());
     assert_eq!(collision["state"], "NOT_EVALUATED");
     assert_eq!(collision["reason_code"], "AMBIGUOUS_REQUEST_ORIGIN");
