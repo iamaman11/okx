@@ -85,8 +85,12 @@ fn parse_catalog(swap: &[u8], futures: &[u8]) -> Result<(Vec<InstrumentSpec>, St
     let mut instruments = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for (bytes, expected) in [(swap, "SWAP"), (futures, "FUTURES")] {
-        let rows: Vec<PublicInstrument> =
-            crate::independent_source::rows(bytes, 20_000, "REFERENCE_SOURCE_INVALID")?;
+        let rows: Vec<PublicInstrument> = crate::independent_source::rows_bounded(
+            bytes,
+            20_000,
+            crate::independent_source::MAX_PUBLIC_INSTRUMENTS_BYTES,
+            "REFERENCE_SOURCE_INVALID",
+        )?;
         if rows.is_empty() {
             return Err("REFERENCE_SOURCE_INVALID".into());
         }
@@ -384,6 +388,40 @@ mod tests {
         assert_eq!(a[1].funding_requirement, FundingRequirement::Required);
         let bad = br#"{"code":"0","data":[{"instType":"SWAP","instId":"X","state":"live","tickSz":"1","lotSz":"1","minSz":"1","settleCcy":"USDT"}]}"#;
         assert!(parse_catalog(bad, &futures).is_err());
+    }
+
+    #[test]
+    fn complete_large_catalog_keeps_global_generation_without_unbounded_body() {
+        let mut swap: Value = serde_json::from_slice(&payload("SWAP", &["BTC-USDT-SWAP"])).unwrap();
+        swap["data"][0]["ignored_public_field"] =
+            json!("x".repeat(okx_research_protocol::research_ipc::MAX_FRAME_BYTES / 8));
+        let large_swap = serde_json::to_vec(&swap).unwrap();
+        let futures = payload("FUTURES", &["BTC-USDT-2"]);
+        assert!(large_swap.len() > okx_research_protocol::research_ipc::MAX_FRAME_BYTES / 8);
+        assert!(large_swap.len() < crate::independent_source::MAX_PUBLIC_INSTRUMENTS_BYTES);
+        assert!(
+            crate::independent_source::rows::<Value>(
+                &large_swap,
+                20_000,
+                "REFERENCE_SOURCE_INVALID"
+            )
+            .is_err()
+        );
+        let (rows, large_generation) = parse_catalog(&large_swap, &futures).unwrap();
+        let (_, ordinary_generation) =
+            parse_catalog(&payload("SWAP", &["BTC-USDT-SWAP"]), &futures).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            large_generation, ordinary_generation,
+            "irrelevant response padding must not alter catalog generation"
+        );
+
+        swap["data"][0]["ignored_public_field"] =
+            json!("x".repeat(crate::independent_source::MAX_PUBLIC_INSTRUMENTS_BYTES));
+        assert!(matches!(
+            parse_catalog(&serde_json::to_vec(&swap).unwrap(), &futures),
+            Err(reason) if reason == "RESEARCH_PUBLIC_BODY_INVALID"
+        ));
     }
     #[test]
     fn universe_cursor_and_generation_are_enforced() {

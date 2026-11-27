@@ -489,7 +489,7 @@ impl AnalyticsService {
                 "read_data_via":["trades","equity"],"side_effects":"none"
             }));
         }
-        let metadata = json!({
+        let mut metadata = json!({
             "job_id":job_id,"artifact":artifact,
             "expires_at_ms":j.expires_at_ms,
             "summary":value.get("summary").or_else(||value.pointer("/test/summary")),
@@ -508,6 +508,12 @@ impl AnalyticsService {
             "result_hash":value.get("hash"),
             "experiment_artifact":value.get("experiment_artifact")
         });
+        // A researcher reopening a graph job needs the actual typed recipe,
+        // not just an opaque artifact ID. Named replay projections stay byte
+        // compatible; only graph results include this immutable input.
+        if let Some(signal) = value.get("graph_signal") {
+            metadata["graph_signal"] = signal.clone();
+        }
         // A batch summary is a compact overview, NOT a trade-page of bulky
         // per-instrument grid payloads. Drill down via an instrument cursor.
         if matches!(view, ResearchResultView::Summary) && value.get("instruments").is_some() {

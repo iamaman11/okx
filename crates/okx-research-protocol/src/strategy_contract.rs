@@ -94,6 +94,73 @@ pub struct CompositionRequest {
     pub result_steps: Vec<String>,
 }
 
+pub const GRAPH_SIGNAL_VERSION: &str = "okx.graph-signal/v1";
+
+/// Research-only, versioned recipe for interpreting a causal graph as a
+/// desired position. The graph compiler and executor remain in their existing
+/// owners; the protocol contains data and bounded structural checks only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphSignalSpec {
+    pub version: String,
+    pub graph: CompositionRequest,
+    pub signal_step: String,
+    pub target_if_true: i8,
+    pub target_if_false: i8,
+    pub missing: MissingSignalPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingSignalPolicy {
+    /// No implicit position change when the input is unavailable.
+    Hold,
+    /// Explicitly flatten an unknown signal; the choice is in the artifact.
+    Flat,
+}
+
+impl GraphSignalSpec {
+    /// Reject oversized or obviously unsafe envelopes before allocating a job.
+    /// The checked graph compiler performs unit, reference, and cost analysis.
+    pub fn valid_structure(&self) -> bool {
+        self.version == GRAPH_SIGNAL_VERSION
+            && self.graph.version == "okx.market.composition/v1"
+            && (1..=32).contains(&self.graph.steps.len())
+            && (1..=14).contains(&self.graph.result_steps.len())
+            && self.graph.result_steps.contains(&self.signal_step)
+            && valid_step_id(&self.signal_step)
+            && self.graph.result_steps.iter().all(|id| valid_step_id(id))
+            && self.graph.steps.iter().all(|step| {
+                valid_step_id(&step.id)
+                    && valid_source_ref(&step.input)
+                    && step
+                        .other
+                        .as_deref()
+                        .is_none_or(valid_source_ref)
+                    && step.when.as_deref().is_none_or(valid_step_id)
+                    && step.period.is_none_or(|period| (1..=1000).contains(&period))
+                    && step.threshold.is_none_or(f64::is_finite)
+                    && step.op != SeriesOp::ForwardReturnLabel
+            })
+            && (-1..=1).contains(&self.target_if_true)
+            && (-1..=1).contains(&self.target_if_false)
+    }
+}
+
+fn valid_step_id(value: &str) -> bool {
+    (1..=32).contains(&value.len())
+        && value
+            .bytes()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'_')
+}
+
+fn valid_source_ref(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'_')
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SeriesStep {
@@ -158,5 +225,51 @@ mod tests {
             StrategyParameters::Ema(EmaParameters { fast: 2, slow: 5 }).warmup_for("ema_cross_v1"),
             Ok(5)
         );
+    }
+
+    #[test]
+    fn graph_signal_wire_is_strict_versioned_and_causal_before_job_admission() {
+        let wire = serde_json::json!({
+            "version":GRAPH_SIGNAL_VERSION,
+            "graph":{
+                "version":"okx.market.composition/v1",
+                "steps":[
+                    {"id":"returns","op":"returns_series","input":"close"},
+                    {"id":"rise","op":"greater_than","input":"returns","threshold":0.0}
+                ],
+                "result_steps":["rise"]
+            },
+            "signal_step":"rise","target_if_true":1,"target_if_false":0,"missing":"hold"
+        });
+        let graph: GraphSignalSpec = serde_json::from_value(wire.clone()).unwrap();
+        assert!(graph.valid_structure());
+        assert_eq!(serde_json::to_value(&graph).unwrap(), wire);
+
+        for (field, bad) in [
+            ("version", serde_json::json!("unknown")),
+            ("signal_step", serde_json::json!("missing")),
+            ("target_if_true", serde_json::json!(2)),
+            ("target_if_false", serde_json::json!(-2)),
+        ] {
+            let mut changed = wire.clone();
+            changed[field] = bad;
+            assert!(!serde_json::from_value::<GraphSignalSpec>(changed)
+                .is_ok_and(|spec| spec.valid_structure()), "{field}");
+        }
+        let mut unknown = wire.clone();
+        unknown["unexpected"] = serde_json::json!("forbidden");
+        assert!(serde_json::from_value::<GraphSignalSpec>(unknown).is_err());
+
+        let mut future = wire.clone();
+        future["graph"]["steps"][1]["op"] = serde_json::json!("forward_return_label");
+        assert!(!serde_json::from_value::<GraphSignalSpec>(future)
+            .unwrap().valid_structure());
+
+        let mut oversized = wire;
+        oversized["graph"]["steps"] = serde_json::json!(vec![
+            serde_json::json!({"id":"a","op":"returns_series","input":"close"});33
+        ]);
+        assert!(!serde_json::from_value::<GraphSignalSpec>(oversized)
+            .unwrap().valid_structure());
     }
 }

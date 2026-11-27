@@ -12,6 +12,36 @@ const CANDLE_START_MS: u64 = CANDLE_INTERVAL_MS;
 const CANDLE_END_MS: u64 = CANDLE_START_MS + 20 * CANDLE_INTERVAL_MS;
 const CANDLE_GAP_MS: u64 = CANDLE_START_MS + 10 * CANDLE_INTERVAL_MS;
 
+#[tokio::test]
+async fn graph_preflight_rejects_unsupported_operator_without_job_or_venue_get() {
+    let transport = RecordedGet::new(vec![]);
+    let (root, service) = service_with_source(transport.client());
+    let request: ResearchRequest = serde_json::from_value(json!({
+        "action":"graph_backtest", "idempotency_key":"graph-invalid-no-sources",
+        "instruments":["BTC-USDT"],"timeframe_ms":CANDLE_INTERVAL_MS,
+        "start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,
+        "graph_signal":{
+            "version":"okx.graph-signal/v1",
+            "graph":{"version":"okx.market.composition/v1","steps":[
+                {"id":"vol","op":"rolling_stddev","input":"close","period":2},
+                {"id":"signal","op":"greater_than","input":"vol","threshold":0}
+            ],"result_steps":["signal"]},
+            "signal_step":"signal","target_if_true":1,"target_if_false":0,
+            "missing":"hold"
+        },
+        "costs":{"maker_fee_bps":0,"taker_fee_bps":10,"slippage_bps":5,
+            "funding_mode":"zero_assumption"},
+        "data_mode":"counterfactual"
+    })).unwrap();
+    assert!(request.valid());
+    assert_eq!(service.research(request).await.unwrap_err(),
+        "composition.stream:OPERATOR_NOT_INCREMENTAL");
+    assert!(service.jobs.snapshot().is_empty());
+    assert!(transport.routes.lock().unwrap().is_empty());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn t06_historical_funding_never_falls_back_to_predicted_rate() {
     assert_eq!(
@@ -578,6 +608,54 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
         .unwrap();
     assert_eq!(experiment["spec"]["strategy_id"], "ema_momentum_confirm_v1");
     assert_eq!(experiment["spec"]["parameters"], json!({"fast":1,"slow":2}));
+    // The operator passes an existing causal market graph as data to the SAME
+    // Research owner. No new StrategyKernel, finance owner or service exists.
+    let graph_request: ResearchRequest = serde_json::from_value(json!({
+        "action":"graph_backtest", "idempotency_key":"c20-graph-through-research-owner",
+        "instruments":["BTC-USDT"],"timeframe_ms":CANDLE_INTERVAL_MS,
+        "start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,
+        "graph_signal":{
+            "version":"okx.graph-signal/v1",
+            "graph":{"version":"okx.market.composition/v1","steps":[
+                {"id":"gain","op":"returns_series","input":"close"},
+                {"id":"entry","op":"greater_than","input":"gain","threshold":0}
+            ],"result_steps":["entry"]},
+            "signal_step":"entry","target_if_true":1,"target_if_false":0,
+            "missing":"hold"
+        },
+        "costs":{"maker_fee_bps":8,"taker_fee_bps":10,"slippage_bps":5,
+            "funding_mode":"zero_assumption"},
+        "data_mode":"counterfactual","seed":7
+    })).unwrap();
+    assert!(graph_request.valid());
+    let graph_job = service.research(graph_request).await.unwrap()["id"]
+        .as_str().unwrap().to_owned();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = service.jobs.get(&graph_job).unwrap();
+            match state.state {
+                super::super::jobs::State::Completed => break,
+                super::super::jobs::State::Failed => panic!("graph job failed: {:?}", state.error),
+                _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        }
+    }).await.unwrap();
+    let graph_result = service.research(ResearchRequest::Result {
+        job_id: graph_job.clone(), cursor: None, limit: 20,
+        view: ResearchResultView::Summary,
+    }).await.unwrap();
+    assert!(graph_result["metadata"]["summary"]["trades"].as_u64().unwrap() > 0);
+    assert_eq!(graph_result["metadata"]["graph_signal"]["signal_step"], "entry");
+    assert_eq!(graph_result["metadata"]["economic_audit"]["net_exact"],
+        graph_result["metadata"]["summary"]["pnl_exact"]);
+    let graph_experiment: serde_json::Value = service.artifacts.read_evidence_json(
+        graph_result["metadata"]["experiment_artifact"].as_str().unwrap()).unwrap();
+    assert_eq!(graph_experiment["graph_spec"]["graph"]["signal_step"], "entry");
+    assert!(graph_experiment.get("spec").is_none());
+    let exported = service.research(ResearchRequest::Result {
+        job_id: graph_job, cursor: None, limit: 20, view: ResearchResultView::Export,
+    }).await.unwrap();
+    assert_eq!(exported["integrity"]["reexecution"]["quality"], "verified_reexecution");
     let before = service.jobs.snapshot().len();
     if let ResearchRequest::Backtest { strategy_id, .. } = &mut request {
         *strategy_id = "unregistered_source_code".into();

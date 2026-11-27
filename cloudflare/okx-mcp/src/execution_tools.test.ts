@@ -312,6 +312,28 @@ fail(!validTool('research',{...run,variants:[{fast:9,slow:21}]}),'backtest canno
 fail(!validTool('research',{...gridBase,action:'grid'}),'grid variants are mandatory');
 fail(!validTool('research',{...gridPayload,raw_rpc:'forbidden'}),'grid remains strictly typed');
 payloadFixtures.push({tool:'research',action:'grid',positive:gridPayload,negative:[{...gridPayload,raw_rpc:'forbidden'}]});
+const {strategy_id:_graphStrategy,parameters:_graphParameters,...graphBase}=run;
+const graphSignal={version:'okx.graph-signal/v1',graph:{version:'okx.market.composition/v1',steps:[
+ {id:'change',op:'returns_series',input:'close'},
+ {id:'up',op:'greater_than',input:'change',threshold:0},
+],result_steps:['up']},signal_step:'up',target_if_true:1,target_if_false:0,missing:'hold'};
+const graphPayload={...graphBase,action:'graph_backtest',graph_signal:graphSignal};
+fail(validTool('research',graphPayload),'research graph backtest is a typed causal operation');
+fail(isExecutionMutation('research','graph_backtest'),'graph research jobs are correctly marked mutations');
+const graphInvalid=[
+ {...graphPayload,strategy_id:'ema_cross_v1'},
+ {...graphPayload,graph_signal:{...graphSignal,version:'unknown'}},
+ {...graphPayload,graph_signal:{...graphSignal,target_if_true:2}},
+ {...graphPayload,graph_signal:{...graphSignal,signal_step:'missing'}},
+ {...graphPayload,graph_signal:{...graphSignal,missing:'buy'}},
+ {...graphPayload,graph_signal:{...graphSignal,raw_source:'not_typed'}},
+ {...graphPayload,graph_signal:{...graphSignal,graph:{...graphSignal.graph,steps:[...graphSignal.graph.steps,{id:'future',op:'forward_return_label',input:'close',period:3,when:'up'}]}}},
+ {...graphPayload,graph_signal:{...graphSignal,graph:{...graphSignal.graph,steps:[{id:'change',op:'returns_series',input:'close',period:2},graphSignal.graph.steps[1]]}}},
+ {...graphPayload,raw_rpc:'forbidden'},
+];
+for(const bad of graphInvalid)
+ fail(!validTool('research',bad),'research graph rejects malformed or noncausal input before native dispatch');
+payloadFixtures.push({tool:'research',action:'graph_backtest_causal',positive:graphPayload,negative:graphInvalid});
 // Public acceptance must not promise unsupported live strategy versions/bounds.
 const liveCreate=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='create')!.positive;
 const liveUpdate=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='update')!.positive;
@@ -412,7 +434,8 @@ for(const tool of PUBLIC_TOOLS as any[]){
     'host-only linked account selector is bounded');
   fail(expanded.oneOf.length===ACTION_SCHEMAS.accounts.length
     && expanded.oneOf.every((branch:any)=>branch.additionalProperties===false
-      && branch.properties?.link_id?.pattern==='^link_[a-f0-9]{32}$'),
+      && Object.keys(branch.properties?.link_id??{}).length===0
+      && (branch.properties?.action?.const||branch.properties?.action?.enum)),
     'every account action retains strict allowed fields');
   fail(!validTool('accounts',{action:'list',link_id:'link_fixture'}),
     'native protocol never accepts host-only link selector');
@@ -426,12 +449,23 @@ for(const tool of PUBLIC_TOOLS as any[]){
     properties:{action:branch.properties.action,account:expanded.properties.account,...branch.properties},
     required:['action','account',...branch.required.filter((key:string)=>key!=='action')],
     additionalProperties:false,
+  })):tool.name==='research'?expanded.oneOf.map((branch:any)=>({
+    properties:Object.fromEntries(Object.entries(branch.properties).map(([field,rule])=>
+      [field,field==='graph_signal'?
+        ACTION_SCHEMAS.research.find((s:any)=>s.properties.action.const==='graph_backtest')!.properties.graph_signal:
+        (Object.keys(rule as object).length===0?expanded.properties[field]:rule)])),
+    ...Object.fromEntries(Object.entries(branch).filter(([key])=>key!=='properties')),
   })):expanded.oneOf;
   if(tool.name==='strategies')
     fail(expanded.type==='object' && expanded.unevaluatedProperties===false
       && expanded.required.length===1 && expanded.required[0]==='account',
       'factored strategies schema stays strict at the root');
-  const comparable=tool.name==='strategies'?{oneOf:variants}:expanded;
+  if(tool.name==='research')
+    fail(Object.keys(expanded.properties).length>7&&
+      expanded.oneOf.find((branch:any)=>branch.properties.action.const==='graph_backtest')?.properties.graph_signal?.type==='object'&&
+      variants.every((branch:any)=>branch.additionalProperties===false),
+      'research shared types preserve action-specific closed objects');
+  const comparable=tool.name==='strategies'||tool.name==='research'?{oneOf:variants}:expanded;
   fail(JSON.stringify(comparable)===JSON.stringify({oneOf:ACTION_SCHEMAS[tool.name]}),
     `exact public schema factoring ${tool.name}`);
   for(const fixture of payloadFixtures.filter(x=>x.tool===tool.name))

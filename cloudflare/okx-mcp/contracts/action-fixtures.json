@@ -1016,6 +1016,160 @@
   },
   {
     "tool": "research",
+    "action": "graph_backtest",
+    "positive": {
+      "action": "graph_backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 60000,
+      "start_ms": 0,
+      "end_ms": 100000,
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "graph_signal": {
+        "version": "okx.graph-signal/v1",
+        "graph": {
+          "version": "okx.market.composition/v1",
+          "steps": [
+            {
+              "id": "fixture",
+              "op": "returns_series",
+              "input": "fixture"
+            }
+          ],
+          "result_steps": [
+            "fixture"
+          ]
+        },
+        "signal_step": "fixture",
+        "target_if_true": -1,
+        "target_if_false": -1,
+        "missing": "hold"
+      }
+    },
+    "negative": [
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "fixture",
+                "op": "returns_series",
+                "input": "fixture"
+              }
+            ],
+            "result_steps": [
+              "fixture"
+            ]
+          },
+          "signal_step": "fixture",
+          "target_if_true": -1,
+          "target_if_false": -1,
+          "missing": "hold"
+        },
+        "raw_rpc": "forbidden"
+      },
+      {
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "fixture",
+                "op": "returns_series",
+                "input": "fixture"
+              }
+            ],
+            "result_steps": [
+              "fixture"
+            ]
+          },
+          "signal_step": "fixture",
+          "target_if_true": -1,
+          "target_if_false": -1,
+          "missing": "hold"
+        }
+      },
+      {
+        "action": 12,
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "fixture",
+                "op": "returns_series",
+                "input": "fixture"
+              }
+            ],
+            "result_steps": [
+              "fixture"
+            ]
+          },
+          "signal_step": "fixture",
+          "target_if_true": -1,
+          "target_if_false": -1,
+          "missing": "hold"
+        }
+      }
+    ]
+  },
+  {
+    "tool": "research",
     "action": "benchmark",
     "positive": {
       "action": "benchmark",
@@ -1811,6 +1965,453 @@
             "slow": 21
           }
         ],
+        "raw_rpc": "forbidden"
+      }
+    ]
+  },
+  {
+    "tool": "research",
+    "action": "graph_backtest_causal",
+    "positive": {
+      "action": "graph_backtest",
+      "idempotency_key": "command_0001",
+      "instruments": [
+        "fixture"
+      ],
+      "timeframe_ms": 60000,
+      "start_ms": 0,
+      "end_ms": 100000,
+      "costs": {
+        "maker_fee_bps": 0,
+        "taker_fee_bps": 0,
+        "slippage_bps": 0,
+        "funding_mode": "observed"
+      },
+      "data_mode": "historical_observed",
+      "graph_signal": {
+        "version": "okx.graph-signal/v1",
+        "graph": {
+          "version": "okx.market.composition/v1",
+          "steps": [
+            {
+              "id": "change",
+              "op": "returns_series",
+              "input": "close"
+            },
+            {
+              "id": "up",
+              "op": "greater_than",
+              "input": "change",
+              "threshold": 0
+            }
+          ],
+          "result_steps": [
+            "up"
+          ]
+        },
+        "signal_step": "up",
+        "target_if_true": 1,
+        "target_if_false": 0,
+        "missing": "hold"
+      }
+    },
+    "negative": [
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "change",
+                "op": "returns_series",
+                "input": "close"
+              },
+              {
+                "id": "up",
+                "op": "greater_than",
+                "input": "change",
+                "threshold": 0
+              }
+            ],
+            "result_steps": [
+              "up"
+            ]
+          },
+          "signal_step": "up",
+          "target_if_true": 1,
+          "target_if_false": 0,
+          "missing": "hold"
+        },
+        "strategy_id": "ema_cross_v1"
+      },
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "unknown",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "change",
+                "op": "returns_series",
+                "input": "close"
+              },
+              {
+                "id": "up",
+                "op": "greater_than",
+                "input": "change",
+                "threshold": 0
+              }
+            ],
+            "result_steps": [
+              "up"
+            ]
+          },
+          "signal_step": "up",
+          "target_if_true": 1,
+          "target_if_false": 0,
+          "missing": "hold"
+        }
+      },
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "change",
+                "op": "returns_series",
+                "input": "close"
+              },
+              {
+                "id": "up",
+                "op": "greater_than",
+                "input": "change",
+                "threshold": 0
+              }
+            ],
+            "result_steps": [
+              "up"
+            ]
+          },
+          "signal_step": "up",
+          "target_if_true": 2,
+          "target_if_false": 0,
+          "missing": "hold"
+        }
+      },
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "change",
+                "op": "returns_series",
+                "input": "close"
+              },
+              {
+                "id": "up",
+                "op": "greater_than",
+                "input": "change",
+                "threshold": 0
+              }
+            ],
+            "result_steps": [
+              "up"
+            ]
+          },
+          "signal_step": "missing",
+          "target_if_true": 1,
+          "target_if_false": 0,
+          "missing": "hold"
+        }
+      },
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "change",
+                "op": "returns_series",
+                "input": "close"
+              },
+              {
+                "id": "up",
+                "op": "greater_than",
+                "input": "change",
+                "threshold": 0
+              }
+            ],
+            "result_steps": [
+              "up"
+            ]
+          },
+          "signal_step": "up",
+          "target_if_true": 1,
+          "target_if_false": 0,
+          "missing": "buy"
+        }
+      },
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "change",
+                "op": "returns_series",
+                "input": "close"
+              },
+              {
+                "id": "up",
+                "op": "greater_than",
+                "input": "change",
+                "threshold": 0
+              }
+            ],
+            "result_steps": [
+              "up"
+            ]
+          },
+          "signal_step": "up",
+          "target_if_true": 1,
+          "target_if_false": 0,
+          "missing": "hold",
+          "raw_source": "not_typed"
+        }
+      },
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "change",
+                "op": "returns_series",
+                "input": "close"
+              },
+              {
+                "id": "up",
+                "op": "greater_than",
+                "input": "change",
+                "threshold": 0
+              },
+              {
+                "id": "future",
+                "op": "forward_return_label",
+                "input": "close",
+                "period": 3,
+                "when": "up"
+              }
+            ],
+            "result_steps": [
+              "up"
+            ]
+          },
+          "signal_step": "up",
+          "target_if_true": 1,
+          "target_if_false": 0,
+          "missing": "hold"
+        }
+      },
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "change",
+                "op": "returns_series",
+                "input": "close",
+                "period": 2
+              },
+              {
+                "id": "up",
+                "op": "greater_than",
+                "input": "change",
+                "threshold": 0
+              }
+            ],
+            "result_steps": [
+              "up"
+            ]
+          },
+          "signal_step": "up",
+          "target_if_true": 1,
+          "target_if_false": 0,
+          "missing": "hold"
+        }
+      },
+      {
+        "action": "graph_backtest",
+        "idempotency_key": "command_0001",
+        "instruments": [
+          "fixture"
+        ],
+        "timeframe_ms": 60000,
+        "start_ms": 0,
+        "end_ms": 100000,
+        "costs": {
+          "maker_fee_bps": 0,
+          "taker_fee_bps": 0,
+          "slippage_bps": 0,
+          "funding_mode": "observed"
+        },
+        "data_mode": "historical_observed",
+        "graph_signal": {
+          "version": "okx.graph-signal/v1",
+          "graph": {
+            "version": "okx.market.composition/v1",
+            "steps": [
+              {
+                "id": "change",
+                "op": "returns_series",
+                "input": "close"
+              },
+              {
+                "id": "up",
+                "op": "greater_than",
+                "input": "change",
+                "threshold": 0
+              }
+            ],
+            "result_steps": [
+              "up"
+            ]
+          },
+          "signal_step": "up",
+          "target_if_true": 1,
+          "target_if_false": 0,
+          "missing": "hold"
+        },
         "raw_rpc": "forbidden"
       }
     ]
