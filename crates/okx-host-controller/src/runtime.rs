@@ -16,11 +16,11 @@ use tokio::{
 
 use crate::{
     HostControlError, HostControlResult as LocalResult,
-    attestor::{self, ObservationRequest},
-    auth::load_native_attestor_token,
     artifact::{
         deploy_agent, install_launcher_root, stage_controller_update, upgrade_launcher_root,
     },
+    attestor::{self, ObservationRequest},
+    auth::load_native_attestor_token,
     autostart, controller_update,
     lifecycle_executor::HostExecutor,
     root_migration,

@@ -77,7 +77,9 @@ fn validate_attestor_token(token: &str) -> HostControlResult<()> {
     // Provision a cryptographically random 256-bit bearer as lowercase hex.
     // A fixed format cannot establish entropy; generation is an operator duty.
     if token.len() != 64
-        || !token.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(HostControlError::InvalidAttestorToken);
     }
@@ -218,8 +220,14 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn attestor_uses_a_distinct_windows_credential_target() {
-        assert_ne!(WINDOWS_ATTESTOR_CREDENTIAL_SERVICE, WINDOWS_CREDENTIAL_SERVICE);
-        assert_ne!(WINDOWS_ATTESTOR_CREDENTIAL_ACCOUNT, WINDOWS_CREDENTIAL_ACCOUNT);
+        assert_ne!(
+            WINDOWS_ATTESTOR_CREDENTIAL_SERVICE,
+            WINDOWS_CREDENTIAL_SERVICE
+        );
+        assert_ne!(
+            WINDOWS_ATTESTOR_CREDENTIAL_ACCOUNT,
+            WINDOWS_CREDENTIAL_ACCOUNT
+        );
         let mock = keyring::mock::Store::new().unwrap();
         let attestor = entry_from_store(
             mock.as_ref(),
@@ -233,7 +241,9 @@ mod tests {
             WINDOWS_CREDENTIAL_ACCOUNT,
         )
         .unwrap();
-        attestor.set_secret(b"test-attestor-secret-0000000000000").unwrap();
+        attestor
+            .set_secret(b"test-attestor-secret-0000000000000")
+            .unwrap();
         assert!(matches!(github.get_secret(), Err(keyring::Error::NoEntry)));
     }
 }

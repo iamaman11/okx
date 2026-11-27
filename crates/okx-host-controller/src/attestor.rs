@@ -164,9 +164,9 @@ where
         Duration::from_secs(2),
         sink.send(Message::Text(payload.into())),
     )
-        .await
-        .map_err(|_| "ATTESTOR_SEND_TIMEOUT")?
-        .map_err(|_| "ATTESTOR_SEND_FAILED")
+    .await
+    .map_err(|_| "ATTESTOR_SEND_TIMEOUT")?
+    .map_err(|_| "ATTESTOR_SEND_FAILED")
 }
 
 fn connection_id() -> Result<String, &'static str> {
@@ -340,7 +340,11 @@ mod tests {
         assert!(far_future.validate(&far_future.session_id, 7, now).is_err());
         let mut no_research_generation = correct.clone();
         no_research_generation.research_connection_generation = 0;
-        assert!(no_research_generation.validate(&no_research_generation.session_id, 7, now).is_err());
+        assert!(
+            no_research_generation
+                .validate(&no_research_generation.session_id, 7, now)
+                .is_err()
+        );
     }
 
     #[test]
@@ -356,7 +360,10 @@ mod tests {
             "research_connection_generation": 9,
             "deadline_ms": 1800000002500_u64,
         });
-        assert!(matches!(parse_frame(Message::Text(frame.to_string().into())), Ok(IncomingFrame::ObserveResearch { .. })));
+        assert!(matches!(
+            parse_frame(Message::Text(frame.to_string().into())),
+            Ok(IncomingFrame::ObserveResearch { .. })
+        ));
         frame["trade"] = serde_json::json!(true);
         assert!(parse_frame(Message::Text(frame.to_string().into())).is_err());
         frame["type"] = serde_json::json!("start_research");
