@@ -61,3 +61,37 @@ authenticate. There is no implicit credential reuse or fallback.
 
 Do not publish workstation identifiers, process paths, tokens, or live
 fingerprints in public issue comments or pull-request logs.
+
+## Hermetic negative acceptance versus physical proof
+
+The Cloudflare CI test roster runs
+`scripts/test-control-attestor-do.mjs` inside the installed Miniflare/workerd
+runtime. It bundles the production Worker bearer prefilter and
+`RuntimeSession` Durable Object behind a **test-only** local entrypoint
+(`src/integration/control_attestor_entry.ts`). Every request uses local
+`dispatchFetch`; Research and CONTROL connect as independent WebSocket
+clients with cryptographically generated, per-run fixture credentials. Real
+SQLite Durable Object state is retained across local workerd restarts. No
+production Worker route, Wrangler configuration, Windows service, deployed
+secret, Engine lifecycle, or finance operation is touched.
+
+| CI witness | Expected fail-closed result |
+| --- | --- |
+| Missing/cross-owner bearer, invalid first CONTROL hello | 401/1008; no authenticated CONTROL observation |
+| Research connected but CONTROL absent or disconnected | `CONTROL_ATTEST_OFFLINE` |
+| PID, installed SHA, or phase differs from Research WSS | `CONTROL_RESEARCH_PID_SHA_MISMATCH` |
+| Replayed completed observation | 1008; no previous PASS reuse |
+| Research WSS replacement during challenge | `RESEARCH_EDGE_GENERATION_CHANGED` |
+| CONTROL WSS replacement during challenge | `CONTROL_ATTEST_SOCKET_STALE`; Research remains independently live |
+| Three unanswered challenges plus a fourth | `CONTROL_ATTEST_BUSY`; bounded admission |
+| Missing answer past the Edge 2.5-second deadline | `CONTROL_ATTEST_TIMEOUT`; subsequent fresh challenge can PASS |
+| Persisted DO restarted with disabled/rotated test fingerprint | Disabled 503; old bearer 401; only fresh owner handshake/challenge can PASS |
+
+These fixtures are **physical-like CI only**. Cold binding changes simulate
+revocation/rotation across local workerd restart; they do **not** establish
+that an already-admitted production socket loses authority during live
+in-place secret rotation (that property has a separate in-memory DO test).
+They also cannot establish Windows process PID/SHA provenance, physical
+Research restarts, host Credential Manager behavior, or real Edge rollout.
+The controlled physical negatives in #634 stay pending until independently
+authorized and observed on the installed system.
