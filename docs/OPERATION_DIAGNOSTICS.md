@@ -37,6 +37,21 @@ complete causal history, exchange execution, or delivery acknowledgments.
 It rejects foreign job/intent references instead of summarizing them as
 observed.
 
+For a completed, precisely matched Research job, `next_action: "research.result"`
+means inspect `research.result` with that `job_id` and `view: "export"` for
+immutable artifact checksums, source attribution and reexecution evidence.
+An export reporting verified integrity proves the **result**, not the full
+request/queue/delivery history. Consequently the separate `operation_trace`
+still correctly reports `quality: "partial"`, `history: "UNKNOWN"` and
+`first_unproven_fact: "FULL_CAUSAL_HISTORY"`.
+
+Research graph preflight failures retain `data: null` and do not create a job.
+For native code `GRAPH_OPERATOR_NOT_INCREMENTAL`, Edge adds a bounded
+`diagnostic: {stage: "graph_preflight", step_id, operator}` and
+`next_action: "choose_supported_graph_operator"` **only** when the native
+step and operator match the strict known contract. Raw failure messages are
+never exposed by this projection; other errors retain generic diagnostics.
+
 **Identity semantics:** `operation_trace.diagnostic_request_id` is the new
 read-only diagnostic call. For a matched Research job,
 `operation_trace.origin_request_id` is the **original** request that admitted

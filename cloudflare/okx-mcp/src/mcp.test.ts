@@ -461,6 +461,54 @@ const mcpResponse=async(tool:string,args:unknown,response:unknown,releaseTree?:s
  return reply.result.structuredContent;
 };
 
+// Native Research rejects a non-incremental graph operator before admitting a
+// job. The Edge exposes only the exact allowlisted step/operator identity, not
+// a potentially sensitive or unbounded native failure message.
+const graphPreflightFixture=payloadFixtures.find(f=>f.tool==='research'&&f.action==='graph_backtest_causal')!.positive;
+const graphPreflightFailure=(code:string,message:string)=>({schema:'okx.agent.response/v1',
+ request_id:'req_graph_preflight',status:'failed',quality:'FRESH',warnings:[],result:null,
+ failure:{code,message,retryable:false}});
+const supportedGraphRejection=await mcpResponse('research',graphPreflightFixture,
+ graphPreflightFailure('GRAPH_OPERATOR_NOT_INCREMENTAL','graph_preflight:steps[volatility_1].op=rolling_stddev'));
+if(supportedGraphRejection.status!=='failed'||supportedGraphRejection.reason_code!=='GRAPH_OPERATOR_NOT_INCREMENTAL'||
+ supportedGraphRejection.retryable!==false||supportedGraphRejection.data!==null||
+ supportedGraphRejection.job_id!==undefined||supportedGraphRejection.result_id!==undefined||
+ supportedGraphRejection.next_action!=='choose_supported_graph_operator'||
+ supportedGraphRejection.diagnostic?.stage!=='graph_preflight'||
+ supportedGraphRejection.diagnostic?.step_id!=='volatility_1'||
+ supportedGraphRejection.diagnostic?.operator!=='rolling_stddev'||
+ JSON.stringify(supportedGraphRejection).includes('graph_preflight:steps['))
+ throw Error('graph preflight failed to project a bounded pre-job rejection');
+for(const operator of ['rolling_pearson','rolling_zscore'] as const){
+ const rejected:any=projectNativeResponse(graphPreflightFailure('GRAPH_OPERATOR_NOT_INCREMENTAL',
+  `graph_preflight:steps[step_1].op=${operator}`));
+ if(rejected.diagnostic?.operator!==operator||rejected.diagnostic.step_id!=='step_1'||
+    rejected.next_action!=='choose_supported_graph_operator')
+  throw Error('known non-incremental graph operator lost its typed diagnosis');
+}
+for(const [code,message] of [
+ ['GRAPH_OPERATOR_NOT_INCREMENTAL','graph_preflight:steps[volatility_1].op=rolling_stddev\nsecret'],
+ ['GRAPH_OPERATOR_NOT_INCREMENTAL','graph_preflight:steps[volatile-ID].op=rolling_stddev'],
+ ['GRAPH_OPERATOR_NOT_INCREMENTAL',`graph_preflight:steps[${'a'.repeat(33)}].op=rolling_stddev`],
+ ['GRAPH_OPERATOR_NOT_INCREMENTAL','graph_preflight:steps[volatility_1].op=trade_execute'],
+ ['GRAPH_OPERATOR_NOT_INCREMENTAL','other_stage:steps[volatility_1].op=rolling_stddev'],
+ ['RESEARCH_REQUEST_FAILED','graph_preflight:steps[volatility_1].op=rolling_stddev'],
+] as const){
+ const rejected:any=projectNativeResponse(graphPreflightFailure(code,message));
+ if(rejected.diagnostic!==undefined||rejected.next_action!=='inspect_diagnostics'||
+    rejected.data!==null||JSON.stringify(rejected).includes(message))
+  throw Error('untrusted graph failure message escaped strict preflight projection');
+}
+const inconsistentGraphResponse:any=projectNativeResponse({
+ ...graphPreflightFailure('GRAPH_OPERATOR_NOT_INCREMENTAL','graph_preflight:steps[risk].op=rolling_stddev'),
+ failure:{code:'GRAPH_OPERATOR_NOT_INCREMENTAL',
+   message:'graph_preflight:steps[risk].op=rolling_stddev',retryable:true}
+});
+if(inconsistentGraphResponse.diagnostic!==undefined||
+ inconsistentGraphResponse.next_action!=='inspect_diagnostics')
+ throw Error('retryable native error was promoted to a deterministic graph preflight');
+console.log('mcp_research_graph_preflight_safe_diagnostic PASS');
+
 // A configured Research bearer is the public routing cutover. Verify every
 // Research operation family, and ensure trading/portfolio financial ownership
 // is unchanged even with the independent owner enabled.
@@ -503,7 +551,10 @@ const aliasTrace=await mcpResponse('diagnostics',
 if(aliasTrace?.operation_trace?.state!=='OBSERVED'||
  aliasTrace.operation_trace.job_id!==originJob||
  aliasTrace.operation_trace.origin_request_id!=='req_original_01'||
- aliasTrace.operation_trace.next_action!=='research.result')
+ aliasTrace.operation_trace.next_action!=='research.result'||
+ aliasTrace.operation_trace.quality!=='partial'||aliasTrace.operation_trace.history!=='UNKNOWN'||
+ aliasTrace.operation_trace.first_unproven_fact!=='FULL_CAUSAL_HISTORY'||
+ aliasTrace.data.job.result_ref!==retryJob.result_ref)
  throw Error('Research retry request was not bound to its durable job');
 const accountDeniedTrace=await mcpResponse('diagnostics',
  {action:'explain',view:'operation',reference:'request:req_missing_account'},

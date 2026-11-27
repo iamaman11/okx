@@ -714,6 +714,27 @@ fn saturated_research_work_cannot_starve_cancel_or_explain() {
     ));
     assert_eq!(pending.len(), MAX_RESEARCH_IN_FLIGHT);
 }
+
+/// Public graph-rejection details are a closed, bounded subset of Research's
+/// compiler errors. All other errors remain opaque at the Edge boundary.
+fn graph_preflight_detail(reason: &str) -> Option<(&str, &str)> {
+    let details = reason.strip_prefix("GRAPH_OPERATOR_NOT_INCREMENTAL:")?;
+    let (step_id, operator) = details.split_once(':')?;
+    if step_id.is_empty()
+        || step_id.len() > 32
+        || !step_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        || !matches!(
+            operator,
+            "rolling_pearson" | "rolling_stddev" | "rolling_zscore"
+        )
+    {
+        return None;
+    }
+    Some((step_id, operator))
+}
+
 fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentResponse {
     let quality = match &result {
         Ok(value)
@@ -730,6 +751,7 @@ fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentRes
     let (status, result, failure) = match result {
         Ok(value) => (AgentResponseStatus::Completed, Some(value), None),
         Err(code) => {
+            let graph_detail = graph_preflight_detail(&code);
             let source_deferred =
                 okx_research_protocol::research_ipc::is_retryable_source_defer(&code);
             let retryable = source_deferred
@@ -737,22 +759,29 @@ fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentRes
                 || code == "RESEARCH_REQUEST_TIMEOUT";
             let safe_code = if source_deferred {
                 "MARKET_SOURCE_RETRYABLE".into()
+            } else if graph_detail.is_some() {
+                "GRAPH_OPERATOR_NOT_INCREMENTAL".into()
             } else if code == "GLOBAL_RANK_UNIVERSE_LIMIT:512"
                 || (code.len() <= 96
                     && code
                         .bytes()
                         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'))
             {
-                code
+                code.clone()
             } else {
                 "RESEARCH_REQUEST_FAILED".into()
+            };
+            let message = if let Some((step_id, operator)) = graph_detail {
+                format!("graph_preflight:steps[{step_id}].op={operator}")
+            } else {
+                "Research request unavailable".into()
             };
             (
                 AgentResponseStatus::Failed,
                 None,
                 Some(AgentFailure {
                     retryable,
-                    message: "Research request unavailable".into(),
+                    message,
                     code: safe_code,
                 }),
             )
@@ -1013,6 +1042,42 @@ mod tests {
             .code,
             "RESEARCH_OPERATION_FORBIDDEN",
         );
+    }
+
+    #[test]
+    fn graph_rejection_exposes_only_bounded_typed_preflight_detail() {
+        for operator in ["rolling_pearson", "rolling_stddev", "rolling_zscore"] {
+            let response = response_for(
+                "research_request_0123456789",
+                Err(format!("GRAPH_OPERATOR_NOT_INCREMENTAL:risk_1:{operator}")),
+            );
+            assert_eq!(response.status, AgentResponseStatus::Failed);
+            let failure = response.failure.unwrap();
+            assert_eq!(failure.code, "GRAPH_OPERATOR_NOT_INCREMENTAL");
+            assert_eq!(
+                failure.message,
+                format!("graph_preflight:steps[risk_1].op={operator}")
+            );
+            assert!(!failure.retryable);
+        }
+
+        for raw in [
+            "composition.stream:OPERATOR_NOT_INCREMENTAL",
+            "GRAPH_OPERATOR_NOT_INCREMENTAL::rolling_stddev",
+            "GRAPH_OPERATOR_NOT_INCREMENTAL:risk_1:unknown_operator",
+            "GRAPH_OPERATOR_NOT_INCREMENTAL:risk_1:rolling_stddev:extra",
+            "GRAPH_OPERATOR_NOT_INCREMENTAL:RISK_1:rolling_stddev",
+            "GRAPH_OPERATOR_NOT_INCREMENTAL:risk-1:rolling_stddev",
+            "GRAPH_OPERATOR_NOT_INCREMENTAL:risk_1:rolling_stddev\nprivate",
+            "GRAPH_OPERATOR_NOT_INCREMENTAL:123456789012345678901234567890123:rolling_stddev",
+        ] {
+            let failure = response_for("research_request_0123456789", Err(raw.into()))
+                .failure
+                .unwrap();
+            assert_eq!(failure.code, "RESEARCH_REQUEST_FAILED", "{raw}");
+            assert_eq!(failure.message, "Research request unavailable");
+            assert!(!failure.retryable);
+        }
     }
 
     #[tokio::test]
