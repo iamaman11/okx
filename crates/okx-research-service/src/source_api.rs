@@ -16,9 +16,9 @@ impl PublicSourceClient {
         Self(provider)
     }
     async fn request(&self, request: PublicSourceRequest) -> Result<PublicSourceReply, String> {
-        crate::source_io::request_started(&request);
+        let attempt = crate::source_io::request_started(&request);
         let result = self.0.request(request.clone()).await;
-        crate::source_io::request_finished(&request, &result);
+        attempt.finished(&result);
         result
     }
 
@@ -294,6 +294,13 @@ mod source_observation_tests {
         }
     }
 
+    struct NeverCompletes;
+    impl PublicSourceProvider for NeverCompletes {
+        fn request(&self, _: PublicSourceRequest) -> SourceFuture<'_> {
+            Box::pin(std::future::pending::<Result<PublicSourceReply, String>>())
+        }
+    }
+
     #[tokio::test]
     async fn proxy_observation_includes_real_adapter_call() {
         let client = PublicSourceClient::new(Arc::new(Captured));
@@ -316,6 +323,32 @@ mod source_observation_tests {
             observed["source_calls"]["candles"]["captured_response_body_bytes"],
             3
         );
+        assert!(observed["source_calls"]["candles"]["proxy_requests_aborted"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cancelled_host_source_await_is_not_misreported_as_a_reply_or_no_send() {
+        let client = PublicSourceClient::new(Arc::new(NeverCompletes));
+        let meter = Arc::new(crate::source_io::SourceIoMeter::default());
+        crate::source_io::observe(meter.clone(), async {
+            let future = client.research_candles_page("BTC-USDT-SWAP", "1m", None, None, 100);
+            tokio::pin!(future);
+            tokio::select! {
+                biased;
+                _ = &mut future => panic!("NEVER_COMPLETES_SOURCE_RETURNED"),
+                _ = tokio::task::yield_now() => {}
+            }
+        })
+        .await;
+        let observed = meter.snapshot();
+        let counts = &observed["source_calls"]["candles"];
+        assert_eq!(counts["proxy_requests_started"], 1);
+        assert_eq!(counts["proxy_replies"], 0);
+        assert_eq!(counts["proxy_errors"], 0);
+        assert_eq!(counts["proxy_requests_aborted"], 1);
+        assert!(counts["host_transport_send_invocations"].is_null());
+        assert!(counts["host_transport_response_body_bytes"].is_null());
+        assert!(observed["venue_http_requests"].is_null());
     }
 }
 

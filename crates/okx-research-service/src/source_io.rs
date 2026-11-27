@@ -20,11 +20,15 @@ struct SourceCounts {
     proxy_requests_started: u64,
     proxy_replies: u64,
     proxy_errors: u64,
+    /// The source future was dropped before returning a Result. This does
+    /// not establish whether a host HTTP send was attempted.
+    #[serde(skip_serializing_if = "is_zero")]
+    proxy_requests_aborted: u64,
     captured_response_body_bytes: u64,
     replies_without_raw_body: u64,
     host_transport_receipts: u64,
     host_transport_receipts_missing: u64,
-    /// Null if a completed capture lacks a receipt or a source call failed.
+    /// Null if a receipt is absent, a call fails, or a future is dropped.
     host_transport_send_invocations: Option<u64>,
     host_transport_response_body_bytes: Option<u64>,
 }
@@ -50,7 +54,7 @@ impl SourceIoMeter {
             "venue_http_requests": null,
             "network_bytes_transferred": null,
             "os_physical_disk_reads": null,
-            "notes": "Host receipts count explicit HttpTransport::send invocations on successful captured public replies only; not reqwest redirects, failed/ambiguous sends, venue on-wire HTTP, TCP bytes or OS disk I/O. Missing receipts from an older Agent remain unmeasured, never zero. Ticker and OI replies have no raw body or transport receipt in IPC."
+            "notes": "Host receipts count explicit HttpTransport::send invocations on successful captured public replies only; not reqwest redirects, failed/ambiguous sends, venue on-wire HTTP, TCP bytes or OS disk I/O. Missing receipts from an older Agent and dropped source futures remain unmeasured, never zero. proxy_requests_aborted means dropped before Result, not that no send occurred. Ticker and OI replies have no raw body or transport receipt in IPC."
         })
     }
 }
@@ -65,6 +69,10 @@ fn add_count(counter: &mut u64, amount: u64) {
     *counter = counter.saturating_add(amount);
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 fn kind(request: &PublicSourceRequest) -> &'static str {
     match request {
         PublicSourceRequest::CatalogPage { .. } => "catalog_page",
@@ -76,77 +84,117 @@ fn kind(request: &PublicSourceRequest) -> &'static str {
     }
 }
 
-pub(crate) fn request_started(request: &PublicSourceRequest) {
-    let _ = ACTIVE.try_with(|meter| {
-        let mut state = meter.0.lock().unwrap();
-        let counts = state.by_source.entry(kind(request)).or_default();
-        add_count(&mut counts.proxy_requests_started, 1);
-    });
+/// Tracks a single public-source request even when its await is cancelled.
+/// The meter Arc must be captured at start: the Tokio task-local may no
+/// longer exist by the time this observation guard is dropped.
+#[must_use = "a source attempt must be completed or dropped to record its outcome"]
+pub(crate) struct SourceAttempt {
+    meter: Option<Arc<SourceIoMeter>>,
+    source: &'static str,
+    finished: bool,
 }
 
-pub(crate) fn request_finished(
-    request: &PublicSourceRequest,
-    result: &Result<PublicSourceReply, String>,
-) {
-    let _ = ACTIVE.try_with(|meter| {
+pub(crate) fn request_started(request: &PublicSourceRequest) -> SourceAttempt {
+    let source = kind(request);
+    let meter = ACTIVE.try_with(Arc::clone).ok();
+    if let Some(meter) = &meter {
         let mut state = meter.0.lock().unwrap();
-        let counts = state.by_source.entry(kind(request)).or_default();
-        match result {
-            Err(_) => {
-                add_count(&mut counts.proxy_errors, 1);
-                counts.host_transport_send_invocations = None;
-                counts.host_transport_response_body_bytes = None;
-            }
-            Ok(reply) => {
-                add_count(&mut counts.proxy_replies, 1);
-                match reply {
-                    PublicSourceReply::CatalogPage(value) => {
-                        add_count(
-                            &mut counts.captured_response_body_bytes,
-                            value.raw_body.len() as u64,
-                        );
-                        account_delivery(counts, Some(&value.http_delivery), value.raw_body.len());
-                    }
-                    PublicSourceReply::Candles(value) => {
-                        add_count(
-                            &mut counts.captured_response_body_bytes,
-                            value.raw_body.len() as u64,
-                        );
-                        account_delivery(
-                            counts,
-                            value.http_delivery.as_ref(),
-                            value.raw_body.len(),
-                        );
-                    }
-                    PublicSourceReply::Funding(value) => {
-                        add_count(
-                            &mut counts.captured_response_body_bytes,
-                            value.raw_body.len() as u64,
-                        );
-                        account_delivery(
-                            counts,
-                            value.http_delivery.as_ref(),
-                            value.raw_body.len(),
-                        );
-                    }
-                    PublicSourceReply::Reference(value) => {
-                        add_count(
-                            &mut counts.captured_response_body_bytes,
-                            value.raw_body.len() as u64,
-                        );
-                        account_delivery(
-                            counts,
-                            value.http_delivery.as_ref(),
-                            value.raw_body.len(),
-                        );
-                    }
-                    PublicSourceReply::Ticker(_) | PublicSourceReply::OpenInterest(_) => {
-                        add_count(&mut counts.replies_without_raw_body, 1);
+        let counts = state.by_source.entry(source).or_default();
+        add_count(&mut counts.proxy_requests_started, 1);
+    }
+    SourceAttempt {
+        meter,
+        source,
+        finished: false,
+    }
+}
+
+impl SourceAttempt {
+    pub(crate) fn finished(mut self, result: &Result<PublicSourceReply, String>) {
+        if let Some(meter) = &self.meter {
+            let mut state = meter.0.lock().unwrap();
+            let counts = state.by_source.entry(self.source).or_default();
+            match result {
+                Err(_) => {
+                    add_count(&mut counts.proxy_errors, 1);
+                    counts.host_transport_send_invocations = None;
+                    counts.host_transport_response_body_bytes = None;
+                }
+                Ok(reply) => {
+                    add_count(&mut counts.proxy_replies, 1);
+                    match reply {
+                        PublicSourceReply::CatalogPage(value) => {
+                            add_count(
+                                &mut counts.captured_response_body_bytes,
+                                value.raw_body.len() as u64,
+                            );
+                            account_delivery(
+                                counts,
+                                Some(&value.http_delivery),
+                                value.raw_body.len(),
+                            );
+                        }
+                        PublicSourceReply::Candles(value) => {
+                            add_count(
+                                &mut counts.captured_response_body_bytes,
+                                value.raw_body.len() as u64,
+                            );
+                            account_delivery(
+                                counts,
+                                value.http_delivery.as_ref(),
+                                value.raw_body.len(),
+                            );
+                        }
+                        PublicSourceReply::Funding(value) => {
+                            add_count(
+                                &mut counts.captured_response_body_bytes,
+                                value.raw_body.len() as u64,
+                            );
+                            account_delivery(
+                                counts,
+                                value.http_delivery.as_ref(),
+                                value.raw_body.len(),
+                            );
+                        }
+                        PublicSourceReply::Reference(value) => {
+                            add_count(
+                                &mut counts.captured_response_body_bytes,
+                                value.raw_body.len() as u64,
+                            );
+                            account_delivery(
+                                counts,
+                                value.http_delivery.as_ref(),
+                                value.raw_body.len(),
+                            );
+                        }
+                        PublicSourceReply::Ticker(_) | PublicSourceReply::OpenInterest(_) => {
+                            add_count(&mut counts.replies_without_raw_body, 1);
+                        }
                     }
                 }
             }
         }
-    });
+        self.finished = true;
+    }
+}
+
+impl Drop for SourceAttempt {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(meter) = &self.meter {
+            // A cancelled request may already have sent bytes. Losing the
+            // reply leaves earlier receipt totals incomplete, never zero.
+            // Do not introduce a second panic on a poisoned telemetry lock.
+            if let Ok(mut state) = meter.0.lock() {
+                let counts = state.by_source.entry(self.source).or_default();
+                add_count(&mut counts.proxy_requests_aborted, 1);
+                counts.host_transport_send_invocations = None;
+                counts.host_transport_response_body_bytes = None;
+            }
+        }
+    }
 }
 
 fn account_delivery(
@@ -161,7 +209,10 @@ fn account_delivery(
                 && receipt.response_body_bytes == captured_bytes as u64 =>
         {
             add_count(&mut counts.host_transport_receipts, 1);
-            if counts.host_transport_receipts_missing == 0 && counts.proxy_errors == 0 {
+            if counts.host_transport_receipts_missing == 0
+                && counts.proxy_errors == 0
+                && counts.proxy_requests_aborted == 0
+            {
                 counts.host_transport_send_invocations = Some(
                     counts
                         .host_transport_send_invocations
@@ -215,15 +266,15 @@ mod tests {
                 http_delivery: None,
             });
         let first = observe(a.clone(), async {
-            request_started(&req);
+            let attempt = request_started(&req);
             tokio::task::yield_now().await;
-            request_finished(&req, &Ok(captured));
+            attempt.finished(&Ok(captured));
             candle_cache_hit();
         });
         let second = observe(b.clone(), async {
-            request_started(&req);
+            let attempt = request_started(&req);
             tokio::task::yield_now().await;
-            request_finished(&req, &Err("deferred".into()));
+            attempt.finished(&Err("deferred".into()));
         });
         tokio::join!(first, second);
         let first = a.snapshot();
@@ -239,8 +290,10 @@ mod tests {
             1
         );
         assert!(first["source_calls"]["candles"]["host_transport_send_invocations"].is_null());
+        assert!(first["source_calls"]["candles"]["proxy_requests_aborted"].is_null());
         assert!(first["venue_http_requests"].is_null());
         assert_eq!(second["source_calls"]["candles"]["proxy_errors"], 1);
+        assert!(second["source_calls"]["candles"]["proxy_requests_aborted"].is_null());
         assert_eq!(
             second["source_calls"]["candles"]["captured_response_body_bytes"],
             0
@@ -273,18 +326,14 @@ mod tests {
                     response_body_bytes: 99,
                 }),
             ] {
-                request_started(&req);
-                request_finished(
-                    &req,
-                    &Ok(PublicSourceReply::Candles(
-                        okx_research_protocol::research_ipc::PublicCandleCapture {
-                            raw_body: vec![1, 2, 3],
-                            rows: vec![],
-                            acquired_at_ms: "1".into(),
-                            http_delivery: receipt,
-                        },
-                    )),
-                );
+                request_started(&req).finished(&Ok(PublicSourceReply::Candles(
+                    okx_research_protocol::research_ipc::PublicCandleCapture {
+                        raw_body: vec![1, 2, 3],
+                        rows: vec![],
+                        acquired_at_ms: "1".into(),
+                        http_delivery: receipt,
+                    },
+                )));
             }
         })
         .await;
@@ -310,22 +359,18 @@ mod tests {
         };
         observe(meter.clone(), async {
             for _ in 0..2 {
-                request_started(&req);
-                request_finished(
-                    &req,
-                    &Ok(PublicSourceReply::Candles(
-                        okx_research_protocol::research_ipc::PublicCandleCapture {
-                            raw_body: vec![1, 2, 3],
-                            rows: vec![],
-                            acquired_at_ms: "1".into(),
-                            http_delivery: Some(PublicSourceHttpDelivery {
-                                transport_send_invocations: 1,
-                                response_status: 200,
-                                response_body_bytes: 3,
-                            }),
-                        },
-                    )),
-                );
+                request_started(&req).finished(&Ok(PublicSourceReply::Candles(
+                    okx_research_protocol::research_ipc::PublicCandleCapture {
+                        raw_body: vec![1, 2, 3],
+                        rows: vec![],
+                        acquired_at_ms: "1".into(),
+                        http_delivery: Some(PublicSourceHttpDelivery {
+                            transport_send_invocations: 1,
+                            response_status: 200,
+                            response_body_bytes: 3,
+                        }),
+                    },
+                )));
             }
         })
         .await;
@@ -334,7 +379,64 @@ mod tests {
         assert_eq!(counts["host_transport_receipts_missing"], 0);
         assert_eq!(counts["host_transport_send_invocations"], 2);
         assert_eq!(counts["host_transport_response_body_bytes"], 6);
+        assert!(counts["proxy_requests_aborted"].is_null());
         assert!(meter.snapshot()["venue_http_requests"].is_null());
+    }
+
+    #[tokio::test]
+    async fn dropped_source_future_revokes_transport_totals_and_keeps_unknown_send() {
+        let meter = Arc::new(SourceIoMeter::default());
+        let req = PublicSourceRequest::Candles {
+            instrument: "BTC-USDT-SWAP".into(),
+            bar: "1m".into(),
+            after: None,
+            before: None,
+            limit: 100,
+            queued: false,
+        };
+        let captured = || {
+            Ok(PublicSourceReply::Candles(
+                okx_research_protocol::research_ipc::PublicCandleCapture {
+                    raw_body: vec![1, 2, 3],
+                    rows: vec![],
+                    acquired_at_ms: "1".into(),
+                    http_delivery: Some(PublicSourceHttpDelivery {
+                        transport_send_invocations: 1,
+                        response_status: 200,
+                        response_body_bytes: 3,
+                    }),
+                },
+            ))
+        };
+        let aborted = observe(meter.clone(), async {
+            request_started(&req).finished(&captured());
+            // This is the guard held across an unfinished host-source await.
+            // The caller drops the future after the task-local scope ends.
+            request_started(&req)
+        })
+        .await;
+        assert_eq!(
+            meter.snapshot()["source_calls"]["candles"]["host_transport_send_invocations"],
+            1
+        );
+        drop(aborted);
+        observe(meter.clone(), async {
+            // A later successful receipt must never resurrect a complete sum
+            // after a cancelled/ambiguous source request.
+            request_started(&req).finished(&captured());
+        })
+        .await;
+        let snapshot = meter.snapshot();
+        let counts = &snapshot["source_calls"]["candles"];
+        assert_eq!(counts["proxy_requests_started"], 3);
+        assert_eq!(counts["proxy_replies"], 2);
+        assert_eq!(counts["proxy_errors"], 0);
+        assert_eq!(counts["proxy_requests_aborted"], 1);
+        assert_eq!(counts["host_transport_receipts"], 2);
+        assert_eq!(counts["host_transport_receipts_missing"], 0);
+        assert!(counts["host_transport_send_invocations"].is_null());
+        assert!(counts["host_transport_response_body_bytes"].is_null());
+        assert!(snapshot["network_bytes_transferred"].is_null());
     }
 
     #[tokio::test]
@@ -349,6 +451,7 @@ mod tests {
                     proxy_requests_started: u64::MAX,
                     proxy_replies: u64::MAX,
                     proxy_errors: u64::MAX,
+                    proxy_requests_aborted: u64::MAX,
                     captured_response_body_bytes: u64::MAX,
                     host_transport_receipts: u64::MAX,
                     host_transport_receipts_missing: u64::MAX,
@@ -365,19 +468,16 @@ mod tests {
             queued: false,
         };
         observe(meter.clone(), async {
-            request_started(&req);
-            request_finished(
-                &req,
-                &Ok(PublicSourceReply::Candles(
-                    okx_research_protocol::research_ipc::PublicCandleCapture {
-                        raw_body: vec![1],
-                        rows: vec![],
-                        acquired_at_ms: "1".into(),
-                        http_delivery: None,
-                    },
-                )),
-            );
-            request_finished(&req, &Err("failed".into()));
+            request_started(&req).finished(&Ok(PublicSourceReply::Candles(
+                okx_research_protocol::research_ipc::PublicCandleCapture {
+                    raw_body: vec![1],
+                    rows: vec![],
+                    acquired_at_ms: "1".into(),
+                    http_delivery: None,
+                },
+            )));
+            request_started(&req).finished(&Err("failed".into()));
+            drop(request_started(&req));
             candle_cache_hit();
         })
         .await;
@@ -387,6 +487,7 @@ mod tests {
             "proxy_requests_started",
             "proxy_replies",
             "proxy_errors",
+            "proxy_requests_aborted",
             "captured_response_body_bytes",
             "host_transport_receipts",
             "host_transport_receipts_missing",
