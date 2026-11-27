@@ -460,14 +460,10 @@ mod typed_strategy_parameters_tests {
     #[test]
     fn live_strategy_timeframe_admission_matches_native_source() {
         let valid = [
-            60_000, 180_000, 300_000, 900_000, 1_800_000, 3_600_000, 14_400_000,
-            86_400_000,
+            60_000, 180_000, 300_000, 900_000, 1_800_000, 3_600_000, 14_400_000, 86_400_000,
         ];
         let config = |timeframe_ms| StrategyConfigurationV1 {
-            parameters: StrategyParametersV1 {
-                fast: 10,
-                slow: 20,
-            },
+            parameters: StrategyParametersV1 { fast: 10, slow: 20 },
             instruments: vec!["BTC-USDT-SWAP".into()],
             timeframe_ms,
         };

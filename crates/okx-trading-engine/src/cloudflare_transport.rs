@@ -230,9 +230,9 @@ async fn run_session(
         Duration::from_secs(15),
         connect_async_with_config(request, Some(engine_websocket_config()), false),
     )
-        .await
-        .map_err(|_| transport("WS_CONNECT_TIMEOUT"))?
-        .map_err(|_| transport("WS_CONNECT_FAILED"))?;
+    .await
+    .map_err(|_| transport("WS_CONNECT_TIMEOUT"))?
+    .map_err(|_| transport("WS_CONNECT_FAILED"))?;
     let connection_id = format!("native_{:032x}", nonce());
     let binary = current_binary_sha256()?;
     let incarnation = std::env::var("OKX_CONTROL_AGENT_INCAR")

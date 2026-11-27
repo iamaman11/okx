@@ -121,10 +121,7 @@ async fn unsupported_live_timeframe_is_rejected_before_strategy_creation() {
     if let StrategyRequest::Update { timeframe_ms, .. } = &mut invalid_update {
         *timeframe_ms = Some(1_000);
     }
-    rejected(
-        fixture.request(invalid_update).await,
-        "INVALID_COMMAND",
-    );
+    rejected(fixture.request(invalid_update).await, "INVALID_COMMAND");
     assert_eq!(money(&fixture).await, financial_before);
     fixture.finish().await;
 }
@@ -520,7 +517,10 @@ async fn approved_strategy_without_live_source_never_claims_or_trades_and_can_st
             })
             .await,
     );
-    assert_eq!(status["runtime_observation"]["state"], "TURN_RETURNED_ERROR");
+    assert_eq!(
+        status["runtime_observation"]["state"],
+        "TURN_RETURNED_ERROR"
+    );
     assert_eq!(
         status["runtime_observation"]["last_failure_reason"],
         "ANALYTICS_SOURCE_NOT_READY"

@@ -72,16 +72,17 @@ impl LiveCandleSource {
         if limit == 0 || limit > 10_000 {
             return Err("LIVE_WARMUP_LIMIT:1..10000".into());
         }
-        let bar = match StrategyTimeframe::from_millis(timeframe_ms).ok_or("UNSUPPORTED_TIMEFRAME")? {
-            StrategyTimeframe::Minute1 => "1m",
-            StrategyTimeframe::Minute3 => "3m",
-            StrategyTimeframe::Minute5 => "5m",
-            StrategyTimeframe::Minute15 => "15m",
-            StrategyTimeframe::Minute30 => "30m",
-            StrategyTimeframe::Hour1 => "1H",
-            StrategyTimeframe::Hour4 => "4H",
-            StrategyTimeframe::Day1Utc => "1Dutc",
-        };
+        let bar =
+            match StrategyTimeframe::from_millis(timeframe_ms).ok_or("UNSUPPORTED_TIMEFRAME")? {
+                StrategyTimeframe::Minute1 => "1m",
+                StrategyTimeframe::Minute3 => "3m",
+                StrategyTimeframe::Minute5 => "5m",
+                StrategyTimeframe::Minute15 => "15m",
+                StrategyTimeframe::Minute30 => "30m",
+                StrategyTimeframe::Hour1 => "1H",
+                StrategyTimeframe::Hour4 => "4H",
+                StrategyTimeframe::Day1Utc => "1Dutc",
+            };
         let end = now / timeframe_ms * timeframe_ms;
         let start = end.saturating_sub((limit as u64).saturating_mul(timeframe_ms));
         if end <= start || (end - start) / timeframe_ms > 1_000_000 {

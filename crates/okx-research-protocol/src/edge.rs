@@ -207,7 +207,10 @@ mod edge_lanes_tests {
             ResearchLane::Critical
         );
         assert_eq!(
-            ResearchCommand::Research(ResearchRequest::Status { job_id: "job".into() }).lane(),
+            ResearchCommand::Research(ResearchRequest::Status {
+                job_id: "job".into()
+            })
+            .lane(),
             ResearchLane::Observation
         );
         assert_eq!(

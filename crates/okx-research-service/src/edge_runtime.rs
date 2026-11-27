@@ -76,7 +76,11 @@ fn admit_edge_request(
     };
     if pending.contains_key(id)
         || pending.len() >= MAX_RESEARCH_IN_FLIGHT
-        || pending.values().filter(|existing| **existing == lane).count() >= limit
+        || pending
+            .values()
+            .filter(|existing| **existing == lane)
+            .count()
+            >= limit
     {
         return false;
     }
@@ -644,12 +648,11 @@ fn saturated_research_work_cannot_starve_cancel_or_explain() {
         },
     );
     let explain = ResearchCommand::ExplainJob(Some("job".into()));
-    let cancel = ResearchCommand::Research(
-        okx_research_protocol::analytics::ResearchRequest::Cancel {
+    let cancel =
+        ResearchCommand::Research(okx_research_protocol::analytics::ResearchRequest::Cancel {
             job_id: "job".into(),
             idempotency_key: "cancel".into(),
-        },
-    );
+        });
     let mut pending = HashMap::new();
     for index in 0..MAX_RESEARCH_WORK_IN_FLIGHT {
         assert!(admit_edge_request(
@@ -666,14 +669,30 @@ fn saturated_research_work_cannot_starve_cancel_or_explain() {
     assert!(admit_edge_request(&mut pending, "explain", explain.lane()));
     assert!(admit_edge_request(&mut pending, "cancel", cancel.lane()));
     assert_eq!(pending.len(), MAX_RESEARCH_IN_FLIGHT);
-    assert!(!admit_edge_request(&mut pending, "second_cancel", cancel.lane()));
-    assert!(!admit_edge_request(&mut pending, "second_explain", explain.lane()));
+    assert!(!admit_edge_request(
+        &mut pending,
+        "second_cancel",
+        cancel.lane()
+    ));
+    assert!(!admit_edge_request(
+        &mut pending,
+        "second_explain",
+        explain.lane()
+    ));
     pending.remove("work_0");
     assert!(admit_edge_request(&mut pending, "new_work", work.lane()));
     pending.remove("cancel");
-    assert!(admit_edge_request(&mut pending, "new_cancel", cancel.lane()));
+    assert!(admit_edge_request(
+        &mut pending,
+        "new_cancel",
+        cancel.lane()
+    ));
     // A repeated id cannot count as another in-flight request.
-    assert!(!admit_edge_request(&mut pending, "new_cancel", cancel.lane()));
+    assert!(!admit_edge_request(
+        &mut pending,
+        "new_cancel",
+        cancel.lane()
+    ));
     pending.clear();
     for index in 0..MAX_RESEARCH_WORK_IN_FLIGHT {
         assert!(admit_edge_request(
@@ -683,8 +702,16 @@ fn saturated_research_work_cannot_starve_cancel_or_explain() {
         ));
     }
     // Reversing priority arrival does not let cancel consume explain's slot.
-    assert!(admit_edge_request(&mut pending, "cancel_first", cancel.lane()));
-    assert!(admit_edge_request(&mut pending, "explain_last", explain.lane()));
+    assert!(admit_edge_request(
+        &mut pending,
+        "cancel_first",
+        cancel.lane()
+    ));
+    assert!(admit_edge_request(
+        &mut pending,
+        "explain_last",
+        explain.lane()
+    ));
     assert_eq!(pending.len(), MAX_RESEARCH_IN_FLIGHT);
 }
 fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentResponse {

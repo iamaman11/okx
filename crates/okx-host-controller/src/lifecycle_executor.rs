@@ -1511,7 +1511,9 @@ impl<R: Read> Read for NativeStderrReader<R> {
         for byte in &block[..count] {
             if *byte == b'\n' {
                 if !self.overflow
-                    && self.pending.starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes())
+                    && self
+                        .pending
+                        .starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes())
                 {
                     let payload = &self.pending[NATIVE_CHILD_CONTROL_PREFIX.len()..];
                     if let Ok(reply) = serde_json::from_slice::<NativeChildReply>(payload) {
@@ -2770,8 +2772,12 @@ mod tests {
     fn credential_child_consumes_stdin_under_job_with_deadline() {
         let mut command = Command::new("cmd");
         command.arg("/C").arg("more >nul");
-        bounded_native_secret_input(&mut command, b"fixture-secret-only", Duration::from_secs(15))
-            .expect("bounded credential child should exit after stdin EOF");
+        bounded_native_secret_input(
+            &mut command,
+            b"fixture-secret-only",
+            Duration::from_secs(15),
+        )
+        .expect("bounded credential child should exit after stdin EOF");
     }
     #[cfg(windows)]
     #[test]
@@ -2891,6 +2897,10 @@ mod tests {
 
         assert!(rx.recv().unwrap().valid_for("shutdown_failure_test_0001"));
         assert!(!health.complete(), "a failed pipe read loses log evidence");
-        assert!(fs::read_to_string(&log_path).unwrap().contains("child started"));
+        assert!(
+            fs::read_to_string(&log_path)
+                .unwrap()
+                .contains("child started")
+        );
     }
 }
