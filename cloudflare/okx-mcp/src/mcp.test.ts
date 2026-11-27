@@ -872,6 +872,47 @@ for(const [transportStatus,connected,sessionFresh] of [
     data.verification.next_action!==(verifiedEdge?'inspect_control_research_status':'inspect_research_connection'))
   throw Error('deployment must report Edge observation and unavailable CONTROL evidence');
 }
+// P0 independent CONTROL observation: only a fresh challenge bound to the
+// same Research WSS generation/PID/SHA may change partial to completed.
+for(const mode of ['bound','wrong_pid','wrong_sha','stale_generation','unavailable','malformed','unverified'] as const){
+ const contacted:string[]=[];
+ const status={schema:'okx.direct-transport.status/v1',owner:'research',status:'PASS',
+  connected:true,session_fresh:true,runtime_profile:'research',connection_generation:88,
+  agent_pid:32,agent_binary_sha256:'b'.repeat(64)};
+ const attestation={schema:'okx.research.attestation/v1',status:mode==='unverified'?'UNVERIFIED':'PASS',
+  reason_code:mode==='unverified'?'CONTROL_ATTEST_OFFLINE':null,
+  pid:mode==='wrong_pid'?99:32,
+  active_worker_sha256:mode==='wrong_sha'?'c'.repeat(64):'b'.repeat(64),
+  installed_worker_sha256:'b'.repeat(64),process_generation:7,
+  research_connection_generation:mode==='stale_generation'?87:88,observed_at_ms:Date.now()};
+ const env:any={CONTROL_ATTEST_TOKEN_SHA256:'d'.repeat(64),RUNTIME:{idFromName:()=>0,get:()=>({
+  fetch:async(url:string)=>{
+   contacted.push(url);
+   if(url.includes('/status?probe=1&owner=research'))return Response.json(status);
+   if(url.includes('/attestation/research')){
+    if(mode==='unavailable')throw Error('CONTROL readback offline');
+    return Response.json(mode==='malformed'?{status:'PASS'}:attestation);
+   }
+   throw Error('CONTROL diagnostic attempted dispatch or finance');
+  }
+ })}};
+ const reply:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({
+  jsonrpc:'2.0',id:187,method:'tools/call',params:{name:'diagnostics',
+   arguments:{action:'explain',view:'research',reference:'deployment'}}
+ })}),env,ctx)).json();
+ const result=reply.result.structuredContent;
+ const verified=mode==='bound';
+ if(result.status!==(verified?'completed':'partial')||
+    result.data.verification.control_process_proof!==(verified?'PASS':'UNVERIFIED')||
+    result.data.control.status!==(verified?'verified':'unavailable')||
+    result.data.control.process_generation!==(verified?7:null)||
+    result.data.control.pid!==(verified?32:null)||
+    result.data.verification.first_unproven_stage!==(verified?null:'CONTROL_PID_SHA_GENERATION')||
+    contacted.length!==2||!contacted[1].includes('/attestation/research')||
+    (verified&&result.warnings.length!==0)||(!verified&&result.warnings.length===0))
+   throw Error(`CONTROL ${mode}: cannot promote unbound PROCESS proof to PASS`);
+}
+console.log('diagnostics_research_control_process_attestation_bound_and_negative PASS');
 // Two stopped native applications are a valid installation state: both
 // read-only diagnostics must remain available and must not attempt a hidden
 // dispatch, start, credential lookup, or fallback to the other owner.

@@ -24,6 +24,7 @@ const activeTests = Object.freeze([
   "account_governance_store.test.js",
   "risk_authority.test.js",
   "runtime_session.test.js",
+  "control_attestor.test.js",
   "runtime_backpressure.test.js",
   "mcp.test.js",
 ]);

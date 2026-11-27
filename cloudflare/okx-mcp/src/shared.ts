@@ -1,6 +1,9 @@
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 
 export const FRAME_SCHEMA = "okx.direct-transport.frame/v2";
+/** Separate, strictly read-only CONTROL process-observation transport. */
+export const CONTROL_ATTEST_FRAME_SCHEMA = "okx.control-attestor.frame/v1";
+export const CONTROL_ATTEST_DEADLINE_MS = 2_500;
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
 export const MCP_SERVER_VERSION = "0.8.0";
 export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-26.398";
@@ -33,6 +36,8 @@ export interface Env {
   RUNTIME_TOKEN_SHA256?: string;
   /** Optional independent Research bearer fingerprint; never a finance credential. */
   RESEARCH_RUNTIME_TOKEN_SHA256?: string;
+  /** Optional dedicated CONTROL attestor bearer fingerprint. Never reuse either runtime credential. */
+  CONTROL_ATTEST_TOKEN_SHA256?: string;
   /** Immutable source tree of this exact Worker deployment, set only by deploy CI. */
   RELEASE_SOURCE_TREE?: string;
   OAUTH_PROVIDER: OAuthHelpers;
@@ -67,6 +72,17 @@ export interface SocketAttachment {
   agentIncarnation?: string;
   connectedAtMs: number;
   lastPongAtMs: number | null;
+}
+
+/** Hibernation attachment for the separate /attestor socket tag, never /runtime. */
+export interface ControlAttestorAttachment {
+  role: "control-attestor";
+  /** SHA256 of the dedicated bearer at socket admission (never the bearer). */
+  admittedCredentialFingerprint: string;
+  sessionId: string;
+  generation: number;
+  hello: boolean;
+  connectedAtMs: number;
 }
 
 export interface Pending {
