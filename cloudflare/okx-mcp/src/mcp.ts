@@ -501,15 +501,42 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
       !['PASS','STALE','OFFLINE'].includes(String(observed.status)))
      return jsonRpc(id,toolResult({status:'failed',data:null,quality:'not_ready',reason_code:'INVALID_RUNTIME_STATUS'}));
    const edgeFresh=observed.status==='PASS'&&observed.connected===true&&observed.session_fresh===true;
+   // Optional CONTROL attestation is an independent, live read-only challenge
+   // in the SAME Durable Object. With no dedicated credential configured this
+   // remains the historical Edge-only partial response, byte-for-byte in its
+   // status/verification semantics and without another DO request.
+   const controlConfigured=typeof env.CONTROL_ATTEST_TOKEN_SHA256==='string'&&
+     /^[0-9a-f]{64}$/.test(env.CONTROL_ATTEST_TOKEN_SHA256);
+   let attestation:Record<string,unknown>|null=null;
+   if(controlConfigured&&edgeFresh){
+     try {
+       const candidate=await runtimeFetch(env,'/attestation/research');
+       if(isObject(candidate)&&candidate.schema==='okx.research.attestation/v1')attestation=candidate;
+     }catch{
+       attestation={reason_code:'CONTROL_ATTEST_UNAVAILABLE'};
+     }
+   }
+   const bound=!!(attestation&&attestation.status==='PASS'&&
+     attestation.pid===observed.agent_pid&&
+     attestation.active_worker_sha256===observed.agent_binary_sha256&&
+     attestation.installed_worker_sha256===observed.agent_binary_sha256&&
+     attestation.research_connection_generation===observed.connection_generation&&
+     Number.isSafeInteger(attestation.process_generation)&&Number(attestation.process_generation)>0&&
+     Number.isSafeInteger(attestation.observed_at_ms));
+   const controlReason=bound?null:!controlConfigured?'CONTROL_EVIDENCE_UNAVAILABLE':
+     !edgeFresh?'RESEARCH_EDGE_SESSION_NOT_FRESH':
+     typeof attestation?.reason_code==='string'&&/^[A-Z0-9_]{1,128}$/.test(attestation.reason_code)
+       ?attestation.reason_code:'CONTROL_ATTEST_INVALID_RESPONSE';
    // These fields are authenticated Edge session observations. A PID and SHA
    // carried in a hello frame are claims from that process, not independent
    // installed-image evidence. Only Windows CONTROL can establish that proof.
-   return jsonRpc(id,toolResult({status:'partial',quality:'partial',warnings:['CONTROL_EVIDENCE_UNAVAILABLE'],
+   return jsonRpc(id,toolResult({status:bound?'completed':'partial',quality:bound?'fresh':'partial',
+     warnings:bound?[]:[controlReason!],
      data:{schema:'okx.research.deployment-edge/v1',owner:'research',
        verification:{edge_authenticated_session:edgeFresh?'PASS':'UNVERIFIED',
-         control_process_proof:'NOT_PERFORMED',
-         first_unproven_stage:edgeFresh?'CONTROL_PID_SHA_GENERATION':'EDGE_AUTHENTICATED_SESSION',
-         next_action:edgeFresh?'inspect_control_research_status':'inspect_research_connection'},
+         control_process_proof:bound?'PASS':controlConfigured?'UNVERIFIED':'NOT_PERFORMED',
+         first_unproven_stage:bound?null:edgeFresh?'CONTROL_PID_SHA_GENERATION':'EDGE_AUTHENTICATED_SESSION',
+         next_action:bound?null:edgeFresh?'inspect_control_research_status':'inspect_research_connection'},
        edge:{worker_version:MCP_SERVER_VERSION,
        release_source_tree:workerReleaseSourceTree(env),research_transport:{
          schema:'okx.direct-transport.status/v1',owner:'research',status:stringField(observed,'status')??'OFFLINE',
@@ -518,8 +545,13 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
          agent_reported_pid:numericField(observed,'agent_pid')??null,
          agent_reported_binary_sha256:stringField(observed,'agent_binary_sha256')??null,
          agent_reported_incarnation:stringField(observed,'agent_incarnation')??null}},
-       control:{status:'unavailable',evidence:'NOT_PERFORMED',reason_code:'CONTROL_EVIDENCE_UNAVAILABLE',
-         pid:null,active_worker_sha256:null,installed_worker_sha256:null,process_generation:null}}}));
+       control:{status:bound?'verified':'unavailable',
+         evidence:bound?'CONTROL_RESEARCH_PROCESS_OBSERVATION':controlConfigured&&edgeFresh?'UNVERIFIED':'NOT_PERFORMED',
+         reason_code:controlReason,
+         pid:bound?numericField(attestation!,'pid')??null:null,
+         active_worker_sha256:bound?stringField(attestation!,'active_worker_sha256')??null:null,
+         installed_worker_sha256:bound?stringField(attestation!,'installed_worker_sha256')??null:null,
+         process_generation:bound?numericField(attestation!,'process_generation')??null:null}}}));
  }
  if(name==='market'&&args.action==='instruments'){
    return jsonRpc(id,toolResult(await dispatchCorrelated(env,{schema:'okx.agent.request/v1',request_id:edgeRequestId,

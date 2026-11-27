@@ -185,6 +185,12 @@ pub struct HostExecutor {
 }
 
 impl HostExecutor {
+    /// Independent read-only observation. Keep the supervisor private: callers
+    /// cannot use this witness channel to start, stop or reconcile Research.
+    pub fn observe_research_read_only(&mut self) -> HostControlResult<Value> {
+        self.research.status()
+    }
+
     pub fn canonical() -> HostControlResult<Self> {
         Self::with_lifecycle(
             PathBuf::from(RUNTIME_ROOT),

@@ -9,10 +9,15 @@ use okx_host_protocol::{
     HOST_CONTROL_RESULT_SCHEMA_V1, HostControlFailure, HostControlOperation, HostControlRequest,
     HostControlResult, HostControlStatus,
 };
-use tokio::time::{Interval, MissedTickBehavior, interval};
+use tokio::{
+    sync::mpsc,
+    time::{Interval, MissedTickBehavior, interval},
+};
 
 use crate::{
     HostControlError, HostControlResult as LocalResult,
+    attestor::{self, ObservationRequest},
+    auth::load_native_attestor_token,
     artifact::{
         deploy_agent, install_launcher_root, stage_controller_update, upgrade_launcher_root,
     },
@@ -58,6 +63,24 @@ pub async fn run_until_shutdown(
         return Err(HostControlError::InvalidPollInterval);
     }
 
+    // Optional independent attestation. No token on existing installations:
+    // no outbound socket and only the existing, partial Edge diagnostic.
+    // The bounded queue is consumed exclusively by this owner loop, so it
+    // never races lifecycle work or creates a second Research supervisor.
+    let (attestor_sender, mut attestor_receiver) = mpsc::channel::<ObservationRequest>(8);
+    let _owner_channel_keepalive = attestor_sender.clone();
+    let _attestor_task = match load_native_attestor_token() {
+        Ok(Some(token)) => Some(AttestorTaskGuard(tokio::spawn(attestor::run(
+            token,
+            attestor_sender,
+        )))),
+        Ok(None) => None,
+        Err(_) => {
+            eprintln!("CONTROL_ATTEST_CREDENTIAL_UNAVAILABLE; read-only evidence remains partial");
+            None
+        }
+    };
+
     let mut github_verified = false;
     let mut github_backoff = GitHubBackoff::default();
     let mut initial_state = "DEGRADED";
@@ -76,6 +99,7 @@ pub async fn run_until_shutdown(
         github.verify_repository_identity(),
         executor,
         &mut reconcile_ticker,
+        &mut attestor_receiver,
     )
     .await?
     {
@@ -131,6 +155,11 @@ pub async fn run_until_shutdown(
             _ = reconcile_ticker.tick() => {
                 reconcile_lifecycle(executor);
             }
+            observation = attestor_receiver.recv() => {
+                if let Some(request) = observation {
+                    attestor::answer_observation(executor, request);
+                }
+            }
             _ = github_ticker.tick() => {
                 if !github_backoff.ready() {
                     continue;
@@ -141,6 +170,7 @@ pub async fn run_until_shutdown(
                         github.verify_repository_identity(),
                         executor,
                         &mut reconcile_ticker,
+                        &mut attestor_receiver,
                     )
                     .await?
                     {
@@ -173,6 +203,7 @@ pub async fn run_until_shutdown(
                     fetch_pending_control(github),
                     executor,
                     &mut reconcile_ticker,
+                    &mut attestor_receiver,
                 )
                 .await?
                 {
@@ -248,6 +279,7 @@ async fn await_network_with_reconcile<F>(
     future: F,
     executor: &mut HostExecutor,
     reconcile_ticker: &mut Interval,
+    observations: &mut mpsc::Receiver<ObservationRequest>,
 ) -> LocalResult<NetworkWait<F::Output>>
 where
     F: Future,
@@ -258,11 +290,25 @@ where
         tokio::select! {
             output = &mut future => return Ok(NetworkWait::Completed(output)),
             _ = reconcile_ticker.tick() => reconcile_lifecycle(executor),
+            observation = observations.recv() => {
+                if let Some(request) = observation {
+                    attestor::answer_observation(executor, request);
+                }
+            }
             result = tokio::signal::ctrl_c() => {
                 result?;
                 return Ok(NetworkWait::Shutdown);
             }
         }
+    }
+}
+
+/// Do not let an independently connected socket outlive its CONTROL owner.
+struct AttestorTaskGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for AttestorTaskGuard {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

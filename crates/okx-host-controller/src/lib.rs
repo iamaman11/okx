@@ -1,5 +1,6 @@
 pub mod account_catalog;
 pub mod artifact;
+pub mod attestor;
 pub mod auth;
 pub mod autostart;
 pub mod background_process;
@@ -46,6 +47,9 @@ pub enum HostControlError {
 
     #[error("GitHub control token is invalid")]
     InvalidGithubToken,
+
+    #[error("CONTROL attestor token is invalid")]
+    InvalidAttestorToken,
 
     #[error("native Windows host control is unavailable on this platform")]
     UnsupportedPlatform,

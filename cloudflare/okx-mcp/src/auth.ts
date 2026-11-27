@@ -130,7 +130,24 @@ export const defaultHandler = {
       if(!supplied?.startsWith("Bearer ")||!sameHex(await sha256Hex(supplied.slice(7)),await sha256Hex(env.MCP_OWNER_SECRET)))return new Response("unauthorized",{status:401});
       const stub=await runtimeStub(env);return stub.fetch(request);
     }
-    if (url.pathname === "/runtime") {
+    if (url.pathname === "/runtime" || url.pathname === "/attestor") {
+      // Only upgrade requests reach this public path. The Durable Object
+      // separately verifies the dedicated bearer before accepting a socket.
+      if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+        return new Response("websocket required", { status: 426 });
+      }
+      if (url.pathname === "/attestor") {
+        // Reject missing, revoked and cross-owner credentials before billing
+        // a Durable Object invocation. The DO independently checks again.
+        const hash = env.CONTROL_ATTEST_TOKEN_SHA256;
+        if (typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash) ||
+            hash === env.RUNTIME_TOKEN_SHA256 || hash === env.RESEARCH_RUNTIME_TOKEN_SHA256)
+          return new Response("attestor disabled", {status: 503});
+        const authorization = request.headers.get("authorization") ?? "";
+        if (!authorization.startsWith("Bearer ") || authorization.length > 512 ||
+            !sameHex(hash, await sha256Hex(authorization.slice(7))))
+          return new Response("unauthorized", {status: 401});
+      }
       const stub = await runtimeStub(env);
       return stub.fetch(request);
     }
