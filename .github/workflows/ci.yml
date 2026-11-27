@@ -1274,11 +1274,29 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: research-ipc-cache
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-research-sccache
           shared-key: research-service-windows
           cache-workspace-crates: true
           save-if: false
           cache-on-failure: false
+      - name: Export Research PR cache runtime credentials
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Install pinned Research compiler cache
+        id: research-sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      - name: Enable read-only Research compiler cache
+        shell: pwsh
+        run: |
+          'SCCACHE_GHA_ENABLED=on' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_VERSION=okx-research-sccache-v1' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_RW_MODE=READ_ONLY' >> $env:GITHUB_ENV
+          'RUSTC_WRAPPER=sccache' >> $env:GITHUB_ENV
       - name: Prefer cached offline Cargo sources when complete
         shell: pwsh
         run: |
@@ -1338,6 +1356,14 @@ jobs:
           if (($output -join "`n") -notmatch 'test result: ok\. 1 passed; 0 failed;') {
             throw 'RESEARCH_ONLY_REAL_MCP_DO_WSS_WITNESS_NOT_EXECUTED'
           }
+      - name: Research IPC compiler cache statistics
+        if: always() && steps.research-sccache.outcome == 'success'
+        continue-on-error: true # Cache observability must not replace IPC acceptance.
+        shell: pwsh
+        run: |
+          $stats = @(& sccache --show-stats 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_IPC_SCCACHE_STATS_UNAVAILABLE' }
+          $stats | Where-Object { [string]$_ -match '^\s*(Compile requests|Cache hits|Cache misses|Cache read errors|Cache write errors|Non-cacheable compilations)' } | Out-Host
 
   research_service_tests_windows:
     name: research-windows
@@ -1373,13 +1399,31 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: research-cache
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-research-sccache
           shared-key: research-service-windows
           cache-workspace-crates: true
           # PR merge-ref caches cannot warm other PRs. Only a manually seeded
           # accepted-main cache can supply a reusable Research compiler cache.
           save-if: false
           cache-on-failure: false
+      - name: Export Research PR cache runtime credentials
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Install pinned Research compiler cache
+        id: research-sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      - name: Enable read-only Research compiler cache
+        shell: pwsh
+        run: |
+          'SCCACHE_GHA_ENABLED=on' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_VERSION=okx-research-sccache-v1' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_RW_MODE=READ_ONLY' >> $env:GITHUB_ENV
+          'RUSTC_WRAPPER=sccache' >> $env:GITHUB_ENV
       - name: Prefer cached offline Cargo sources when complete
         shell: pwsh
         run: |
@@ -1522,6 +1566,14 @@ jobs:
           if-no-files-found: error
           compression-level: 1
           retention-days: 14
+      - name: Research owner compiler cache statistics
+        if: always() && steps.research-sccache.outcome == 'success'
+        continue-on-error: true # Cache observability must not replace owner acceptance.
+        shell: pwsh
+        run: |
+          $stats = @(& sccache --show-stats 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_OWNER_SCCACHE_STATS_UNAVAILABLE' }
+          $stats | Where-Object { [string]$_ -match '^\s*(Compile requests|Cache hits|Cache misses|Cache read errors|Cache write errors|Non-cacheable compilations)' } | Out-Host
 
 
   research_component_release_windows:
@@ -1557,11 +1609,29 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: research-release-cache
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-research-sccache
           shared-key: research-service-windows
           cache-workspace-crates: true
           save-if: false
           cache-on-failure: false
+      - name: Export Research PR cache runtime credentials
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Install pinned Research compiler cache
+        id: research-sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      - name: Enable read-only Research compiler cache
+        shell: pwsh
+        run: |
+          'SCCACHE_GHA_ENABLED=on' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_VERSION=okx-research-sccache-v1' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_RW_MODE=READ_ONLY' >> $env:GITHUB_ENV
+          'RUSTC_WRAPPER=sccache' >> $env:GITHUB_ENV
       - name: Prefer cached offline Cargo sources when complete
         shell: pwsh
         run: |
@@ -1661,6 +1731,14 @@ jobs:
           if-no-files-found: error
           compression-level: 1
           retention-days: 14
+      - name: Research release compiler cache statistics
+        if: always() && steps.research-sccache.outcome == 'success'
+        continue-on-error: true # Cache observability must not replace release acceptance.
+        shell: pwsh
+        run: |
+          $stats = @(& sccache --show-stats 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_RELEASE_SCCACHE_STATS_UNAVAILABLE' }
+          $stats | Where-Object { [string]$_ -match '^\s*(Compile requests|Cache hits|Cache misses|Cache read errors|Cache write errors|Non-cacheable compilations)' } | Out-Host
 
   required_ci:
     # The sole required status checks owner jobs directly. A skipped job may
@@ -2006,11 +2084,35 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         id: prime-cache
         with:
-          prefix-key: ${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}
+          prefix-key: ${{ matrix.profile == 'tests' && 'v2-rust' || matrix.profile == 'research' && 'v2-research-sccache' || 'v1-rust' }}
           shared-key: ${{ matrix.profile == 'research' && 'research-service-windows' || format('trading-engine-{0}-windows', matrix.profile) }}
           cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: false
+      - name: Export trusted Research cache runtime credentials
+        if: matrix.profile == 'research'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Install pinned trusted Research compiler cache
+        if: matrix.profile == 'research'
+        id: research-sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      - name: Enable trusted main Research compiler cache writer
+        if: matrix.profile == 'research'
+        shell: pwsh
+        run: |
+          if ('${{ github.ref }}' -cne 'refs/heads/main' -or (git rev-parse HEAD).Trim() -cne '${{ github.sha }}') {
+            throw 'UNTRUSTED_RESEARCH_SCCACHE_WRITER'
+          }
+          'SCCACHE_GHA_ENABLED=on' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_VERSION=okx-research-sccache-v1' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_RW_MODE=READ_WRITE' >> $env:GITHUB_ENV
+          'RUSTC_WRAPPER=sccache' >> $env:GITHUB_ENV
       - name: Seed only missing Windows debug/test outputs from trusted main
         if: matrix.profile == 'tests' && steps.prime-cache.outputs.cache-hit != 'true'
         shell: pwsh
@@ -2057,6 +2159,14 @@ jobs:
           "MAIN_SHA=${{ github.sha }}" >> $env:GITHUB_STEP_SUMMARY
           "CACHE_PROFILE=${{ matrix.profile }} EXACT_HIT=${{ steps.prime-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
           "FINANCIAL_TESTS=NOT_EXECUTED; RELEASE=NOT_PUBLISHED; ENGINE=NOT_INSTALLED" >> $env:GITHUB_STEP_SUMMARY
+      - name: Trusted Research compiler cache statistics
+        if: always() && matrix.profile == 'research' && steps.research-sccache.outcome == 'success'
+        continue-on-error: true # Cache observability must not replace trust/prime checks.
+        shell: pwsh
+        run: |
+          $stats = @(& sccache --show-stats 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw 'TRUSTED_RESEARCH_SCCACHE_STATS_UNAVAILABLE' }
+          $stats | Where-Object { [string]$_ -match '^\s*(Compile requests|Cache hits|Cache misses|Cache read errors|Cache write errors|Non-cacheable compilations)' } | Out-Host
 
   # Successful protected main checks publish the verified PR artifact here.
   publish_accepted_windows_release:
