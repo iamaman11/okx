@@ -12,10 +12,10 @@ use okx_research_protocol::{
         AGENT_RESPONSE_SCHEMA_V1, AgentFailure, AgentResponse, AgentResponseStatus, DataQuality,
         FRAME_LIMIT, IncomingFrame, OutgoingFrame, PRODUCT_CONTRACT, ResearchCommand, SCHEMA,
     },
-    research_ipc::{InvocationId, ResearchScope},
+    research_ipc::{InvocationId, ResearchLane, ResearchScope},
 };
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     io::{self, Write},
     path::PathBuf,
     sync::Arc,
@@ -39,6 +39,11 @@ use tokio_tungstenite::{
 use zeroize::Zeroizing;
 
 const MAX_RESEARCH_IN_FLIGHT: usize = 6;
+// Work cannot fill the slots reserved for cancel and read-only diagnostics.
+// This is the same three-lane priority contract as Research's local IPC.
+const MAX_RESEARCH_WORK_IN_FLIGHT: usize = 4;
+const MAX_RESEARCH_OBSERVATION_IN_FLIGHT: usize = 1;
+const MAX_RESEARCH_CRITICAL_IN_FLIGHT: usize = 1;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(80);
 const EDGE_WRITE_DEADLINE: Duration = Duration::from_secs(10);
 const STABLE_EDGE_SESSION: Duration = Duration::from_secs(60);
@@ -57,6 +62,30 @@ fn reconnect_delay(failures: &mut usize, session_elapsed: Duration) -> Duration 
         .saturating_add(1)
         .min(RECONNECT_DELAYS_SECONDS.len() - 1);
     Duration::from_secs(delay)
+}
+
+fn admit_edge_request(
+    pending: &mut HashMap<String, ResearchLane>,
+    id: &str,
+    lane: ResearchLane,
+) -> bool {
+    let limit = match lane {
+        ResearchLane::Work => MAX_RESEARCH_WORK_IN_FLIGHT,
+        ResearchLane::Observation => MAX_RESEARCH_OBSERVATION_IN_FLIGHT,
+        ResearchLane::Critical => MAX_RESEARCH_CRITICAL_IN_FLIGHT,
+    };
+    if pending.contains_key(id)
+        || pending.len() >= MAX_RESEARCH_IN_FLIGHT
+        || pending
+            .values()
+            .filter(|existing| **existing == lane)
+            .count()
+            >= limit
+    {
+        return false;
+    }
+    pending.insert(id.to_owned(), lane);
+    true
 }
 
 /// Apply the protocol's 64 KiB budget at the WebSocket decoder, before
@@ -420,7 +449,7 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
 
     let mut requests: FuturesUnordered<BoxFuture<'static, (String, AgentResponse)>> =
         FuturesUnordered::new();
-    let mut pending = HashSet::<String>::new();
+    let mut pending = HashMap::<String, ResearchLane>::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_seen = Instant::now();
@@ -464,7 +493,7 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
                             schema: SCHEMA.into(), session_id: session_id.clone(),
                             connection_generation, request_id: id.clone(),
                         }).await?;
-                        if pending.contains(&id) {
+                        if pending.contains_key(&id) {
                             continue;
                         }
                         let command = if operator_governance.is_some() {
@@ -482,13 +511,12 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
                                 continue;
                             }
                         };
-                        if requests.len() >= MAX_RESEARCH_IN_FLIGHT {
+                        if !admit_edge_request(&mut pending, &id, command.lane()) {
                             send(&mut sink, OutgoingFrame::Response {
                                 schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation,
                                 response: rejected(&id, "RESEARCH_QUEUE_FULL"),
                             }).await?;
                         } else {
-                            pending.insert(id.clone());
                             let executor = service.clone();
                             let public_data = public_data.clone();
                             requests.push(Box::pin(async move {
@@ -609,6 +637,82 @@ pub(crate) async fn dispatch_research_for_test(
 ) -> Result<serde_json::Value, String> {
     let source = IndependentOkxPublicSource::new()?;
     dispatch(service, &source, ResearchCommand::Research(request)).await
+}
+
+#[cfg(test)]
+#[test]
+fn saturated_research_work_cannot_starve_cancel_or_explain() {
+    let work = ResearchCommand::Research(
+        okx_research_protocol::analytics::ResearchRequest::Benchmark {
+            idempotency_key: "work".into(),
+        },
+    );
+    let explain = ResearchCommand::ExplainJob(Some("job".into()));
+    let cancel =
+        ResearchCommand::Research(okx_research_protocol::analytics::ResearchRequest::Cancel {
+            job_id: "job".into(),
+            idempotency_key: "cancel".into(),
+        });
+    let mut pending = HashMap::new();
+    for index in 0..MAX_RESEARCH_WORK_IN_FLIGHT {
+        assert!(admit_edge_request(
+            &mut pending,
+            &format!("work_{index}"),
+            work.lane()
+        ));
+    }
+    assert!(!admit_edge_request(
+        &mut pending,
+        "work_overflow",
+        work.lane()
+    ));
+    assert!(admit_edge_request(&mut pending, "explain", explain.lane()));
+    assert!(admit_edge_request(&mut pending, "cancel", cancel.lane()));
+    assert_eq!(pending.len(), MAX_RESEARCH_IN_FLIGHT);
+    assert!(!admit_edge_request(
+        &mut pending,
+        "second_cancel",
+        cancel.lane()
+    ));
+    assert!(!admit_edge_request(
+        &mut pending,
+        "second_explain",
+        explain.lane()
+    ));
+    pending.remove("work_0");
+    assert!(admit_edge_request(&mut pending, "new_work", work.lane()));
+    pending.remove("cancel");
+    assert!(admit_edge_request(
+        &mut pending,
+        "new_cancel",
+        cancel.lane()
+    ));
+    // A repeated id cannot count as another in-flight request.
+    assert!(!admit_edge_request(
+        &mut pending,
+        "new_cancel",
+        cancel.lane()
+    ));
+    pending.clear();
+    for index in 0..MAX_RESEARCH_WORK_IN_FLIGHT {
+        assert!(admit_edge_request(
+            &mut pending,
+            &format!("other_work_{index}"),
+            work.lane()
+        ));
+    }
+    // Reversing priority arrival does not let cancel consume explain's slot.
+    assert!(admit_edge_request(
+        &mut pending,
+        "cancel_first",
+        cancel.lane()
+    ));
+    assert!(admit_edge_request(
+        &mut pending,
+        "explain_last",
+        explain.lane()
+    ));
+    assert_eq!(pending.len(), MAX_RESEARCH_IN_FLIGHT);
 }
 fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentResponse {
     let quality = match &result {

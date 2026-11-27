@@ -55,6 +55,19 @@ pub struct TradeService {
     /// Non-authoritative polling schedule only; SQLite and RiskBook retain
     /// all decision, reservation, order, and financial state.
     recovery_schedule: Mutex<RecoverySchedule>,
+    /// Read-only, bounded observations of the current process's live turns.
+    /// Financial decisions and durable receipts remain exclusively in SQL.
+    strategy_observations: Mutex<HashMap<(String, String), StrategyTurnObservation>>,
+}
+
+struct StrategyTurnObservation {
+    policy_revision: i64,
+    last_attempt_ms: i64,
+    last_success_ms: Option<i64>,
+    last_turn_ok: bool,
+    last_failure_reason: Option<String>,
+    last_failure_ms: Option<i64>,
+    next_log_at: Instant,
 }
 
 #[derive(Default)]
@@ -251,6 +264,7 @@ impl TradeService {
             governance: RwLock::new(None),
             live_source: RwLock::new(None),
             recovery_schedule: Mutex::new(RecoverySchedule::default()),
+            strategy_observations: Mutex::new(HashMap::new()),
         }
     }
     pub async fn set_live_source(&self, source: okx_market_runtime::live_source::LiveCandleSource) {

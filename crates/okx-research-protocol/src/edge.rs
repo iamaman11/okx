@@ -1,6 +1,7 @@
 //! Edge wire shapes for the independently authenticated Research owner.
 
 use crate::analytics::{MarketRequest, PortfolioScenarioRequest, ResearchRequest};
+use crate::research_ipc::ResearchLane;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -175,6 +176,59 @@ pub enum ResearchCommand {
     MarketOverview {
         instrument: String,
     },
+}
+
+impl ResearchCommand {
+    /// The Edge socket uses the same command priorities as local Research IPC.
+    /// A flooded source/compute lane must not lock out cancellation or status.
+    pub fn lane(&self) -> ResearchLane {
+        match self {
+            Self::Research(ResearchRequest::Cancel { .. }) => ResearchLane::Critical,
+            Self::Research(ResearchRequest::Status { .. } | ResearchRequest::Capabilities {})
+            | Self::MarketCapabilities
+            | Self::ExplainJob(_) => ResearchLane::Observation,
+            _ => ResearchLane::Work,
+        }
+    }
+}
+
+#[cfg(test)]
+mod edge_lanes_tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_and_diagnostics_have_independent_admission_lanes() {
+        assert_eq!(
+            ResearchCommand::Research(ResearchRequest::Cancel {
+                job_id: "job".into(),
+                idempotency_key: "cancel".into(),
+            })
+            .lane(),
+            ResearchLane::Critical
+        );
+        assert_eq!(
+            ResearchCommand::Research(ResearchRequest::Status {
+                job_id: "job".into()
+            })
+            .lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            ResearchCommand::ExplainJob(Some("job".into())).lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            ResearchCommand::MarketCapabilities.lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            ResearchCommand::Research(ResearchRequest::Benchmark {
+                idempotency_key: "benchmark".into(),
+            })
+            .lane(),
+            ResearchLane::Work
+        );
+    }
 }
 
 impl TryFrom<ResearchRequestEnvelope> for ResearchCommand {

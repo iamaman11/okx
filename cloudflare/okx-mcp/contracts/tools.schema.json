@@ -245,7 +245,7 @@
     },
     {
       "name": "strategies",
-      "description": "Strategies; may trade.",
+      "description": "Live strategies.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -472,9 +472,16 @@
             "maximum": 9007199254740991
           },
           "f": {
-            "type": "integer",
-            "minimum": 1000,
-            "maximum": 9007199254740991
+            "enum": [
+              60000,
+              180000,
+              300000,
+              900000,
+              1800000,
+              3600000,
+              14400000,
+              86400000
+            ]
           },
           "h": {
             "type": "object",
@@ -506,7 +513,7 @@
     },
     {
       "name": "market",
-      "description": "Market: graphs via screen + composition.",
+      "description": "Market composition.",
       "inputSchema": {
         "oneOf": [
           {
@@ -526,15 +533,26 @@
                 "uniqueItems": true
               },
               "timeframe_ms": {
-                "type": "integer",
-                "minimum": 1000,
-                "maximum": 2678400000
+                "enum": [
+                  60000,
+                  180000,
+                  300000,
+                  900000,
+                  1800000,
+                  3600000,
+                  14400000,
+                  86400000
+                ]
               },
               "start_ms": {
-                "$ref": "#/$defs/n"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
               },
               "end_ms": {
-                "$ref": "#/$defs/n"
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
               },
               "universe": {
                 "type": "object",
@@ -878,11 +896,6 @@
             "minLength": 1,
             "maxLength": 16
           },
-          "n": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 9007199254740991
-          },
           "y": {
             "type": "integer",
             "minimum": 1,
@@ -989,12 +1002,10 @@
                 "$ref": "#/$defs/u"
               },
               "timeframe_ms": {
-                "type": "integer",
-                "minimum": 1000,
-                "maximum": 2678400000
+                "$ref": "#/$defs/f"
               },
               "start_ms": {
-                "$ref": "#/$defs/n"
+                "$ref": "#/$defs/i"
               },
               "end_ms": {
                 "$ref": "#/$defs/n"
@@ -1012,9 +1023,7 @@
                 ]
               },
               "seed": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
+                "$ref": "#/$defs/i"
               },
               "parameters": {
                 "$ref": "#/$defs/q"
@@ -1275,12 +1284,10 @@
                 "$ref": "#/$defs/u"
               },
               "timeframe_ms": {
-                "type": "integer",
-                "minimum": 1000,
-                "maximum": 2678400000
+                "$ref": "#/$defs/f"
               },
               "start_ms": {
-                "$ref": "#/$defs/n"
+                "$ref": "#/$defs/i"
               },
               "end_ms": {
                 "$ref": "#/$defs/n"
@@ -1348,10 +1355,27 @@
             "maxLength": 128,
             "pattern": "^[A-Za-z0-9_-]+$"
           },
+          "i": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
           "n": {
             "type": "integer",
             "minimum": 1,
             "maximum": 9007199254740991
+          },
+          "f": {
+            "enum": [
+              60000,
+              180000,
+              300000,
+              900000,
+              1800000,
+              3600000,
+              14400000,
+              86400000
+            ]
           },
           "r": {
             "enum": [
@@ -1742,7 +1766,7 @@
     },
     {
       "name": "trade.preview",
-      "description": "Preview; no order.",
+      "description": "Preview only.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -1930,7 +1954,7 @@
     },
     {
       "name": "trade.execute",
-      "description": "Real order; loss possible. Approval, limits, STOP required.",
+      "description": "Live order; loss risk; approval, limits, STOP.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2163,7 +2187,7 @@
     },
     {
       "name": "trade.cancel",
-      "description": "Cancel order.",
+      "description": "Cancel.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2202,7 +2226,7 @@
     },
     {
       "name": "trade.close",
-      "description": "Real close order.",
+      "description": "Close.",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2270,7 +2294,7 @@
     },
     {
       "name": "trade.preflight",
-      "description": "Readiness.",
+      "description": "Ready?",
       "inputSchema": {
         "properties": {
           "account": {

@@ -1,4 +1,4 @@
-import {ACTION_SCHEMAS,PUBLIC_TOOLS,MARKET_OPERATORS,validTool,matches,isExecutionMutation,isResearchNativeOperation,executionProfilePermitsOperation} from './execution_tools.js';
+import {ACTION_SCHEMAS,PUBLIC_TOOLS,MARKET_OPERATORS,SUPPORTED_CANDLE_TIMEFRAMES_MS,validTool,matches,isExecutionMutation,isResearchNativeOperation,executionProfilePermitsOperation} from './execution_tools.js';
 const fail=(v:boolean,n:string)=>{if(!v)throw Error(n);};
 // One owner policy drives both Research routing and runtime-profile admission.
 for(const type of ['market','market_capabilities','market_microstructure','research','find_instruments','market_overview','portfolio_scenario']){
@@ -33,6 +33,10 @@ for(const invalid of [
  {...economic,cases:[{...baseEconomic,raw_rpc:'forbidden'}]},
 ])fail(!validTool('research',invalid),'T02/T09 rejects malformed economics input at MCP boundary');
 fail(!isExecutionMutation('research','economics'),'pure economics cannot acquire research mutation authority');
+for(const action of ['preview','status','capabilities','preflight'])
+ fail(!isExecutionMutation('trade',action),`read-only trade.${action} must not be an uncertain mutation`);
+for(const action of ['execute','cancel','close'])
+ fail(isExecutionMutation('trade',action),`real trade.${action} must remain a mutation`);
 const screen=payloadFixtures.find(x=>x.tool==='market'&&x.action==='screen')!.positive;
 fail(validTool('market',{...screen,action:'compare'}),'shared strict screen/compare schema');
 fail(!validTool('market',{...screen,action:'compare',raw_rpc:'forbidden'}),'compare rejects unknown fields');
@@ -40,6 +44,24 @@ const summary=payloadFixtures.find(x=>x.tool==='portfolio'&&x.action==='summary'
 fail(validTool('portfolio',{...summary,action:'history'}),'shared portfolio history schema');
 fail(!validTool('portfolio',{...summary,action:'history',raw_rpc:'forbidden'}),'strict history schema');
 const marketScreen=payloadFixtures.find(x=>x.tool==='market'&&x.action==='screen')!.positive;
+const backtest=payloadFixtures.find(x=>x.tool==='research'&&x.action==='backtest')!.positive;
+const strategyCreate=payloadFixtures.find(x=>x.tool==='strategies'&&x.action==='create')!.positive;
+const publicTimeframe=JSON.stringify({enum:[...SUPPORTED_CANDLE_TIMEFRAMES_MS]});
+for(const name of ['market','research','strategies'])
+ fail(JSON.stringify(PUBLIC_TOOLS.find((tool:any)=>tool.name===name)).includes(publicTimeframe),
+  `${name} publishes Native timeframe enum, not just internal validation`);
+for(const ms of SUPPORTED_CANDLE_TIMEFRAMES_MS){
+ fail(validTool('market',{...marketScreen,timeframe_ms:ms}),`market supports Native closed-bar timeframe ${ms}`);
+ fail(validTool('research',{...backtest,timeframe_ms:ms}),`research supports Native closed-bar timeframe ${ms}`);
+ fail(validTool('strategies',{...strategyCreate,timeframe_ms:ms}),`strategy supports Native live timeframe ${ms}`);
+}
+for(const ms of [1000,2678400000]){
+ fail(!validTool('market',{...marketScreen,timeframe_ms:ms}),`market rejects unsupported ${ms}`);
+ fail(!validTool('research',{...backtest,timeframe_ms:ms}),`research rejects unsupported ${ms}`);
+ fail(!validTool('strategies',{...strategyCreate,timeframe_ms:ms}),`strategy rejects unsupported ${ms}`);
+}
+fail(validTool('market',{...marketScreen,start_ms:0}),'Native market range permits Unix epoch zero');
+fail(validTool('research',{...backtest,start_ms:0}),'Native research range permits Unix epoch zero');
 const {instruments:unused,...withoutList}=marketScreen;
 fail(validTool('market',{...withoutList,universe:{instrument_type:'SWAP'}}),'market universe is a strict schema');
 fail(!validTool('market',{...withoutList,fields:[],universe:{instrument_type:'SWAP'}}),'empty market fields rejected before native dispatch');

@@ -1,9 +1,12 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver},
+    },
     time::{Duration, Instant},
 };
 
@@ -43,6 +46,7 @@ const WORKSPACE_STATUS_MAX_CHANGE_BYTES: usize = 512;
 const RUNTIME_DIAGNOSTIC_TAIL_BYTES: u64 = 64 * 1024;
 const NATIVE_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(300);
 const ENGINE_CONTRACT_TIMEOUT: Duration = Duration::from_secs(5);
+const NATIVE_CREDENTIAL_TIMEOUT: Duration = Duration::from_secs(15);
 const NATIVE_REPLY_MAX_BYTES: u64 = 4096;
 
 fn validate_engine_contract(bytes: &[u8]) -> HostControlResult<()> {
@@ -144,6 +148,82 @@ fn bounded_native_output(command: &mut Command, timeout: Duration) -> HostContro
         // an owner marker, restart signal, authorization or replay target.
         let _ = fs::remove_file(output_path);
         result
+    }
+}
+
+/// Credential bytes enter a verified native child only after CONTROL assigns
+/// its Job. No shell, argv, inherited output or unbounded child wait is used.
+fn bounded_native_secret_input(
+    command: &mut Command,
+    secret: &[u8],
+    timeout: Duration,
+) -> HostControlResult<()> {
+    #[cfg(not(windows))]
+    {
+        let _ = (command, secret, timeout);
+        Err(HostControlError::UnsupportedPlatform)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+        let millis: u32 = timeout
+            .as_millis()
+            .try_into()
+            .map_err(|_| HostControlError::ControlResponseBudgetInvariant)?;
+        // A short bounded write fits in the Windows anonymous stdin pipe even
+        // when a broken child never starts reading from it.
+        if millis == 0 || secret.is_empty() || secret.len() > 1024 {
+            return Err(HostControlError::ControlResponseBudgetInvariant);
+        }
+        let job = AgentJob::new()?;
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        job.assign(&mut child)?;
+
+        let write = (|| -> io::Result<()> {
+            let mut input = child.stdin.take().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "native credential stdin missing")
+            })?;
+            input.write_all(secret)?;
+            input.write_all(b"\n")
+        })();
+        if write.is_err() {
+            let _ = job.terminate();
+            let _ = child.kill();
+            let _ = child.wait();
+            // Child may have consumed some or all of the credential before
+            // closing stdin; a failed write is not proof of no external effect.
+            return Err(HostControlError::NativeStorageOutcomeUnknown);
+        }
+
+        let outcome = unsafe { WaitForSingleObject(child.as_raw_handle() as _, millis) };
+        if outcome != WAIT_OBJECT_0 {
+            let _ = job.terminate();
+            let _ = child.kill();
+            let _ = child.wait();
+            // The child already received the secret. A timeout, failed wait or
+            // abandoned wait all leave its external effect unproven.
+            return Err(HostControlError::NativeStorageOutcomeUnknown);
+        }
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(_) => {
+                let _ = job.terminate();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HostControlError::NativeStorageOutcomeUnknown);
+            }
+        };
+        if !status.success() {
+            return Err(HostControlError::NativeStorageOutcomeUnknown);
+        }
+        Ok(())
     }
 }
 
@@ -634,30 +714,13 @@ impl HostExecutor {
     }
 
     fn bootstrap_agent_github_token(&mut self) -> HostControlResult<Value> {
-        self.require_agent_binary()?;
+        self.require_independent_agent()?;
         let token = load_native_github_token()?;
-
-        let mut child = self
-            .agent_command()
-            .arg("set-github-token")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-
-        let mut stdin = child.stdin.take().ok_or(HostControlError::CommandFailed(
-            "okx-trading-engine set-github-token",
-        ))?;
-        stdin.write_all(token.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        drop(stdin);
-
-        let status = child.wait()?;
-        if !status.success() {
-            return Err(HostControlError::CommandFailed(
-                "okx-trading-engine set-github-token",
-            ));
-        }
+        bounded_native_secret_input(
+            self.agent_command().arg("set-github-token"),
+            token.as_bytes(),
+            NATIVE_CREDENTIAL_TIMEOUT,
+        )?;
 
         Ok(json!({
             "stored": true,
@@ -666,7 +729,7 @@ impl HostExecutor {
     }
 
     fn provision_cloudflare_runtime_token(&mut self) -> HostControlResult<Value> {
-        self.require_agent_binary()?;
+        self.require_independent_agent()?;
 
         let mut random = [0u8; 32];
         getrandom::fill(&mut random)
@@ -680,41 +743,14 @@ impl HostExecutor {
         }
 
         let token_sha256 = format!("{:x}", Sha256::digest(token.as_bytes()));
-        let mut child = match self
-            .agent_command()
-            .arg("set-cloudflare-token")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(error) => {
-                token.zeroize();
-                return Err(error.into());
-            }
-        };
-
-        let write_result = (|| -> std::io::Result<()> {
-            let mut stdin = child.stdin.take().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "okx-trading-engine set-cloudflare-token stdin unavailable",
-                )
-            })?;
-            stdin.write_all(token.as_bytes())?;
-            stdin.write_all(b"\n")?;
-            Ok(())
-        })();
+        random.zeroize();
+        let write_result = bounded_native_secret_input(
+            self.agent_command().arg("set-cloudflare-token"),
+            token.as_bytes(),
+            NATIVE_CREDENTIAL_TIMEOUT,
+        );
         token.zeroize();
         write_result?;
-
-        let status = child.wait()?;
-        if !status.success() {
-            return Err(HostControlError::CommandFailed(
-                "okx-trading-engine set-cloudflare-token",
-            ));
-        }
 
         Ok(json!({
             "stored": true,
@@ -941,6 +977,9 @@ impl HostExecutor {
         operation: Option<&str>,
     ) -> HostControlResult<Value> {
         self.require_storage_stopped()?;
+        // Even read-only backup bytes are produced by an executable that must
+        // match CONTROL's installed and verified financial owner.
+        self.require_independent_agent()?;
         let c = AccountCatalogStore::canonical().load()?;
         AccountCatalogStore::canonical().require_account(key, &c.installation_id)?;
         if let Some(r) = release {
@@ -1457,38 +1496,56 @@ const ENGINE_AGENT_ARGS: &[&str] = &[
     AGENT_CLOUDFLARE_RUNTIME_ID,
 ];
 
-fn drain_native_stderr(
-    mut child_stderr: impl Read,
-    mut stderr_log: okx_host_launcher::logging::RotatingLog,
-    reply_tx: mpsc::Sender<NativeChildReply>,
-) {
-    let mut pending = Vec::<u8>::new();
-    let mut overflow = false;
-    let mut block = [0u8; 4096];
-    loop {
-        let count = match child_stderr.read(&mut block) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        stderr_log.append(&block[..count]);
+/// Decode CONTROL replies while the one canonical log drain owns every read
+/// failure, redaction, bounded interruption retry and completion verdict.
+struct NativeStderrReader<R> {
+    reader: R,
+    replies: mpsc::Sender<NativeChildReply>,
+    pending: Vec<u8>,
+    overflow: bool,
+}
+
+impl<R: Read> Read for NativeStderrReader<R> {
+    fn read(&mut self, block: &mut [u8]) -> io::Result<usize> {
+        let count = self.reader.read(block)?;
         for byte in &block[..count] {
             if *byte == b'\n' {
-                if !overflow && pending.starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes()) {
-                    let payload = &pending[NATIVE_CHILD_CONTROL_PREFIX.len()..];
+                if !self.overflow
+                    && self
+                        .pending
+                        .starts_with(NATIVE_CHILD_CONTROL_PREFIX.as_bytes())
+                {
+                    let payload = &self.pending[NATIVE_CHILD_CONTROL_PREFIX.len()..];
                     if let Ok(reply) = serde_json::from_slice::<NativeChildReply>(payload) {
-                        let _ = reply_tx.send(reply);
+                        let _ = self.replies.send(reply);
                     }
                 }
-                pending.clear();
-                overflow = false;
-            } else if pending.len() < NATIVE_CHILD_CONTROL_MAX_BYTES {
-                pending.push(*byte);
+                self.pending.clear();
+                self.overflow = false;
+            } else if self.pending.len() < NATIVE_CHILD_CONTROL_MAX_BYTES {
+                self.pending.push(*byte);
             } else {
-                overflow = true;
+                self.overflow = true;
             }
         }
+        Ok(count)
     }
-    stderr_log.finish();
+}
+
+fn drain_native_stderr(
+    child_stderr: impl Read,
+    stderr_log: okx_host_launcher::logging::RotatingLog,
+    reply_tx: mpsc::Sender<NativeChildReply>,
+) {
+    okx_host_launcher::logging::drain(
+        NativeStderrReader {
+            reader: child_stderr,
+            replies: reply_tx,
+            pending: Vec::new(),
+            overflow: false,
+        },
+        Arc::new(Mutex::new(stderr_log)),
+    );
 }
 
 fn read_log_tail(path: &Path) -> std::io::Result<(u64, String)> {
@@ -2710,6 +2767,44 @@ mod tests {
             .expect_err("the child must be terminated and its outcome uncertain");
         assert_eq!(error.code(), "NATIVE_STORAGE_OUTCOME_UNKNOWN");
     }
+    #[cfg(windows)]
+    #[test]
+    fn credential_child_consumes_stdin_under_job_with_deadline() {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("more >nul");
+        bounded_native_secret_input(
+            &mut command,
+            b"fixture-secret-only",
+            Duration::from_secs(15),
+        )
+        .expect("bounded credential child should exit after stdin EOF");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn credential_child_timeout_is_unknown_not_success() {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("ping -n 30 127.0.0.1 >nul");
+        let error = bounded_native_secret_input(
+            &mut command,
+            b"fixture-secret-only",
+            Duration::from_millis(30),
+        )
+        .expect_err("credential operation without terminal receipt remains unknown");
+        assert_eq!(error.code(), "NATIVE_STORAGE_OUTCOME_UNKNOWN");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn credential_child_failed_exit_does_not_prove_no_effect() {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("more >nul & exit /b 1");
+        let error = bounded_native_secret_input(
+            &mut command,
+            b"fixture-secret-only",
+            Duration::from_secs(15),
+        )
+        .expect_err("a nonzero exit after stdin delivery is an uncertain effect");
+        assert_eq!(error.code(), "NATIVE_STORAGE_OUTCOME_UNKNOWN");
+    }
     #[test]
     fn workspace_diagnostic_text_is_byte_bounded_and_utf8_safe() {
         let value = "é".repeat(400);
@@ -2754,5 +2849,58 @@ mod tests {
         let text = fs::read_to_string(path).unwrap();
         assert!(!text.contains("NEVER_PERSIST_THIS"));
         assert!(text.contains("redacted"));
+    }
+
+    #[test]
+    fn native_stderr_read_failure_never_claims_complete_log_evidence() {
+        struct FailsAfterOneRead {
+            bytes: Vec<u8>,
+            sent: bool,
+        }
+        impl Read for FailsAfterOneRead {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.sent {
+                    return Err(io::Error::other("injected stderr pipe failure"));
+                }
+                self.sent = true;
+                let len = self.bytes.len();
+                buf[..len].copy_from_slice(&self.bytes);
+                Ok(len)
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "okx-failed-native-stderr-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let log_path = root.join("stderr.log");
+        let log = okx_host_launcher::logging::RotatingLog::open(&log_path).unwrap();
+        let health = log.health();
+        let reply = NativeChildReply {
+            schema: NATIVE_CHILD_CONTROL_SCHEMA_V1.into(),
+            request_id: "shutdown_failure_test_0001".into(),
+            outcome: "DRAINED".into(),
+        };
+        let bytes = format!(
+            "child started\n{}{}\n",
+            NATIVE_CHILD_CONTROL_PREFIX,
+            serde_json::to_string(&reply).unwrap()
+        )
+        .into_bytes();
+        assert!(bytes.len() < 4096);
+        let (tx, rx) = mpsc::channel();
+        drain_native_stderr(FailsAfterOneRead { bytes, sent: false }, log, tx);
+
+        assert!(rx.recv().unwrap().valid_for("shutdown_failure_test_0001"));
+        assert!(!health.complete(), "a failed pipe read loses log evidence");
+        assert!(
+            fs::read_to_string(&log_path)
+                .unwrap()
+                .contains("child started")
+        );
     }
 }

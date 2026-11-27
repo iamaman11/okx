@@ -9,6 +9,9 @@ const token={...text(),minLength:8,pattern:'^[A-Za-z0-9_-]+$'};
 // Count all wire digits without binary floats or implicit rounding.
 const money={type:'string',pattern:'^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$',maxLength:29};
 const integer=(min=0,max=Number.MAX_SAFE_INTEGER):Schema=>({type:'integer',minimum:min,maximum:max});
+// The public MCP contract must accept exactly the eight Native closed-bar periods.
+export const SUPPORTED_CANDLE_TIMEFRAMES_MS=[60000,180000,300000,900000,1800000,3600000,14400000,86400000] as const;
+const timeframe:Schema={enum:[...SUPPORTED_CANDLE_TIMEFRAMES_MS]};
 // Enum values already constrain JSON types; omit redundant type to keep tools/list bounded.
 const choice=(...values:string[]):Schema=>({enum:values});
 const array=(items:Schema,max=32):Schema=>({type:'array',items,maxItems:max,uniqueItems:true});
@@ -35,7 +38,7 @@ const liveStrategyParams=object({fast:integer(1,999),slow:integer(2,1000)});
 const ema=liveStrategyParams;
 const researchParameters={oneOf:[ema,object({lookback:integer(2,1000)})]};
 const costs=object({maker_fee_bps:{type:'number',minimum:0,maximum:1000},taker_fee_bps:{type:'number',minimum:0,maximum:1000},slippage_bps:{type:'number',minimum:0,maximum:1000},funding_mode:choice('observed','zero_assumption')});
-const range={instruments:array(text(64),100),timeframe_ms:integer(1000,2678400000),start_ms:integer(1),end_ms:integer(1)};
+const range={instruments:array(text(64),100),timeframe_ms:timeframe,start_ms:integer(0),end_ms:integer(1)};
 const researchStrategies=choice('ema_cross_v1','ema_momentum_confirm_v1','close_breakout_v1');
 const research={...mutation,...range,instruments:{...array(text(64),8),minItems:1},strategy_id:researchStrategies,costs,data_mode:choice('historical_observed','counterfactual'),seed:integer()};
 const instance={instance_id:text(64)};
@@ -75,8 +78,8 @@ export const ACTION_SCHEMAS:Record<string,Schema[]>={
  strategies:[
   action('list',{account}),
   action('status',{account,...instance}),
-  action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1,1),parameters:liveStrategyParams,instruments:array(text(64)),timeframe_ms:integer(1000),budget_usd:money}),
-  action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:liveStrategyParams,budget_usd:money,instruments:{...array(text(64),32),minItems:1},timeframe_ms:integer(1000)},['account','idempotency_key','instance_id','expected_revision','parameters','budget_usd']),
+  action('create',{account,...mutation,...instance,definition_id:text(64),version:integer(1,1),parameters:liveStrategyParams,instruments:array(text(64)),timeframe_ms:timeframe,budget_usd:money}),
+  action('update',{account,...mutation,...instance,expected_revision:integer(),parameters:liveStrategyParams,budget_usd:money,instruments:{...array(text(64),32),minItems:1},timeframe_ms:timeframe},['account','idempotency_key','instance_id','expected_revision','parameters','budget_usd']),
   action('restore_configuration',{account,...mutation,...instance,expected_revision:integer(2),source_revision:integer(1)}),
   action('start',{account,...mutation,...instance,expected_revision:integer(1),configuration_digest:{type:'string',pattern:'^[0-9a-f]{64}$'}}),
   action('stop',{account,...mutation,...instance}),
@@ -94,20 +97,20 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 // with real order submission under a single model-callable descriptor.
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  accounts:{description:'Accounts.',readOnlyHint:false,destructiveHint:true},
- strategies:{description:'Strategies; may trade.',readOnlyHint:false,destructiveHint:true},
- market:{description:'Market: graphs via screen + composition.',readOnlyHint:true,destructiveHint:false},
+ strategies:{description:'Live strategies.',readOnlyHint:false,destructiveHint:true},
+ market:{description:'Market composition.',readOnlyHint:true,destructiveHint:false},
  research:{description:'Research.',readOnlyHint:false,destructiveHint:true},
  portfolio:{description:'Portfolio.',readOnlyHint:true,destructiveHint:false},
  diagnostics:{description:'Diagnostics.',readOnlyHint:true,destructiveHint:false},
 };
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
- preview:{description:'Preview; no order.',readOnlyHint:true,destructiveHint:false},
- execute:{description:'Real order; loss possible. Approval, limits, STOP required.',readOnlyHint:false,destructiveHint:true},
+ preview:{description:'Preview only.',readOnlyHint:true,destructiveHint:false},
+ execute:{description:'Live order; loss risk; approval, limits, STOP.',readOnlyHint:false,destructiveHint:true},
  status:{description:'Status.',readOnlyHint:true,destructiveHint:false},
- cancel:{description:'Cancel order.',readOnlyHint:false,destructiveHint:true},
- close:{description:'Real close order.',readOnlyHint:false,destructiveHint:true},
+ cancel:{description:'Cancel.',readOnlyHint:false,destructiveHint:true},
+ close:{description:'Close.',readOnlyHint:false,destructiveHint:true},
  capabilities:{description:'Rights.',readOnlyHint:true,destructiveHint:false},
- preflight:{description:'Readiness.',readOnlyHint:true,destructiveHint:false},
+ preflight:{description:'Ready?',readOnlyHint:true,destructiveHint:false},
 };
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
@@ -117,7 +120,7 @@ const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
 // Factor identical bounded scalar schemas only; internal validation keeps every
 // expanded constraint. Standard JSON Schema references preserve tools/list bounds.
 function publicSchema(schema:Schema):Schema {
-const definitions:Record<string,Schema>={d:money,t:text(),s:text(64),b:text(16),a:artifactId,j:decisionJob,k:token,i:integer(),n:integer(1),f:integer(1000),p:integer(1,50),y:integer(1,1000),r:researchStrategies,q:researchParameters,x:stepId,c:costs,e:economicAmount,h:liveStrategyParams,u:{...array(text(64),8),minItems:1},v:choice('counterfactual','historical_observed'),w:array(account),l:{type:'string',pattern:'^link_[a-f0-9]{32}$'},z:{anyOf:[money,{type:'null'}]}};
+const definitions:Record<string,Schema>={d:money,t:text(),s:text(64),b:text(16),a:artifactId,j:decisionJob,k:token,i:integer(),n:integer(1),f:timeframe,p:integer(1,50),y:integer(1,1000),r:researchStrategies,q:researchParameters,x:stepId,c:costs,e:economicAmount,h:liveStrategyParams,u:{...array(text(64),8),minItems:1},v:choice('counterfactual','historical_observed'),w:array(account),l:{type:'string',pattern:'^link_[a-f0-9]{32}$'},z:{anyOf:[money,{type:'null'}]}};
  const counts:Record<string,number>={};
  const key=(node:any):string|undefined=>Object.keys(definitions).find(k=>JSON.stringify(node)===JSON.stringify(definitions[k]));
  const count=(node:any):void=>{
@@ -253,7 +256,7 @@ export function validTool(name:string,args:unknown):boolean {
     (args.instance_id==='manual'||typeof args.source_revision!=='number'||
      typeof args.expected_revision!=='number'||args.source_revision>=args.expected_revision))return false;
  if(name==='market'&&isObject(args)&&!validMarketOperatorRefs(args))return false;if(name==='research'&&isObject(args)&&!validResearchStrategy(args))return false;if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&!args.composition.steps.every(validCompositionStep))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
-export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&action!=='preview'&&action!=='status')||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','benchmark','cancel','record_decision'].includes(String(action)));}
+export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&['execute','cancel','close'].includes(String(action)))||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','benchmark','cancel','record_decision'].includes(String(action)));}
 // One policy for both owner routing and native-profile admission. Keeping
 // independent operation allowlists in each layer risks accepting a Research
 // route that its own execution profile then rejects (or vice versa).

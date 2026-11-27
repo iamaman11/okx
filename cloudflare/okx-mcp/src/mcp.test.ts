@@ -1,5 +1,6 @@
 import {mcpApi,operationTrace,projectNativeResponse} from './mcp.js';
 import {payloadFixtures} from './execution_tools.test.js';
+import {MAX_BODY_BYTES} from './shared.js';
 const ctx={auth:{scope:['mcp:use']}};
 const originJob='a'.repeat(64);
 const researchTrace=operationTrace('research','request:req_original_01',{
@@ -211,6 +212,23 @@ const publicArgs=(name:string,args:any)=>{
  return {name:'trade.'+action,arguments:input};
 };
 const call=(method:string,params?:unknown)=>mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})}),{} as any,ctx);
+// Parse and bound the actual request before routing. Invalid envelopes must
+// remain JSON-RPC errors, never unhandled Worker exceptions or native calls.
+for(const malformed of [null,[],42,{method:'tools/list',id:1},
+ {jsonrpc:'1.0',method:'tools/list',id:1},
+ {jsonrpc:'2.0',method:'tools/list'},
+ {jsonrpc:'2.0',method:'tools/list',id:true}]){
+ const response=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify(malformed)}),{} as any,ctx);
+ const rpc:any=await response.json();
+ if(rpc.error?.code!==-32600)throw Error('malformed JSON-RPC envelope was accepted');
+}
+const notification=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})}),{} as any,ctx);
+if(notification.status!==202)throw Error('proper JSON-RPC notification was rejected');
+const missingParams:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call'})}),{} as any,ctx)).json();
+if(missingParams.error?.code!==-32602)throw Error('missing tools/call params must be invalid params, not unknown method');
+const oversizedRequest=await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:'x'.repeat(MAX_BODY_BYTES+1)}),{} as any,ctx);
+if(oversizedRequest.status!==413)throw Error('oversized MCP request was buffered or parsed');
+console.log('mcp_bounded_input_and_strict_jsonrpc PASS');
 const response=await call('tools/list'),body:any=await response.json();
 const bytes=new TextEncoder().encode(JSON.stringify(body)).byteLength;
 
@@ -239,7 +257,7 @@ const env:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:
  earlyRequestId=JSON.parse(String(init.body)).request_id;
  return Response.json({status:'FAILED',reason:'MUTATION_OUTCOME_UNKNOWN_RECONCILE_EXACT_INTENT',retryable:false});
 }})}};
-const unknown:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:2,method:'tools/call',params:publicArgs('trade',fixture.positive)})}),env,ctx)).json();
+const unknown:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:2,method:'tools/call',params:publicArgs('trade',fixture.positive)})}),env,ctx)).json();
 if(unknown.result.structuredContent.status!=='unknown'||unknown.result.structuredContent.retryable!==false||
  unknown.result.structuredContent.request_id!==earlyRequestId||!unknown.result.structuredContent.as_of_ms)
  throw Error('pre-delivery UNKNOWN lost the exact native request_id');
@@ -280,6 +298,15 @@ for(const [tool,args,expectedStatus,expectedReason] of [
    projected?.reason_code!==expectedReason||projected?.data!==null||
    JSON.stringify(projected).includes('private transport detail'))
   throw Error('transport exception lost correlation or leaked internals '+tool);
+}
+for(const action of ['capabilities','preflight'] as const){
+ const read=payloadFixtures.find(x=>x.tool==='trade'&&x.action===action)!.positive;
+ const unavailable:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async()=>{throw Error('offline');}})}};
+ const response:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',
+  body:JSON.stringify({jsonrpc:'2.0',id:5,method:'tools/call',params:publicArgs('trade',read)})}),unavailable,ctx)).json();
+ const result=response.result?.structuredContent;
+ if(result?.status!=='failed'||result?.reason_code!=='EDGE_DISPATCH_UNAVAILABLE'||result?.next_action!=='inspect_diagnostics')
+  throw Error(`read-only trade.${action} was classified as uncertain mutation`);
 }
 console.log('mcp_interrupted_dispatch_tracks_original_request PASS');
 
@@ -388,7 +415,7 @@ console.log('mcp_finance_manual_is_account_capital_without_false_partial PASS');
 
 const oversized='x'.repeat(13_000);
 const budgetEnv:any={RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>Response.json({schema:'okx.agent.response/v1',request_id:JSON.parse(String(init.body)).request_id,status:'completed',quality:'FRESH',warnings:[],result:{rows:[oversized]}})})}};
-const budget:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({id:3,method:'tools/call',params:{name:'market',arguments:payloadFixtures.find(x=>x.tool==='market')!.positive}})}),budgetEnv,ctx)).json();
+const budget:any=await(await mcpApi.fetch(new Request('https://fixture/mcp',{method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'market',arguments:payloadFixtures.find(x=>x.tool==='market')!.positive}})}),budgetEnv,ctx)).json();
 const budgetResult=budget.result.structuredContent;
 if(budgetResult.status!=='failed'||budgetResult.reason_code!=='RESPONSE_TOO_LARGE'||budgetResult.data.response_budget_bytes!==12_288||budgetResult.data.response_bytes<=12_288)throw Error('oversized native result must terminalize as bounded MCP failure');
 
