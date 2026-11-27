@@ -196,6 +196,8 @@ class FeedbackTests(unittest.TestCase):
              ("host-launcher", "host,mcp,wire,worker", "true")),
             (["crates/okx-host-launcher/src/main.rs", "cloudflare/okx-mcp/src/mcp.ts"],
              ("full", "expanded", "true")),
+            (["crates/okx-host-controller/src/attestor.rs"],
+             ("host-controller", "host,mcp", "true")),
             (["crates/okx-host-controller/src/attestor.rs", "cloudflare/okx-mcp/src/mcp.ts"],
              ("host-controller", "host,mcp,wire,worker", "true")),
             (["crates/okx-host-controller/src/runtime.rs", "cloudflare/okx-mcp/src/mcp.ts"],
@@ -210,7 +212,6 @@ class FeedbackTests(unittest.TestCase):
 
     def test_host_source_uses_owner_and_consumer_not_expanded(self):
         for path in (
-            "crates/okx-host-controller/src/attestor.rs",
             "crates/okx-host-controller/tests/research_supervisor.rs",
             "crates/okx-host-protocol/tests/research_wire.rs",
             "crates/okx-host-launcher/src/logging.rs",
@@ -220,6 +221,18 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(select_draft("modified", path), {"host"})
             self.assertEqual(select_draft("added", path), {"host"})
             self.assertEqual(select_draft("removed", path), {"expanded"})
+        attestor = "crates/okx-host-controller/src/attestor.rs"
+        self.assertEqual(select_draft("modified", attestor), {"host", "mcp"})
+        self.assertEqual(select_draft("added", attestor), {"host", "mcp"})
+        self.assertEqual(select_draft("removed", attestor), {"expanded"})
+        with (patch("check_p0.tests", return_value="") as run_tests,
+              patch("check_p0.subprocess.run") as run_commands):
+            execute(select_draft("modified", attestor))
+        packages = [call.args[0] for call in run_tests.call_args_list]
+        self.assertEqual(packages, ["okx-host-protocol", "okx-host-launcher",
+                                    "okx-host-controller", "okx-bridge-mcp"])
+        self.assertTrue(any(call.args[0][:3] == ["npm", "run", "check"]
+                            for call in run_commands.call_args_list))
         for path in (
             "crates/okx-host-controller/src/main.rs",
             "crates/okx-host-controller/src/lifecycle/activation.rs",

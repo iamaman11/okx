@@ -496,8 +496,13 @@ export class RuntimeSession {
     // A valid process observation from CONTROL still cannot be promoted when
     // Research reconnects during the challenge or CONTROL rotates meanwhile.
     if (!sameResearch()) return unverified("RESEARCH_EDGE_GENERATION_CHANGED", research.attachment.generation);
-    if (this.activeAttestor()?.ws !== attestor.ws)
+    if (this.activeAttestor()?.ws !== attestor.ws) {
+      // A revoked bearer was already rejected on the actual inbound frame.
+      // Keep that precise diagnosis; never preserve a PASS from an old socket.
+      if (observed.status === "UNVERIFIED" && observed.reason_code === "CONTROL_ATTEST_CREDENTIAL_REVOKED")
+        return observed;
       return unverified("CONTROL_ATTEST_SOCKET_STALE", research.attachment.generation);
+    }
     return observed;
   }
 

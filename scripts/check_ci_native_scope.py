@@ -31,13 +31,17 @@ _CLOUDFLARE_DIR = "cloudflare/okx-mcp/"
 _HOST_CONTROL_TEST = "crates/okx-host-controller/tests/"
 _HOST_LAUNCHER_TEST = "crates/okx-host-launcher/tests/"
 _HOST_PROTOCOL_TEST = "crates/okx-host-protocol/tests/"
+# CONTROL's attestor is a Host-only binary owner, but its frame protocol is
+# consumed by the Edge Durable Object. Host-only edits still need the actual
+# Cloudflare MCP/DO/WSS contract tests, without a financial Engine rebuild.
+_EDGE_WIRE_SHARED_HOST_SOURCE = "crates/okx-host-controller/src/attestor.rs"
 # Host-only release is permitted for source files whose runtime authority is
 # demonstrably isolated from Engine installation, desired state and lifecycle.
 # An entire crate-level src/ prefix is NOT such a proof: runtime.rs, artifact.rs,
 # desired.rs, autostart.rs and entrypoints can install/restart Engine. Unknown or
 # newly introduced Host source defaults to Full until explicitly reviewed.
 _ISOLATED_HOST_CONTROL_SOURCE = {
-    "crates/okx-host-controller/src/attestor.rs",
+    _EDGE_WIRE_SHARED_HOST_SOURCE,
 }
 _ISOLATED_HOST_LAUNCHER_SOURCE = {
     "crates/okx-host-launcher/src/logging.rs",
@@ -201,6 +205,9 @@ def draft_checks(path, kind):
         return set()
     if kind == "cloudflare":
         return {"mcp", "wire", "worker"}
+    if path == _EDGE_WIRE_SHARED_HOST_SOURCE:
+        # The draft producer must be checked against its Edge decoder, too.
+        return {"host", "mcp"}
     if kind in {"host-controller", "host-launcher"}:
         return {"host"}
     if kind == "research":
@@ -242,7 +249,7 @@ def github_plan(pages, *, allow_dependency_candidate):
         owners = [(entry, category(entry["filename"])) for entry in files]
         scope = _scope({kind for _, kind in owners})
         candidate = dependency_candidate(pages) if allow_dependency_candidate else "none"
-        edge = any(kind == "cloudflare" for _, kind in owners)
+        edge = any(_needs_edge_witness(entry["filename"]) for entry, _ in owners)
         checks = set()
         for entry, kind in owners:
             checks.update(draft_checks(entry["filename"], kind)
@@ -259,9 +266,15 @@ def github_plan(pages, *, allow_dependency_candidate):
     }
 
 
+def _needs_edge_witness(path):
+    return category(path) == "cloudflare" or path == _EDGE_WIRE_SHARED_HOST_SOURCE
+
+
 def edge_changed(pages):
+    # Historical CI output name: this is the *required Edge test* signal,
+    # including changes to the native CONTROL producer of the shared wire.
     files = verified_entries(pages)
-    return files is not None and any(category(entry["filename"]) == "cloudflare" for entry in files)
+    return files is not None and any(_needs_edge_witness(entry["filename"]) for entry in files)
 
 
 def dependency_candidate(pages):
@@ -480,7 +493,20 @@ def _self_test() -> None:
     assert classify(host_and_edge) == "host-controller"
     assert classify(files("crates/okx-host-protocol/tests/research_wire.rs", "cloudflare/okx-mcp/src/mcp.ts")) == "host-controller"
     assert edge_changed(host_and_edge)
-    assert not edge_changed(files("crates/okx-host-controller/src/attestor.rs", "README.md"))
+    attestor_only = files(_EDGE_WIRE_SHARED_HOST_SOURCE, "README.md")
+    assert classify(attestor_only) == "host-controller"
+    assert edge_changed(attestor_only)
+    attestor_plan = github_plan(attestor_only, allow_dependency_candidate=True)
+    assert attestor_plan["scope"] == "host-controller"
+    assert attestor_plan["edge_changed"] == "true"
+    assert attestor_plan["manifest_candidate"] == "none"
+    assert attestor_plan["draft_checks"] == "host,mcp"
+    assert attestor_plan["draft_mcp"] == "true"
+    assert github_plan(files("crates/okx-host-controller/tests/research_supervisor.rs"),
+                       allow_dependency_candidate=False)["draft_checks"] == "host"
+    assert not edge_changed(files("crates/okx-host-controller/tests/research_supervisor.rs", "README.md"))
+    assert not edge_changed(files("crates/okx-host-launcher/src/logging.rs", "README.md"))
+    assert not edge_changed(files("crates/okx-trading-engine/src/query.rs", "README.md"))
     # No broad `src/*.rs` Host skip: a CONTROL or Launcher implementation
     # can deploy/restart Engine or affect its desired/installed state without
     # depending on the trading-engine Cargo crate. The classifier must fail

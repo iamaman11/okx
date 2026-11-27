@@ -23,6 +23,11 @@ the same live Research connection through the existing Durable Object.
   run in the same Windows security context: a distinct credential protects
   against accidental bearer/owner confusion, **not** a malicious process that
   has already compromised that Windows account.
+- The current v1 proof matches CONTROL's observed PID and image SHA against
+  the authenticated Research WebSocket's claims; it does not independently
+  match the per-launch Research incarnation. A holder of a stolen Research
+  bearer who also knows the live PID and image SHA could impersonate that
+  socket. Do not interpret `PASS` as protection against stolen credentials.
 
 This channel has no `/dispatch`, finance, account, installation, Research
 lifecycle, or GitHub-control operations. Its disconnect does not close Engine
@@ -58,6 +63,14 @@ the Windows CONTROL-only credential; a previously admitted attestor socket
 must lose authority after an Edge fingerprint change. Rotate by provisioning
 a new independent bearer on both ends, allowing only the new fingerprint to
 authenticate. There is no implicit credential reuse or fallback.
+
+On CONTROL builds with attestor credential refresh, an **already enabled**
+attestor checks its Windows credential on the existing 20-second heartbeat
+and re-reads it before each reconnect. Rotation or revocation ends only that
+attestor socket; CONTROL and its Engine/Research children are not restarted.
+First-time enablement on a CONTROL process started without the credential
+still requires normal verified CONTROL activation. No live secret rotation is
+part of a read-only diagnostic check.
 
 Do not publish workstation identifiers, process paths, tokens, or live
 fingerprints in public issue comments or pull-request logs.
