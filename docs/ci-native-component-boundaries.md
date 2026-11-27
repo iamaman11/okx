@@ -88,7 +88,8 @@ CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
 hashes are retained as **non-deployable** evidence. For a Host-only PR it also
 uploads the actual CONTROL and Launcher executables, `Cargo.lock`, and strict
 `okx.windows.host-component/v1` manifest with the exact four-file allowlist.
-The manifest binds the PR HEAD, tree, pinned Rust version, lockfile digest,
+The manifest binds the PR HEAD, tree, exact pinned compiler identity
+`rustc 1.100.0 (0ef1bc386 2026-11-09)`, lockfile digest,
 and both executable SHA-256/size values, while explicitly declaring
 `release_is_complete=false` and `installation_allowed=false`.
 `scripts/verify_host_component_release.py` checks these bytes before upload

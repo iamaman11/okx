@@ -580,6 +580,7 @@ function validate(yaml, fileNames) {
   assert.match(host, /installation_allowed = \$false/);
   assert.match(host, /python3 -B scripts\/verify_host_component_release\.py \$dist \$head \$tree/);
   assert.match(host, /HOST_RELEASE_CHECKOUT_DIRTY_BEFORE_BUILD/);
+  assert.match(host, /HOST_RUST_VERSION_NOT_EXACT_PIN/);
   assert.match(host, /name: okx-host-component-\$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
   const buildIndex = host.indexOf('      - name: Build both Windows host executables without Engine');
   const uploadIndex = host.indexOf('      - name: Retain exact Host-only bytes');

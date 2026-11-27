@@ -11,7 +11,8 @@ import tempfile
 import zipfile
 
 from verify_host_component_release import (
-    EXECUTABLES, FILES, POLICY, SCHEMA, sha256, verify_bytes, verify_directory,
+    EXECUTABLES, FILES, POLICY, RUST_VERSION, SCHEMA, sha256, verify_bytes,
+    verify_directory,
 )
 
 
@@ -36,7 +37,7 @@ def manifest(files):
         "repository_id": 1388071566,
         "source_head_sha": HEAD,
         "source_tree": TREE,
-        "rust_version": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+        "rust_version": RUST_VERSION,
         "cargo_lock_sha256": sha256(files["Cargo.lock"]),
         "artifact_scope": "host_only",
         "release_is_complete": False,
@@ -117,6 +118,9 @@ def run():
         ({**good_manifest, "source_head_sha": TREE}, "HOST_MANIFEST_PROVENANCE_INVALID"),
         ({**good_manifest, "source_tree": HEAD}, "HOST_MANIFEST_PROVENANCE_INVALID"),
         ({**good_manifest, "rust_version": "rustc 1.99.0"}, "HOST_MANIFEST_PROVENANCE_INVALID"),
+        ({**good_manifest, "rust_version": RUST_VERSION + " forged-extra"}, "HOST_MANIFEST_PROVENANCE_INVALID"),
+        ({**good_manifest, "rust_version": "rustc 1.100.0 (fffffffff 2026-11-09)"}, "HOST_MANIFEST_PROVENANCE_INVALID"),
+        ({**good_manifest, "rust_version": "rustc 1.100.0"}, "HOST_MANIFEST_PROVENANCE_INVALID"),
         ({**good_manifest, "cargo_lock_sha256": "0" * 64}, "HOST_MANIFEST_PROVENANCE_INVALID"),
         ({**good_manifest, "owner_claim": "engine"}, "HOST_MANIFEST_UNKNOWN_OR_MISSING_FIELDS"),
         ({k: v for k, v in good_manifest.items() if k != "components"}, "HOST_MANIFEST_UNKNOWN_OR_MISSING_FIELDS"),

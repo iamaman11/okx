@@ -688,6 +688,7 @@ jobs:
           Copy-Item -LiteralPath 'Cargo.lock' -Destination (Join-Path $dist 'Cargo.lock')
           $rustVersion = (& rustc --version).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'HOST_RUST_VERSION_UNAVAILABLE' }
+          if ($rustVersion -cne 'rustc 1.100.0 (0ef1bc386 2026-11-09)') { throw 'HOST_RUST_VERSION_NOT_EXACT_PIN' }
           [ordered]@{
             schema = 'okx.windows.host-component/v1'
             ci_status_policy = 'okx.github.actions.host-ready/v1'

@@ -32,6 +32,7 @@ SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 SHA64 = re.compile(r"[0-9a-f]{64}\Z")
 SCHEMA = "okx.windows.host-component/v1"
 POLICY = "okx.github.actions.host-ready/v1"
+RUST_VERSION = "rustc 1.100.0 (0ef1bc386 2026-11-09)"
 
 
 def fail(code):
@@ -83,7 +84,7 @@ def verified_payloads(contents, head, tree):
             manifest["repository_id"] != 1388071566 or
             manifest["source_head_sha"] != head or manifest["source_tree"] != tree or
             type(manifest["rust_version"]) is not str or
-            not re.fullmatch(r"rustc 1\.100\.0(?:\s.{1,140})?", manifest["rust_version"]) or
+            manifest["rust_version"] != RUST_VERSION or
             type(manifest["cargo_lock_sha256"]) is not str or
             not SHA64.fullmatch(manifest["cargo_lock_sha256"]) or
             manifest["cargo_lock_sha256"] != sha256(contents["Cargo.lock"])):
