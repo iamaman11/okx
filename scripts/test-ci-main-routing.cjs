@@ -249,11 +249,30 @@ function validate(yaml, fileNames) {
   assert.match(researchFingerprintFixture, /RESEARCH_FINGERPRINT_CARGO100_ANCHOR_NOT_FOUND/);
   assert.match(researchFingerprintFixture, /RESEARCH_FINGERPRINT_LEGACY_ANCHOR_MISLABELED/);
   // Cargo fingerprint logging cannot be configured at job scope, because
-  // Swatinem/rust-cache includes env variables in its key. Three commands
+  // Swatinem/rust-cache includes env variables in its key. Four commands
   // only get bounded INFO logs after cache restoration, and raw traces may
   // never enter the build artifact uploaded for provenance/timings.
+  const acceptedWriterLabels = researchFingerprint.match(/\[ValidateSet\(([^)]*)\)\]\[string\]\$Job/);
+  assert.ok(acceptedWriterLabels, 'FINGERPRINT_COLLECTOR_TYPED_JOB_LABELS_MISSING');
+  const acceptedLabels = new Set([...acceptedWriterLabels[1].matchAll(/'([^']+)'/g)].map(x => x[1]));
+  assert.deepEqual([...acceptedLabels].sort(), ['ipc', 'owner', 'release'],
+    'FINGERPRINT_COLLECTOR_JOB_LABELS_CHANGED_WITHOUT_ALL_CONSUMERS');
+  const actualLabels = [];
+  for (const [id, block] of map) {
+    for (const [, label] of block.matchAll(/Write-ResearchCargoFingerprintCounts -Counts \$fingerprintCounts -Job ([a-zA-Z_-]+)/g)) {
+      assert.ok(acceptedLabels.has(label), `FINGERPRINT_JOB_LABEL_NOT_IN_COLLECTOR_VALIDATE_SET:${id}:${label}`);
+      actualLabels.push(`${id}:${label}`);
+    }
+  }
+  assert.deepEqual(actualLabels.sort(), [
+    'research_clippy_windows:owner',
+    'research_component_release_windows:release',
+    'research_ipc_windows:ipc',
+    'research_service_tests_windows:owner',
+  ], 'RESEARCH_FINGERPRINT_EXACT_FOUR_TYPED_OWNERS');
   for (const [id, stepName, profile, exitCapture, jobLabel] of [
     ['research_ipc_windows', 'All ten real Research child IPC process tests', 'debug', 'code', 'ipc'],
+    ['research_clippy_windows', 'Fresh standalone Research Clippy and Rust formatting', 'debug', 'clippyCode', 'owner'],
     ['research_service_tests_windows', 'Fresh Research Clippy and Rust formatting', 'debug', 'clippyCode', 'owner'],
     ['research_component_release_windows', 'Build self-contained Research-only Windows component', 'release', 'buildCode', 'release'],
   ]) {
@@ -1125,6 +1144,10 @@ assert.throws(() => validate(source.replace("|| '[]') }}", "|| '[\"tests\",\"rel
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
   '          save-if: false', '          save-if: true'), workflows),
   'RESEARCH_PR_CACHE_MUST_REMAIN_READ_ONLY');
+assert.throws(() => validate(changeJobInput(source, 'research_clippy_windows',
+  'Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job owner',
+  'Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job clippy'), workflows),
+  'RESEARCH_CLIPPY_CANNOT_PASS_UNDECLARED_COLLECTOR_JOB_LABEL');
 for (const id of ['research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows', 'research_component_release_windows']) {
   assert.throws(() => validate(changeJobInput(source, id,
     'SCCACHE_GHA_RW_MODE=READ_ONLY', 'SCCACHE_GHA_RW_MODE=READ_WRITE'), workflows),

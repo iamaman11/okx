@@ -1464,7 +1464,9 @@ jobs:
             ForEach-Object { if (-not (Test-ResearchCargoFingerprintLogLine -Line $_ -Counts $fingerprintCounts)) { $_ } }
           $clippyCode = $LASTEXITCODE
           Remove-Item Env:CARGO_LOG
-          Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job clippy
+          # The diagnostic collector accepts ipc|owner|release, not a distinct
+          # "clippy" label. This independent runner still performs owner Clippy.
+          Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job owner
           if ($clippyCode -ne 0) { exit $clippyCode }
       - name: Research Clippy compiler cache statistics
         if: always() && steps.research-sccache.outcome == 'success'
