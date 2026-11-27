@@ -17,6 +17,7 @@ import stat
 import struct
 import sys
 import zipfile
+import zlib
 
 
 FILES = ("Cargo.lock", "manifest.json", "okx-host-control.exe", "okx-host-launcher.exe")
@@ -137,6 +138,32 @@ def verify_directory(directory, head, tree):
     return verified_payloads(contents, head, tree)
 
 
+def verify_deflate_stream(compressed, expanded_size):
+    """Require the entire raw DEFLATE payload to belong to one ZIP member.
+
+    zipfile validates expanded bytes and CRC but accepts trailing data after
+    the DEFLATE end marker. That would allow undeclared bytes to hide inside
+    an otherwise contiguous four-member ZIP. Bound decompression independently
+    of the declared ZIP sizes to reject malformed or oversized streams.
+    """
+    decoder = zlib.decompressobj(-15)
+    expanded = 0
+    for offset in range(0, len(compressed), 64 * 1024):
+        pending = compressed[offset:offset + 64 * 1024]
+        while pending:
+            try:
+                chunk = decoder.decompress(pending, 64 * 1024)
+            except zlib.error:
+                fail("HOST_ARCHIVE_NONCANONICAL_LAYOUT")
+            expanded += len(chunk)
+            if expanded > expanded_size or decoder.unused_data:
+                fail("HOST_ARCHIVE_NONCANONICAL_LAYOUT")
+            pending = decoder.unconsumed_tail
+    if (not decoder.eof or decoder.unused_data or decoder.unconsumed_tail or
+            expanded != expanded_size):
+        fail("HOST_ARCHIVE_NONCANONICAL_LAYOUT")
+
+
 def verify_canonical_zip_layout(raw, entries):
     """Reject data hidden in ZIP prefixes, comments, gaps, aliases or overlays.
 
@@ -180,6 +207,9 @@ def verify_canonical_zip_layout(raw, entries):
         elif (crc != entry.CRC or compressed != entry.compress_size or
               expanded != entry.file_size):
             fail("HOST_ARCHIVE_NONCANONICAL_LAYOUT")
+        if method == zipfile.ZIP_DEFLATED:
+            verify_deflate_stream(raw[data_start:data_start + entry.compress_size],
+                                  entry.file_size)
         cursor = data_start + entry.compress_size
         if flags & 0x0008:
             if raw[cursor:cursor + 4] == b"PK\x07\x08":

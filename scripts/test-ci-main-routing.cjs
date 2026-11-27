@@ -580,6 +580,8 @@ function validate(yaml, fileNames) {
   assert.match(host, /installation_allowed = \$false/);
   assert.match(host, /python3 -B scripts\/verify_host_component_release\.py \$dist \$head \$tree/);
   assert.match(host, /HOST_RELEASE_CHECKOUT_DIRTY_BEFORE_BUILD/);
+  assert.match(host, /HOST_RELEASE_CHECKOUT_DIRTY_AFTER_BUILD/,
+    'HOST_BUILD_SCRIPT_MUST_NOT_MUTATE_RECORDED_SOURCE');
   assert.match(host, /HOST_RUST_VERSION_NOT_EXACT_PIN/);
   assert.match(host, /name: okx-host-component-\$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
   const buildIndex = host.indexOf('      - name: Build both Windows host executables without Engine');
@@ -789,6 +791,16 @@ function validate(yaml, fileNames) {
   assert.match(regression, /cargo test --locked -p okx-trading-engine --lib trade_service::terminal_release::tests::stale_ -- --test-threads 1/);
   assert.match(regression, /2 passed; 0 failed;/);
   assert.match(regression, /BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED/);
+  const fixtureRetryStep = regression.slice(
+    regression.indexOf('      - name: Exact source-capture queue retry negative control'),
+    regression.indexOf('      # K9 runs once'));
+  assert.match(fixtureRetryStep, /if: matrix\.suite == 'engine'/);
+  assert.match(fixtureRetryStep, /cargo test --locked -p okx-trading-engine --lib \$testName -- --exact --test-threads 1/);
+  assert.match(fixtureRetryStep, /source_read_fixture_retry_is_exact_and_never_accepts_other_finance_errors/);
+  assert.match(fixtureRetryStep, /if \(\$code -ne 0\) \{ exit \$code \}/);
+  assert.match(fixtureRetryStep, /\$oneSelected = 'test result: ok\\\. 1 passed; 0 failed; 0 ignored; 0 measured;'/);
+  assert.match(fixtureRetryStep, /\[1-9\]\[0-9\]\* filtered out;/);
+  assert.match(fixtureRetryStep, /SOURCE_CAPTURE_QUEUE_RETRY_NEGATIVE_TEST_NOT_EXECUTED/);
   assert.match(regression, /\$manifestJson = & node scripts\/ci-finance-witness-manifest\.cjs/);
   assert.doesNotMatch(regression, /cargo run[^\n]*(?:native_finance_acceptance|okx-native-finance-check) -- --list/);
   assert.match(regression, /K9 worker two-heavy cancellation latency evidence/);
@@ -1140,7 +1152,25 @@ assert.equal(scopeFor('crates/okx-research-protocol/src/analytics.rs'), 'full');
 assert.equal(scopeFor('crates/okx-research-domain/src/numeric.rs'), 'full');
 assert.equal(scopeFor('crates/okx-host-controller/src/job.rs'), 'full');
 assert.equal(scopeFor('crates/okx-host-controller/src/lifecycle_executor.rs'), 'full');
-assert.equal(scopeFor('crates/okx-host-controller/src/research_supervisor.rs'), 'host-controller');
+// Only explicitly isolated source is eligible for independent Host release.
+// Deployment, desired state, full wire protocol and entrypoints are finance-
+// sensitive even when the Cargo dependency graph does not include Engine.
+assert.equal(scopeFor('crates/okx-host-controller/src/attestor.rs'), 'host-controller');
+assert.equal(scopeFor('crates/okx-host-launcher/src/logging.rs'), 'host-launcher');
+for (const filename of [
+  'crates/okx-host-controller/src/research_supervisor.rs',
+  'crates/okx-host-controller/src/runtime.rs',
+  'crates/okx-host-controller/src/artifact.rs',
+  'crates/okx-host-controller/src/desired.rs',
+  'crates/okx-host-controller/src/autostart.rs',
+  'crates/okx-host-controller/src/controller_update.rs',
+  'crates/okx-host-controller/src/main.rs',
+  'crates/okx-host-controller/src/new_lifecycle_module.rs',
+  'crates/okx-host-protocol/src/lib.rs',
+  'crates/okx-host-launcher/src/main.rs',
+]) {
+  assert.equal(scopeFor(filename), 'full', `ENGINE_LIFECYCLE_FAST_PATH_DENIED:${filename}`);
+}
 assert.throws(() => validate(source, [...workflows, 'publish-native-base.yml']));
 assert.throws(() => validate(source.replace(
   'needs: [dependency-audit, component_impact, required_ci]',
@@ -1370,6 +1400,9 @@ assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
   'RESEARCH_CACHE_PRIME_MUST_NOT_BE_SILENTLY_DISABLED');
 assert.throws(() => validate(source.replace('BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED',
   'WE_DID_NOT_VERIFY_THE_TWO_TESTS'), workflows));
+assert.throws(() => validate(source.replace('SOURCE_CAPTURE_QUEUE_RETRY_NEGATIVE_TEST_NOT_EXECUTED',
+  'SOURCE_CAPTURE_QUEUE_NEGATIVE_TEST_SKIPPED'), workflows),
+  'FINITE_SOURCE_READ_RETRY_NEGATIVE_MUST_EXECUTE_IN_FULL_WINDOWS_ENGINE');
 assert.throws(() => validate(source.replace('NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS',
   'gh release delete "$old" --cleanup-tag --yes'), workflows));
 assert.throws(() => validate(source.replace('NATIVE_ACCOUNT_CATALOG_ALL_SIX_TESTS_REQUIRED',

@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path
 import stat
+import struct
 import tempfile
 import zipfile
 
@@ -65,6 +66,30 @@ def archive(files, *, symlink=None, dos_directory=None):
                 info.external_attr |= 0x10
             z.writestr(info, payload)
     return buf.getvalue()
+
+
+def inject_hidden_deflate_suffix(raw, hidden):
+    """Hide bytes after DEFLATE EOS without making a ZIP gap or overlay."""
+    result = bytearray(raw)
+    with zipfile.ZipFile(io.BytesIO(result), "r") as z:
+        entries = z.infolist()
+    target = entries[-1]
+    assert target.filename == "manifest.json"
+    assert target.compress_type == zipfile.ZIP_DEFLATED
+    cd_offset = struct.unpack_from("<I", result, len(result) - 6)[0]
+    result[cd_offset:cd_offset] = hidden
+    struct.pack_into("<I", result, target.header_offset + 18,
+                     target.compress_size + len(hidden))
+    cursor = cd_offset + len(hidden)
+    for entry in entries:
+        assert result[cursor:cursor + 4] == b"PK\x01\x02"
+        if entry.filename == target.filename:
+            struct.pack_into("<I", result, cursor + 20,
+                             target.compress_size + len(hidden))
+        name_len, extra_len, comment_len = struct.unpack_from("<HHH", result, cursor + 28)
+        cursor += 46 + name_len + extra_len + comment_len
+    struct.pack_into("<I", result, len(result) - 6, cd_offset + len(hidden))
+    return bytes(result)
 
 
 def encoded(m, files=None):
@@ -170,6 +195,18 @@ def run():
             assert str(exc) == "HOST_ARCHIVE_NONCANONICAL_LAYOUT", str(exc)
         else:
             raise AssertionError("ZIP prefix/trailer disguised undeclared Engine bytes")
+
+    hidden = inject_hidden_deflate_suffix(zip_bytes, b"MZ_UNDECLARED_ENGINE")
+    # The standard ZIP reader ignores bytes after DEFLATE EOS even when those
+    # bytes are counted in both local and central compressed sizes.
+    with zipfile.ZipFile(io.BytesIO(hidden), "r") as z:
+        assert z.read("manifest.json") == contents["manifest.json"]
+    try:
+        verify_bytes(hidden, sha256(hidden), HEAD, TREE)
+    except ValueError as exc:
+        assert str(exc) == "HOST_ARCHIVE_NONCANONICAL_LAYOUT", str(exc)
+    else:
+        raise AssertionError("Undeclared payload inside a compressed member was accepted")
 
     comment_zip = io.BytesIO()
     with zipfile.ZipFile(comment_zip, "w", zipfile.ZIP_DEFLATED) as z:
