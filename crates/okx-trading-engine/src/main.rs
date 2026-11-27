@@ -11,7 +11,8 @@ use okx_trading_engine::{
     github_auth::{load_native_github_token, store_native_github_token},
     github_mailbox::GitHubMailboxClient,
     identity::{
-        default_key_id, initialize_native_identity, load_native_identity, load_native_private_key,
+        AgentIdentity, default_key_id, initialize_native_identity, load_native_identity,
+        load_native_private_key,
     },
     market_bootstrap::MarketBootstrapper,
     okx_credentials::load_native_account_credentials,
@@ -52,6 +53,8 @@ enum Command {
     RuntimeContract,
     InitKey,
     Identity,
+    /// Read-only typed presence check; corruption and secret-store failures remain errors.
+    IdentityProbe,
     SetGithubToken,
     SetCloudflareToken,
     SetAccountCredentials {
@@ -231,6 +234,36 @@ async fn inspect_venue(root: &Path, account: &str) -> AgentResult<serde_json::Va
     }))
 }
 
+const IDENTITY_PROBE_SCHEMA_V1: &str = "okx.agent.identity-probe/v1";
+
+/// A presence probe must distinguish a genuinely absent key from a damaged
+/// key or a broken credential store. The existing `identity` command retains
+/// its original success and failure semantics.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "state", rename_all = "SCREAMING_SNAKE_CASE")]
+enum IdentityProbeReply {
+    Present {
+        schema: &'static str,
+        identity: AgentIdentity,
+    },
+    Missing {
+        schema: &'static str,
+    },
+}
+
+fn identity_probe_reply(identity: AgentResult<AgentIdentity>) -> AgentResult<IdentityProbeReply> {
+    match identity {
+        Ok(identity) => Ok(IdentityProbeReply::Present {
+            schema: IDENTITY_PROBE_SCHEMA_V1,
+            identity,
+        }),
+        Err(AgentError::IdentityNotFound(_)) => Ok(IdentityProbeReply::Missing {
+            schema: IDENTITY_PROBE_SCHEMA_V1,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -267,6 +300,10 @@ async fn run(cli: Cli) -> AgentResult<()> {
         Command::Identity => println!(
             "{}",
             serde_json::to_string(&load_native_identity(&config.key_id)?)?
+        ),
+        Command::IdentityProbe => println!(
+            "{}",
+            serde_json::to_string(&identity_probe_reply(load_native_identity(&config.key_id))?)?
         ),
         Command::SetGithubToken => {
             let mut s = input()?;
@@ -688,6 +725,61 @@ mod native_finance_startup_tests {
             .join("account.sqlite");
         assert!(!legacy_account_sql.exists());
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod identity_probe_cli_contract_tests {
+    use super::*;
+
+    #[test]
+    fn distinct_readonly_probe_preserves_existing_identity_command() {
+        let probe = Cli::try_parse_from(["okx-agent", "identity-probe"]).unwrap();
+        assert!(matches!(probe.command, Command::IdentityProbe));
+        let existing = Cli::try_parse_from(["okx-agent", "identity"]).unwrap();
+        assert!(matches!(existing.command, Command::Identity));
+    }
+
+    #[test]
+    fn probe_has_exact_present_or_missing_wire_without_secret_bytes() {
+        let identity = AgentIdentity::from_private_key("agent-key-1", &[7u8; 32]).unwrap();
+        let present = identity_probe_reply(Ok(identity.clone())).unwrap();
+        let present_json = serde_json::to_value(present).unwrap();
+        assert_eq!(
+            present_json,
+            serde_json::json!({
+                "schema": IDENTITY_PROBE_SCHEMA_V1,
+                "state": "PRESENT",
+                "identity": {
+                    "schema": identity.schema,
+                    "key_id": identity.key_id,
+                    "public_key": identity.public_key,
+                }
+            })
+        );
+        assert!(!present_json.to_string().contains("private"));
+        let missing = identity_probe_reply(Err(AgentError::IdentityNotFound("agent-key-1".into())))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(missing).unwrap(),
+            serde_json::json!({"schema": IDENTITY_PROBE_SCHEMA_V1, "state": "MISSING"})
+        );
+    }
+
+    #[test]
+    fn corrupt_identity_and_store_failure_must_not_become_missing() {
+        assert!(matches!(
+            identity_probe_reply(Err(AgentError::InvalidPrivateKeyLength(7))),
+            Err(AgentError::InvalidPrivateKeyLength(7))
+        ));
+        assert!(matches!(
+            identity_probe_reply(Err(AgentError::SecretStore("access denied".into()))),
+            Err(AgentError::SecretStore(_))
+        ));
+        assert!(matches!(
+            identity_probe_reply(Err(AgentError::UnsupportedSecretStorePlatform)),
+            Err(AgentError::UnsupportedSecretStorePlatform)
+        ));
     }
 }
 
