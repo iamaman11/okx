@@ -279,40 +279,79 @@ jobs:
           fi
 
           if [[ "${{ github.event_name }}" != "pull_request" ]]; then
-            # On main, reuse only a successful Ready run with the exact tree.
-            prs_json="$(gh api             -H "Accept: application/vnd.github+json"             "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")"
+            # GitHub's Actions REST index can return ZERO entries when
+            # status=completed is combined with an exact successful PR head
+            # (observed on accepted #635/#637). Query the unfiltered immutable
+            # head and check status/conclusion locally. Retry only bounded
+            # eventual-consistency gaps; never compile a second Engine on main.
+            for lookup_attempt in 1 2 3; do
+              if ! prs_json="$(gh api -H "Accept: application/vnd.github+json" \
+                "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")"; then
+                echo "ACCEPTED_MAIN_PR_LOOKUP_RETRY=$lookup_attempt" >&2
+                if [[ "$lookup_attempt" -lt 3 ]]; then sleep 2; continue; fi
+                break
+              fi
+              head_sha="$(jq -r --arg main "$GITHUB_SHA" --arg repo "$GITHUB_REPOSITORY" '
+                [.[] | select(.merged_at != null and .merge_commit_sha == $main
+                  and .base.ref == "main" and .draft == false
+                  and .head.repo.full_name == $repo)]
+                | if length == 1 then .[0].head.sha else empty end
+              ' <<<"$prs_json")"
 
-            head_sha="$(jq -r '
-              [.[] | select(.merged_at != null and .base.ref == "main")]
-              | first
-              | .head.sha // empty
-            ' <<<"$prs_json")"
-
-            # A successful Draft run can share this SHA. Only a completed Ready
-            # run has the sole ci gate plus its exact selector in the same attempt.
-            successful_pr_ci=0
-            if [[ -n "$head_sha" ]]; then
-              candidates="$(gh api --paginate --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
-                -f head_sha="$head_sha" -f event=pull_request -f status=completed -f per_page=100 \
-                --jq '.workflow_runs[] | select((.path | test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")) and .conclusion == "success" and .run_attempt == 1) | [.id, .run_attempt] | @tsv')"
-              while read -r run attempt; do
-                [[ -n "$run" ]] || continue
-                jobs="$(gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/actions/runs/$run/attempts/$attempt/jobs?per_page=100")"
-                if jq -e '[.[].jobs[] | select(.conclusion == "success") | .name] | index("ci") != null and index("select-checks") != null' <<<"$jobs" >/dev/null; then
-                  successful_pr_ci=1
+              successful_pr_ci=0
+              if [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                # No status= query: GitHub sometimes loses already successful
+                # runs in that index. Filter each immutable run here instead.
+                if ! candidates="$(gh api --paginate --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
+                  -f head_sha="$head_sha" -f event=pull_request -f per_page=100 \
+                  --jq '.workflow_runs[] | select(.head_sha == "'"$head_sha"'" and .event == "pull_request"
+                    and .status == "completed" and .conclusion == "success" and .run_attempt == 1
+                    and .head_repository.full_name == "'"$GITHUB_REPOSITORY"'"
+                    and (.path | test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")))
+                    | [.id, .run_attempt] | @tsv')"; then
+                  echo "ACCEPTED_MAIN_READY_INDEX_RETRY=$lookup_attempt" >&2
+                  if [[ "$lookup_attempt" -lt 3 ]]; then sleep 2; continue; fi
                   break
                 fi
-              done <<<"$candidates"
-              merge_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq '.tree.sha')"
-              head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head_sha" --jq '.tree.sha')"
-            fi
-
-            if [[ "$successful_pr_ci" -gt 0 && "$merge_tree" == "$head_tree" ]]; then
-              echo "build_required=false" >> "$GITHUB_OUTPUT"
-              echo "native_required=false" >> "$GITHUB_OUTPUT"
-              echo "reason=merged tree exactly matches successful PR head tree" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+                while read -r run attempt; do
+                  [[ -n "$run" ]] || continue
+                  if ! jobs="$(gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/actions/runs/$run/attempts/$attempt/jobs?per_page=100")"; then
+                    echo "ACCEPTED_MAIN_READY_JOBS_RETRY=$lookup_attempt" >&2
+                    continue
+                  fi
+                  if jq -e --argjson run "$run" --arg head "$head_sha" '
+                    [.[].jobs[]] as $jobs |
+                    ($jobs | length) > 0 and
+                    (.[0].total_count == ($jobs | length)) and
+                    all($jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1) and
+                    ([$jobs[] | select(.name == "ci")] | length == 1) and
+                    ([$jobs[] | select(.name == "select-checks")] | length == 1) and
+                    ([$jobs[] | select(.name == "ci" and .conclusion == "success")] | length == 1) and
+                    ([$jobs[] | select(.name == "select-checks" and .conclusion == "success")] | length == 1)
+                  ' <<<"$jobs" >/dev/null; then
+                    successful_pr_ci=1
+                    break
+                  fi
+                done <<<"$candidates"
+                if [[ "$successful_pr_ci" -gt 0 ]]; then
+                  if ! merge_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq '.tree.sha')" ||
+                     ! head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head_sha" --jq '.tree.sha')"; then
+                    echo "ACCEPTED_MAIN_TREE_LOOKUP_RETRY=$lookup_attempt" >&2
+                    if [[ "$lookup_attempt" -lt 3 ]]; then sleep 2; continue; fi
+                    break
+                  fi
+                  if [[ "$merge_tree" =~ ^[0-9a-f]{40}$ && "$merge_tree" == "$head_tree" ]]; then
+                    echo "build_required=false" >> "$GITHUB_OUTPUT"
+                    echo "native_required=false" >> "$GITHUB_OUTPUT"
+                    echo "reason=merged tree exactly matches successful PR head tree" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+                fi
+              fi
+              if [[ "$lookup_attempt" -lt 3 ]]; then sleep 2; fi
+            done
+            echo '::error title=ACCEPTED_MAIN_READY_UNPROVEN::No exact merged first-attempt Ready proof; refusing an unreviewed main build' >&2
+            exit 1
           fi
 
           echo "build_required=true" >> "$GITHUB_OUTPUT"
@@ -2371,7 +2410,9 @@ jobs:
           main_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$ACCEPTED_MAIN" --jq .tree.sha)"
           head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head" --jq .tree.sha)"
           test "$main_tree" = "$head_tree"
-          runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" -f head_sha="$head" -f event=pull_request -f status=completed -f per_page=100)"
+          # GitHub's status=completed run index can omit already-successful
+          # immutable PR runs; exact status/conclusion are checked by jq below.
+          runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" -f head_sha="$head" -f event=pull_request -f per_page=100)"
           run_id=''; run_attempt=''; artifact_id=''; artifact_digest=''
           while IFS=$'\t' read -r candidate attempt; do
             [[ "$candidate" =~ ^[1-9][0-9]*$ && "$attempt" == 1 ]] || continue
@@ -2558,7 +2599,7 @@ jobs:
           [[ "$main_tree" =~ ^[0-9a-f]{40}$ ]]
           test "$main_tree" = "$head_tree"
           runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
-            -f head_sha="$head" -f event=pull_request -f status=completed -f per_page=100)"
+            -f head_sha="$head" -f event=pull_request -f per_page=100)"
           run_id=''; run_attempt=''; artifact_id=''; artifact_digest=''
           while IFS=$'\t' read -r candidate attempt; do
             [[ "$candidate" =~ ^[1-9][0-9]*$ && "$attempt" == 1 ]] || continue

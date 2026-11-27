@@ -38,6 +38,76 @@ const releaseGates = ['engine-windows',
 // GitHub REST currently returns the bare workflow path; some GitHub response
 // forms append @ref. Both are canonical, but another workflow is never one.
 const acceptedWorkflowPath = String.raw`test("^\\.github/workflows/ci\\.yml(@[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)?$")`;
+// Exercise the actual three jq predicates embedded in the main reuse shell,
+// not a reimplementation of their expected meaning. GitHub's status-filtered
+// REST index can be empty for an accepted, successful PR (#635/#637), so this
+// fixture emulates the unfiltered response and its untrusted surrounding rows.
+function checkAcceptedMainJqFixtures(yaml) {
+  const block = yaml.slice(yaml.indexOf('            for lookup_attempt in 1 2 3; do'),
+    yaml.indexOf('            echo \'::error title=ACCEPTED_MAIN_READY_UNPROVEN'));
+  const merged = block.match(/head_sha="\$\(jq -r --arg main "\$GITHUB_SHA" --arg repo "\$GITHUB_REPOSITORY" '([\s\S]*?)' <<<"\$prs_json"\)"/);
+  const runs = block.match(/if ! candidates="[\s\S]*?--jq '([\s\S]*?)'\)"; then/);
+  const jobs = block.match(/if jq -e --argjson run "\$run" --arg head "\$head_sha" '([\s\S]*?)' <<<"\$jobs"/);
+  assert.ok(merged && runs && jobs, 'MAIN_REUSE_JQ_SOURCE_MISSING');
+  const head = '9a0c5ba8d5d1207d3f647f7f744109ecdb015a2b';
+  const main = 'eaeea8dcfdfe7d3d2c140a06191adffd51a87656';
+  const repo = 'iamaman11/okx';
+  const runId = 46000962599;
+  function jq(filter, input, ...args) {
+    return execFileSync('jq', ['-r', ...args, filter], {
+      input: JSON.stringify(input), encoding: 'utf8'
+    }).trim();
+  }
+  const pr = {merged_at:'2026-11-27T00:00:00Z', merge_commit_sha:main,
+    base:{ref:'main'}, draft:false, head:{sha:head,repo:{full_name:repo}}};
+  const prArgs = ['--arg','main',main,'--arg','repo',repo];
+  assert.equal(jq(merged[1], [pr], ...prArgs), head, 'EXACT_MERGED_READY_PR_ACCEPTED');
+  for (const invalid of [
+    {...pr,draft:true},
+    {...pr,merged_at:null},
+    {...pr,merge_commit_sha:'0'.repeat(40)},
+    {...pr,base:{ref:'other'}},
+    {...pr,head:{...pr.head,repo:{full_name:'untrusted/okx'}}},
+  ]) assert.equal(jq(merged[1],[invalid],...prArgs),'','STALE_OR_UNTRUSTED_MERGE_REJECTED');
+  assert.equal(jq(merged[1],[pr,pr],...prArgs),'','AMBIGUOUS_MERGED_PR_REJECTED');
+  const runFilter = runs[1].replaceAll(String.raw`'"$head_sha"'`,head)
+    .replaceAll(String.raw`'"$GITHUB_REPOSITORY"'`,repo);
+  const acceptedRun = {id:runId,run_attempt:1,head_sha:head,
+    event:'pull_request',status:'completed',conclusion:'success',
+    head_repository:{full_name:repo},path:'.github/workflows/ci.yml@refs/pull/637/merge'};
+  const wrongRuns = [
+    {...acceptedRun,status:'queued'},
+    {...acceptedRun,conclusion:'failure'},
+    {...acceptedRun,run_attempt:2},
+    {...acceptedRun,head_sha:'0'.repeat(40)},
+    {...acceptedRun,head_repository:{full_name:'untrusted/okx'}},
+    {...acceptedRun,path:'.github/workflows/fake-ci.yml'},
+  ];
+  assert.equal(jq(runFilter,{workflow_runs:[...wrongRuns,acceptedRun]}),
+    runId + '\t1','UNFILTERED_INDEX_SELECTS_ONLY_COMPLETED_FIRST_ATTEMPT_READY');
+  assert.equal(jq(runFilter,{workflow_runs:wrongRuns}),'','RACE_AND_RERUN_NEVER_AUTHORIZE_READY');
+  const acceptedJobs = [
+    {name:'ci',run_id:runId,head_sha:head,run_attempt:1,conclusion:'success'},
+    {name:'select-checks',run_id:runId,head_sha:head,run_attempt:1,conclusion:'success'}
+  ];
+  function checkJobs(list,totalCount=list.length) {
+    return jq(jobs[1],[{total_count:totalCount,jobs:list}],
+      '--argjson','run',String(runId),'--arg','head',head);
+  }
+  assert.equal(checkJobs(acceptedJobs),'true','FIRST_ATTEMPT_SAME_RUN_READY_JOBS_ACCEPTED');
+  const altered = [
+    acceptedJobs.slice(0,1),
+    [...acceptedJobs,{...acceptedJobs[0]}],
+    acceptedJobs.map(x=>({...x,run_attempt:2})),
+    acceptedJobs.map(x=>({...x,run_id:runId+1})),
+    acceptedJobs.map(x=>({...x,head_sha:'0'.repeat(40)})),
+    acceptedJobs.map(x=>({...x,conclusion:'skipped'}))
+  ];
+  for (const list of altered)
+    assert.equal(checkJobs(list),'false','FAKE_OR_SECOND_ATTEMPT_JOBS_REJECTED');
+  assert.equal(checkJobs(acceptedJobs,99),'false','INCOMPLETE_JOB_PAGINATION_REJECTED');
+}
+checkAcceptedMainJqFixtures(source);
 const windowsIpcSummary = String.raw`test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`;
 const nativeCacheJobs = [
   ['host_controller_launcher_checks', 'v2-rust', 'trading-engine-tests-windows', 'false'],
@@ -159,10 +229,25 @@ function validate(yaml, fileNames) {
   assert.match(classify, /compare\/\$base\.\.\.\$CHECKED_HEAD/);
   assert.match(classify, /\.commits\[-1\]\.sha == \$head/);
   assert.ok(classify.includes(acceptedWorkflowPath), 'MAIN_REUSE_MUST_MATCH_EXACT_CI_WORKFLOW_PATH');
-  assert.match(classify, /\.run_attempt == 1\) \| \[\.id, \.run_attempt\] \| @tsv/,
+  assert.match(classify, /\.status == "completed" and \.conclusion == "success" and \.run_attempt == 1/,
     'UNREVIEWED_RERUN_CANNOT_AUTHORIZE_MAIN_REUSE');
-  assert.ok(classify.includes('index("ci") != null and index("select-checks") != null'),
-    'MAIN_REUSE_MUST_REQUIRE_CI_AND_EXACT_SELECTOR');
+  assert.doesNotMatch(classify, /-f status=(?:completed|success)/,
+    'GITHUB_ACTIONS_STATUS_FILTER_CAN_HIDE_SUCCESSFUL_READY_RUNS');
+  assert.match(classify, /\.head_repository\.full_name ==/, 'MAIN_REUSE_REQUIRES_HEAD_REPOSITORY');
+  assert.match(classify, /\.merge_commit_sha == \$main/, 'MAIN_REUSE_REQUIRES_EXACT_MERGE_SHA');
+  assert.match(classify, /\.head\.repo\.full_name == \$repo/, 'MAIN_REUSE_REQUIRES_MERGED_PR_REPOSITORY');
+  assert.match(classify, /\(\.\[0\]\.total_count == \(\$jobs \| length\)\)/,
+    'MAIN_REUSE_JOB_PAGINATION_MUST_BE_COMPLETE');
+  assert.match(classify, /all\(\$jobs\[\]; \.run_id == \$run and \.head_sha == \$head and \.run_attempt == 1\)/,
+    'MAIN_REUSE_JOBS_MUST_MATCH_FIRST_ATTEMPT_HEAD');
+  for (const name of ['ci', 'select-checks']) {
+    assert.ok(classify.includes('select(.name == "' + name + '")] | length == 1'),
+      'MAIN_REUSE_UNIQUE_REQUIRED_JOB:' + name);
+    assert.ok(classify.includes('select(.name == "' + name + '" and .conclusion == "success")] | length == 1'),
+      'MAIN_REUSE_SUCCESS_REQUIRED_JOB:' + name);
+  }
+  assert.match(classify, /ACCEPTED_MAIN_READY_UNPROVEN/, 'MAIN_REUSE_UNKNOWN_MUST_FAIL_CLOSED');
+  assert.match(classify, /for lookup_attempt in 1 2 3; do/, 'MAIN_REUSE_BOUNDED_INDEX_RETRY');
   assert.match(classify, /engine\|host-controller\|host-launcher\) edge_required="\$\{\{ steps\.file_scope\.outputs\.edge_changed \}\}"/);
   assert.match(classify, /research\|research-host\) edge_required=true/,
     'MIXED_RESEARCH_HOST_MUST_KEEP_CLOUDFLARE_MCP_REQUIRED');
@@ -844,6 +929,12 @@ function validate(yaml, fileNames) {
   assert.match(publish, /^    permissions:\n      contents: write$/m);
   assert.match(publish, /group: native-base-publication/);
   assert.match(publish, /ACCEPTED_MAIN: \$\{\{ github\.sha \}\}/);
+  assert.match(publish, /-f head_sha="\$head" -f event=pull_request -f per_page=100/,
+    'NATIVE_PUBLISHER_MUST_QUERY_UNFILTERED_EXACT_HEAD');
+  assert.doesNotMatch(publish, /-f status=(?:completed|success)/,
+    'NATIVE_PUBLISHER_MUST_NOT_USE_BROKEN_GITHUB_STATUS_INDEX');
+  assert.match(publish, /\.conclusion == "success" and \.status == "completed"/,
+    'NATIVE_PUBLISHER_MUST_CHECK_RESULT_LOCALLY');
   assert.doesNotMatch(publish, /github\.event\.workflow_run/);
   assert.doesNotMatch(publish, /gh release delete|--cleanup-tag/, 'ACCEPTED_ROLLBACK_BASES_MUST_NOT_BE_PRUNED_BLINDLY');
   assert.match(publish, /NATIVE_BASE_RETENTION=KEEP_ACCEPTED_ROLLBACK_ORIGINS/);
@@ -865,6 +956,12 @@ function validate(yaml, fileNames) {
   assert.match(researchPublish, /^    name: publish-accepted-research-component$/m);
   assert.match(researchPublish, /group: research-component-publication/);
   assert.match(researchPublish, /^      contents: write$/m);
+  assert.match(researchPublish, /-f head_sha="\$head" -f event=pull_request -f per_page=100/,
+    'RESEARCH_PUBLISHER_MUST_QUERY_UNFILTERED_EXACT_HEAD');
+  assert.doesNotMatch(researchPublish, /-f status=(?:completed|success)/,
+    'RESEARCH_PUBLISHER_MUST_NOT_USE_BROKEN_GITHUB_STATUS_INDEX');
+  assert.match(researchPublish, /\.conclusion == "success" and \.status == "completed"/,
+    'RESEARCH_PUBLISHER_MUST_CHECK_RESULT_LOCALLY');
   assert.match(researchPublish, /github.event_name == 'push' &&/);
   assert.match(researchPublish, /needs.component_impact.outputs.component_scope == 'research' &&/);
   assert.match(researchPublish, /needs.component_impact.outputs.build_required == 'false' &&/);
@@ -1295,8 +1392,23 @@ assert.throws(() => validate(source.slice(0, publisherIndex) +
   String.raw`test("^\\.github/workflows/ci\\.yml.*$")` +
   source.slice(publisherIndex + acceptedWorkflowPath.length), workflows),
   'PUBLISHER_MUST_REJECT_OTHER_WORKFLOWS');
-assert.throws(() => validate(source.replace('.run_attempt == 1) | [.id, .run_attempt]',
-  '.run_attempt > 0) | [.id, .run_attempt]'), workflows));
+assert.throws(() => validate(source.replace(
+  '.status == "completed" and .conclusion == "success" and .run_attempt == 1',
+  '.status == "completed" and .conclusion == "success" and .run_attempt > 0'), workflows),
+  'MAIN_REUSE_MUST_REJECT_REPLAYED_SECOND_ATTEMPT');
+assert.throws(() => validate(source.replace(
+  '-f head_sha="$head_sha" -f event=pull_request -f per_page=100',
+  '-f head_sha="$head_sha" -f event=pull_request -f status=completed -f per_page=100'), workflows),
+  'MAIN_REUSE_MUST_NOT_QUERY_BROKEN_GITHUB_STATUS_FILTER');
+assert.throws(() => validate(source.replace(
+  'ACCEPTED_MAIN_READY_UNPROVEN', 'ACCEPTED_MAIN_READY_UNVERIFIED'), workflows),
+  'MAIN_REUSE_MISSING_READY_PROOF_MUST_REMAIN_FATAL');
+for (const publisher of ['publish_accepted_windows_release', 'publish_accepted_research_component']) {
+  assert.throws(() => validate(changeJobInput(source, publisher,
+    '-f head_sha="$head" -f event=pull_request -f per_page=100',
+    '-f head_sha="$head" -f event=pull_request -f status=completed -f per_page=100'), workflows),
+    'PUBLISHER_MUST_NOT_REINTRODUCE_FILTERED_READY_RUN_INDEX:' + publisher);
+}
 assert.throws(() => validate(source.replace('all(.jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1)',
   'all(.jobs[]; .run_id == $run)'), workflows),
   'NATIVE_PUBLISHER_REQUIRES_SAME_HEAD_AND_ATTEMPT_JOBS');
