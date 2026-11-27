@@ -18,7 +18,7 @@ const researchFingerprintFixture = fs.readFileSync(path.join(root, '..', '..', '
 const ipcProcess = fs.readFileSync(path.join(root, '..', '..', 'crates',
   'okx-research-service', 'tests', 'ipc_process.rs'), 'utf8').replaceAll('\r\n', '\n');
 const mainCacheWriter = "${{ github.ref == 'refs/heads/main' }}";
-const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || 'v1-rust' }}";
+const warmPrefix = "${{ matrix.profile == 'tests' && 'v2-rust' || matrix.profile == 'research' && 'v2-research-sccache' || 'v1-rust' }}";
 const warmSharedKey = "${{ matrix.profile == 'research' && 'research-service-windows' || format('trading-engine-{0}-windows', matrix.profile) }}";
 // Mixed Research+Host must keep its live transport witnesses in the owner
 // runner; Research-only executes them in the separately required IPC runner.
@@ -43,9 +43,9 @@ const nativeCacheJobs = [
   ['trading_engine_isolation_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_build_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
-  ['research_ipc_windows', 'v1-rust', 'research-service-windows', 'false'],
-  ['research_service_tests_windows', 'v1-rust', 'research-service-windows', 'false'],
-  ['research_component_release_windows', 'v1-rust', 'research-service-windows', 'false'],
+  ['research_ipc_windows', 'v2-research-sccache', 'research-service-windows', 'false'],
+  ['research_service_tests_windows', 'v2-research-sccache', 'research-service-windows', 'false'],
+  ['research_component_release_windows', 'v2-research-sccache', 'research-service-windows', 'false'],
   ['trusted_main_cache_prime', warmPrefix, warmSharedKey, mainCacheWriter],
 ];
 
@@ -102,6 +102,39 @@ function validate(yaml, fileNames) {
       'trading_engine_build_windows', 'research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) {
       for (const profile of ['DEV', 'TEST'])
         assert.match(block, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
+    }
+  }
+  const sccacheJobs = ['research_ipc_windows', 'research_service_tests_windows',
+    'research_component_release_windows', 'trusted_main_cache_prime'];
+  for (const [id, block] of map) {
+    if (!sccacheJobs.includes(id)) {
+      assert.doesNotMatch(block, /sccache-action|SCCACHE_GHA_RW_MODE|RUSTC_WRAPPER=sccache/,
+        `SCCACHE_UNRELATED_OWNER_FORBIDDEN:${id}`);
+      continue;
+    }
+    assert.equal((block.match(/mozilla-actions\/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba/g) || []).length, 1,
+      `EXACT_PINNED_RESEARCH_SCCACHE:${id}`);
+    assert.match(block, /^          version: v0\.18\.0$/m, `PINNED_SCCACHE_BINARY:${id}`);
+    assert.match(block, /actions\/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd/,
+      `PINNED_CACHE_TOKEN_EXPORTER:${id}`);
+    assert.match(block, /core\.exportVariable\('ACTIONS_RESULTS_URL'/);
+    assert.match(block, /core\.exportVariable\('ACTIONS_RUNTIME_TOKEN'/);
+    assert.match(block, /SCCACHE_GHA_ENABLED=on/);
+    assert.match(block, /SCCACHE_GHA_VERSION=okx-research-sccache-v1/);
+    assert.match(block, /RUSTC_WRAPPER=sccache/);
+    assert.match(block, /sccache --show-stats/);
+    assert.match(block, /continue-on-error: true # Cache observability must not replace/,
+      `SCCACHE_STATS_MUST_NOT_VETO_ACCEPTANCE:${id}`);
+    if (id === 'trusted_main_cache_prime') {
+      assert.match(block, /if: matrix\.profile == 'research'\n        id: research-sccache/,
+        'ONLY_RESEARCH_PROFILE_INSTALLS_WRITER');
+      assert.match(block, /UNTRUSTED_RESEARCH_SCCACHE_WRITER/);
+      assert.match(block, /SCCACHE_GHA_RW_MODE=READ_WRITE/);
+      assert.doesNotMatch(block, /SCCACHE_GHA_RW_MODE=READ_ONLY/);
+    } else {
+      assert.match(block, /SCCACHE_GHA_RW_MODE=READ_ONLY/,
+        `PR_RESEARCH_MUST_NOT_WRITE_COMPILER_CACHE:${id}`);
+      assert.doesNotMatch(block, /SCCACHE_GHA_RW_MODE=READ_WRITE/);
     }
   }
 
@@ -224,7 +257,7 @@ function validate(yaml, fileNames) {
     if (['research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) continue;
     assert.doesNotMatch(job(id), /CARGO_LOG/, `FINGERPRINT_MUST_NOT_SCOPE_TO_OTHER_NATIVE_JOB:${id}`);
   }
-  assert.match(research, /prefix-key: v1-rust/);
+  assert.match(research, /prefix-key: v2-research-sccache/);
   assert.match(research, /shared-key: research-service-windows/);
   assert.match(research, /save-if: false/,
     'PR_RESEARCH_CANNOT_WRITE_REUSABLE_ACCEPTED_MAIN_CACHE');
@@ -982,6 +1015,28 @@ assert.throws(() => validate(source.replace("|| '[]') }}", "|| '[\"tests\",\"rel
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
   '          save-if: false', '          save-if: true'), workflows),
   'RESEARCH_PR_CACHE_MUST_REMAIN_READ_ONLY');
+for (const id of ['research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows']) {
+  assert.throws(() => validate(changeJobInput(source, id,
+    'SCCACHE_GHA_RW_MODE=READ_ONLY', 'SCCACHE_GHA_RW_MODE=READ_WRITE'), workflows),
+  `RESEARCH_SCCACHE_PR_WRITER_FORBIDDEN:${id}`);
+  assert.throws(() => validate(changeJobInput(source, id,
+    'version: v0.18.0', 'version: latest'), workflows),
+  `RESEARCH_SCCACHE_BINARY_UNPINNED:${id}`);
+}
+assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
+  'UNTRUSTED_RESEARCH_SCCACHE_WRITER', 'UNVERIFIED_MAIN_WRITER'), workflows),
+'TRUSTED_MAIN_WRITER_MUST_REVERIFY_CHECKOUT');
+assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
+  "        if: matrix.profile == 'research'\n        id: research-sccache",
+  "        id: research-sccache"), workflows),
+'MAIN_NON_RESEARCH_PRIME_MUST_NOT_INSTALL_SCCACHE');
+for (const id of ['research_ipc_windows', 'research_service_tests_windows',
+  'research_component_release_windows', 'trusted_main_cache_prime']) {
+  assert.throws(() => validate(changeJobInput(source, id,
+    'continue-on-error: true # Cache observability must not replace',
+    'continue-on-error: false # Cache observability must not replace'), workflows),
+  `SCCACHE_STATS_MUST_REJECT_BLOCKING_DIAGNOSTIC:${id}`);
+}
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
   '          shared-key: research-service-windows', '          shared-key: trading-engine-tests-windows'), workflows),
   'RESEARCH_PR_MUST_RESTORE_ITS_OWN_TRUSTED_MAIN_CACHE');
