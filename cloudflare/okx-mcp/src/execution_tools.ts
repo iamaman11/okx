@@ -5,7 +5,7 @@ const text=(max=128):Schema=>({type:'string',minLength:1,maxLength:max});
 const artifactId={type:'string',pattern:'^sha256:[0-9a-f]{64}$'};
 const decisionJob={type:'string',pattern:'^[0-9a-f]{64}$'};
 const annotationText=(max:number):Schema=>({...text(max),pattern:'\\S'});
-const token={...text(),minLength:8,pattern:'^[A-Za-z0-9_-]+$'};
+const token={...text(),minLength:8,pattern:'^[-\\w]+$'};
 // Count all wire digits without binary floats or implicit rounding.
 const money={type:'string',pattern:'^(?!\\d{29})(?!0(?:\\.0+)?$)(?:0|[1-9]\\d*)(?:\\.\\d+)?$',maxLength:29};
 const integer=(min=0,max=Number.MAX_SAFE_INTEGER):Schema=>({type:'integer',minimum:min,maximum:max});
@@ -52,6 +52,11 @@ const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1
 const stepId={type:'string',pattern:'^[a-z0-9_]{1,32}$'};
 const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean','rolling_max','rolling_min','rolling_range','rolling_pearson','rolling_zscore','rolling_stddev','add_series','subtract_series','divide_series','and','or','lag','greater_than','greater_than_series','less_than','less_than_series','rising_edge','falling_edge','forward_return_label'),input:stepId,other:stepId,period:integer(1,1000),threshold:{type:'number'},when:stepId},['id','op','input']);
 const composition=object({version:choice('okx.market.composition/v1'),steps:{type:'array',items:compositionStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
+// The same checked causal graph as market.screen, interpreted as a Research
+// target position. It never becomes a live strategy or a financial command.
+const graphSignal=object({version:choice('okx.graph-signal/v1'),graph:composition,
+ signal_step:stepId,target_if_true:integer(-1,1),target_if_false:integer(-1,1),
+ missing:choice('hold','flat')});
 const universe=object({instrument_type:choice('SPOT','SWAP','FUTURES'),settle_currency:text(16),after_instrument:text(64),reference_generation:text(128),limit:integer(1,100),rank_globally:{type:'boolean'}},['instrument_type']);
 const screenCompare=action('screen',{...range,universe,fields:{...array(text(64),14),minItems:1},composition,parameters:marketParameters,filters:array(object({field:text(64),min:number(-Number.MAX_SAFE_INTEGER),max:number(-Number.MAX_SAFE_INTEGER)},['field']),16),sort:object({field:text(64),descending:{type:'boolean'}},['field']),limit:integer(1,50),cursor:text(512)},['fields','timeframe_ms','start_ms','end_ms','limit']);
 screenCompare.properties.action=choice('screen','compare');
@@ -65,6 +70,9 @@ researchRun.properties.action=choice('backtest','grid');
 researchRun.allOf=[{oneOf:[{required:['parameters']},{required:['variants']}]},
  {if:{properties:{action:{const:'backtest'}}},then:{required:['parameters']}},
  {if:{properties:{action:{const:'grid'}}},then:{required:['variants']}}];
+const {strategy_id:_unusedGraphStrategy,...graphResearch}=research;
+const graphBacktest=action('graph_backtest',{...graphResearch,graph_signal:graphSignal},
+ Object.keys(graphResearch).filter(key=>key!=='seed').concat('graph_signal'));
 const exactSigned={type:'string',pattern:'^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$',maxLength:29};
 const economicAmount=object({currency:text(16),amount:exactSigned});
 const economicCase=object({instrument:text(64),product:choice('spot','linear_swap','inverse_swap','option'),
@@ -86,7 +94,7 @@ export const ACTION_SCHEMAS:Record<string,Schema[]>={
   action('capital_assign',{account,...mutation,...instance,direction:choice('assign','release'),amount_usd:money,expected_authority_revision:integer(1)},['account','idempotency_key','instance_id','direction','amount_usd','expected_authority_revision']),
  ],
  market:[screenCompare,action('instruments',{asset:text(16),settle_currency:text(16)},['asset']),action('snapshot',{instrument:text(64)}),action('microstructure',{instrument:text(64),size_contracts:money},['instrument']),action('capabilities')],
- research:[action('record_decision',{job_id:decisionJob,result_id:artifactId,expected_decision_id:artifactId,name:annotationText(128),hypothesis:annotationText(4096),status:choice('accepted','rejected','deferred'),reason:annotationText(2048)},['job_id','result_id','name','hypothesis','status','reason']),action('decision',{job_id:decisionJob,decision_id:artifactId},['job_id']),researchRun,action('benchmark',{idempotency_key:token}),action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50),view:choice('summary','trades','equity','variants','export')},['job_id','limit']),action('capabilities'),action('economics',{cases:{type:'array',items:economicCase,minItems:1,maxItems:8},data_mode:choice('counterfactual','historical_observed')}),action('validate',{...range,range_mode:choice('strict','normalize'),instruments:{...array(text(64),8),minItems:1},strategy_id:researchStrategies,parameters:researchParameters,costs,data_mode:choice('counterfactual','historical_observed')},['instruments','timeframe_ms','start_ms','end_ms','strategy_id','parameters','costs','data_mode'])],
+ research:[action('record_decision',{job_id:decisionJob,result_id:artifactId,expected_decision_id:artifactId,name:annotationText(128),hypothesis:annotationText(4096),status:choice('accepted','rejected','deferred'),reason:annotationText(2048)},['job_id','result_id','name','hypothesis','status','reason']),action('decision',{job_id:decisionJob,decision_id:artifactId},['job_id']),researchRun,graphBacktest,action('benchmark',{idempotency_key:token}),action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50),view:choice('summary','trades','equity','variants','export')},['job_id','limit']),action('capabilities'),action('economics',{cases:{type:'array',items:economicCase,minItems:1,maxItems:8},data_mode:choice('counterfactual','historical_observed')}),action('validate',{...range,range_mode:choice('strict','normalize'),instruments:{...array(text(64),8),minItems:1},strategy_id:researchStrategies,parameters:researchParameters,costs,data_mode:choice('counterfactual','historical_observed')},['instruments','timeframe_ms','start_ms','end_ms','strategy_id','parameters','costs','data_mode'])],
  trade:[action('preview',{account,...trade},['account','operation','strategy_instance','instrument','side','sizing','order']),action('execute',{account,...mutation,...trade,expires_in_ms:integer(1,30000)},['account','idempotency_key','operation','strategy_instance','instrument','side','sizing','order','expires_in_ms']),action('status',{account,reference:text()}),action('cancel',{account,...mutation,reference:text()}),action('close',{account,...mutation,reference:text(),expires_in_ms:integer(1,30000)}),action('capabilities',{account}),action('preflight',{account})],
  portfolio:[portfolioHistory,action('scenario',{equity_usd:money,positions:array(object({instrument:text(64),side:choice('long','short'),notional_usd:money,margin_usd:money,price_shock_bps:integer(-10000,10000),volatility_bps:integer(0,10000),liquidity_cost_bps:integer(0,10000)}),8),correlations:array(object({left:integer(0,7),right:integer(0,7),rho:number(-1,1)}),28)},['equity_usd','positions','correlations'])],
  diagnostics:[action('explain',{reference:text(),account,view:choice('finance','operation','research','storage'),cycle_id:integer(1),limit:integer(1,4)},[]),action('runtime')],
@@ -96,20 +104,20 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 // The MCP tool is the permission/approval boundary. Do not mix preview
 // with real order submission under a single model-callable descriptor.
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
- accounts:{description:'Accounts.',readOnlyHint:false,destructiveHint:true},
- strategies:{description:'Live strategies.',readOnlyHint:false,destructiveHint:true},
- market:{description:'Market composition.',readOnlyHint:true,destructiveHint:false},
- research:{description:'Research.',readOnlyHint:false,destructiveHint:true},
- portfolio:{description:'Portfolio.',readOnlyHint:true,destructiveHint:false},
- diagnostics:{description:'Diagnostics.',readOnlyHint:true,destructiveHint:false},
+ accounts:{description:'Accounts',readOnlyHint:false,destructiveHint:true},
+ strategies:{description:'Live trading',readOnlyHint:false,destructiveHint:true},
+ market:{description:'Market composition',readOnlyHint:true,destructiveHint:false},
+ research:{description:'Research',readOnlyHint:false,destructiveHint:true},
+ portfolio:{description:'Portfolio',readOnlyHint:true,destructiveHint:false},
+ diagnostics:{description:'Diagnostics',readOnlyHint:true,destructiveHint:false},
 };
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
- preview:{description:'Preview only.',readOnlyHint:true,destructiveHint:false},
- execute:{description:'Live order; loss risk; approval, limits, STOP.',readOnlyHint:false,destructiveHint:true},
- status:{description:'Status.',readOnlyHint:true,destructiveHint:false},
- cancel:{description:'Cancel.',readOnlyHint:false,destructiveHint:true},
- close:{description:'Close.',readOnlyHint:false,destructiveHint:true},
- capabilities:{description:'Rights.',readOnlyHint:true,destructiveHint:false},
+ preview:{description:'Preview',readOnlyHint:true,destructiveHint:false},
+ execute:{description:'Real order; loss risk; approval/limits/STOP',readOnlyHint:false,destructiveHint:true},
+ status:{description:'Status',readOnlyHint:true,destructiveHint:false},
+ cancel:{description:'Cancel',readOnlyHint:false,destructiveHint:true},
+ close:{description:'Close',readOnlyHint:false,destructiveHint:true},
+ capabilities:{description:'Rights',readOnlyHint:true,destructiveHint:false},
  preflight:{description:'Ready?',readOnlyHint:true,destructiveHint:false},
 };
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
@@ -148,7 +156,8 @@ function publicAccountsSchema():Schema {
  const variants=ACTION_SCHEMAS.accounts;
  const linkSelector={type:'string',pattern:'^link_[a-f0-9]{32}$'};
  const properties=Object.assign({},...variants.map(s=>s.properties));
- properties.action=choice('list','status','connect','pause','resume','set_limits');
+ // The exact discriminator is already checked by the closed oneOf branches.
+ properties.action={};
  properties.link_id=linkSelector;
  return publicSchema({
    type:'object',properties,required:['action'],additionalProperties:false,
@@ -156,7 +165,8 @@ function publicAccountsSchema():Schema {
      properties:{
        ...Object.fromEntries(Object.keys(s.properties)
          .map(key=>[key,key==='action'?s.properties.action:{}])),
-       link_id:linkSelector,
+       // Root validates the selector once; each branch only grants membership.
+       link_id:{},
      },
      required:s.required,additionalProperties:false
    }))
@@ -180,10 +190,41 @@ function publicStrategiesSchema():Schema {
    oneOf:[...reads,{properties:{...mutation,...instance},required:['idempotency_key','instance_id'],oneOf:writes}],
  });
 }
+// One shared field type table, with an independently closed action-specific
+// membership/required set. This is equivalent to the expanded strict union,
+// but avoids repeating long nested Research schemas in the 24 KiB tool list.
+function publicResearchSchema():Schema {
+ const actions=ACTION_SCHEMAS.research;
+ const common:Schema={};
+ const differing=new Set<string>();
+ const counts=new Map<string,number>();
+ for(const schema of actions)for(const [field,value]of Object.entries(schema.properties)){
+   if(field==='action')continue;
+   // Some job_id actions require the exact content address, others accept the
+   // broader job identifier. Keep such field-specific checks in each branch.
+   if(field==='job_id')continue;
+   counts.set(field,(counts.get(field)??0)+1);
+   if(!(field in common))common[field]=field==='graph_signal'?{type:'object'}:value;
+   else if(JSON.stringify(common[field])!==JSON.stringify(value))differing.add(field);
+ }
+ // One-off fields stay inside their own branch; a duplicate root declaration
+ // would add bytes without sharing any validation or strengthening the schema.
+ for(const field of Object.keys(common))if((counts.get(field)??0)<2||differing.has(field))delete common[field];
+ const branches=actions.map(schema=>{
+   const properties=Object.fromEntries(Object.entries(schema.properties).map(([field,value])=>[
+     field,field==='action'||field==='job_id'||!(field in common)||differing.has(field)||
+       (schema.properties.action.const==='result'&&field==='view')?value:{}
+   ]));
+   if(schema.properties.action.const==='graph_backtest')properties.graph_signal={type:'object'};
+   const {properties:_properties,...rest}=schema;
+   return {properties,...rest};
+ });
+ return publicSchema({properties:common,oneOf:branches});
+}
 export const PUBLIC_TOOLS:Json[]=[
  ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')
    .map(([name,schemas])=>({name,description:TOOL_NOTES[name].description,
-     inputSchema:name==='accounts'?publicAccountsSchema():name==='strategies'?publicStrategiesSchema():publicSchema({oneOf:schemas}),
+     inputSchema:name==='accounts'?publicAccountsSchema():name==='strategies'?publicStrategiesSchema():name==='research'?publicResearchSchema():publicSchema({oneOf:schemas}),
      annotations:annotation(TOOL_NOTES[name])})),
  ...ACTION_SCHEMAS.trade.map(schema=>{
    const scopedAction=String(schema.properties.action.const);
@@ -251,12 +292,22 @@ function validResearchStrategy(args:Record<string,unknown>):boolean {
  return Array.isArray(parameters)&&parameters.every(p=>isObject(p)&&
    (breakout?'lookback'in p:'fast'in p&&'slow'in p));
 }
+function validResearchGraph(args:Record<string,unknown>):boolean {
+ if(args.action!=='graph_backtest')return true;
+ const spec=args.graph_signal;
+ if(!isObject(spec)||!isObject(spec.graph)||!Array.isArray(spec.graph.steps)||
+    !Array.isArray(spec.graph.result_steps)||!spec.graph.result_steps.includes(spec.signal_step))return false;
+ // Match native pre-admission constraints. The Rust checked compiler owns
+ // reference, unit and work-budget checks; this never dispatches a future label.
+ return spec.graph.steps.every((step:unknown)=>isObject(step)&&
+   step.op!=='forward_return_label'&&validCompositionStep(step));
+}
 export function validTool(name:string,args:unknown):boolean {
  if(name==='strategies'&&isObject(args)&&args.action==='restore_configuration'&&
     (args.instance_id==='manual'||typeof args.source_revision!=='number'||
      typeof args.expected_revision!=='number'||args.source_revision>=args.expected_revision))return false;
- if(name==='market'&&isObject(args)&&!validMarketOperatorRefs(args))return false;if(name==='research'&&isObject(args)&&!validResearchStrategy(args))return false;if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&!args.composition.steps.every(validCompositionStep))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
-export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&['execute','cancel','close'].includes(String(action)))||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','grid','benchmark','cancel','record_decision'].includes(String(action)));}
+ if(name==='market'&&isObject(args)&&!validMarketOperatorRefs(args))return false;if(name==='research'&&isObject(args)&&(!validResearchStrategy(args)||!validResearchGraph(args)))return false;if(name==='research'&&isObject(args)&&args.action==='record_decision'){for(const [field,max]of [['name',128],['hypothesis',4096],['reason',2048]]as const){const value=args[field];if(typeof value!=='string'||!value.trim()||new TextEncoder().encode(value).byteLength>max)return false;}if(new TextEncoder().encode(JSON.stringify([args.name,args.hypothesis,args.reason])).byteLength>6144)return false;}if(name==='market'&&isObject(args)&&isObject(args.composition)){if(args.action!=='screen'||!Array.isArray(args.fields)||!Array.isArray(args.composition.result_steps)||args.fields.length+args.composition.result_steps.length>14)return false;if(Array.isArray(args.composition.steps)&&!args.composition.steps.every(validCompositionStep))return false;}if(name==='trade'&&isObject(args)&&['preview','execute'].includes(String(args.action))&&['open','add','replace'].includes(String(args.operation))&&!args.protection)return false;return !!ACTION_SCHEMAS[name]&&matches({oneOf:ACTION_SCHEMAS[name]},args)&&!(isObject(args)&&typeof args.start_ms==='number'&&typeof args.end_ms==='number'&&args.end_ms<=args.start_ms);}
+export function isExecutionMutation(type:unknown,action?:unknown):boolean{return type==='connect_account'||(type==='trade'&&['execute','cancel','close'].includes(String(action)))||(type==='strategies'&&!['list','status'].includes(String(action)))||(type==='research'&&['backtest','graph_backtest','grid','benchmark','cancel','record_decision'].includes(String(action)));}
 // One policy for both owner routing and native-profile admission. Keeping
 // independent operation allowlists in each layer risks accepting a Research
 // route that its own execution profile then rejects (or vice versa).

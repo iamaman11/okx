@@ -21,6 +21,23 @@ use std::{
 const PUBLIC_CANDLES_PATH: &str = "/api/v5/market/history-candles";
 const PUBLIC_ORIGIN: &str = "https://www.okx.com";
 const MAX_PUBLIC_BYTES: usize = MAX_FRAME_BYTES / 8;
+// The complete SWAP/FUTURES reference registry is larger than an ordinary
+// source page. Keep its independent bound below the 4 MiB IPC frame, without
+// relaxing candle/trade/funding or single-instrument capture limits.
+pub(crate) const MAX_PUBLIC_INSTRUMENTS_BYTES: usize = MAX_FRAME_BYTES / 2;
+
+fn public_body_limit(path: &str, parameters: &[(&str, String)]) -> usize {
+    if path == "/api/v5/public/instruments"
+        && parameters.iter().any(|(name, value)| {
+            *name == "instType" && matches!(value.as_str(), "SWAP" | "FUTURES")
+        })
+        && !parameters.iter().any(|(name, _)| *name == "instId")
+    {
+        MAX_PUBLIC_INSTRUMENTS_BYTES
+    } else {
+        MAX_PUBLIC_BYTES
+    }
+}
 
 pub(crate) type GetFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>>;
 
@@ -38,6 +55,7 @@ struct BoundedHttpsGet {
 impl PublicGet for BoundedHttpsGet {
     fn get(&self, path: &'static str, parameters: Vec<(&'static str, String)>) -> GetFuture<'_> {
         Box::pin(async move {
+            let max_body_bytes = public_body_limit(path, &parameters);
             let _permit = tokio::time::timeout(Duration::from_secs(5), self.permits.acquire())
                 .await
                 .map_err(|_| "OKX rate/backpressure defer: standalone request capacity")?
@@ -57,7 +75,7 @@ impl PublicGet for BoundedHttpsGet {
             }
             if response
                 .content_length()
-                .is_some_and(|size| size > MAX_PUBLIC_BYTES as u64)
+                .is_some_and(|size| size > max_body_bytes as u64)
             {
                 return Err("RESEARCH_PUBLIC_BODY_TOO_LARGE".into());
             }
@@ -67,7 +85,7 @@ impl PublicGet for BoundedHttpsGet {
                 .await
                 .map_err(|_| "RESEARCH_PUBLIC_TRANSPORT_FAILED".to_owned())?
             {
-                if chunk.len() > MAX_PUBLIC_BYTES.saturating_sub(raw.len()) {
+                if chunk.len() > max_body_bytes.saturating_sub(raw.len()) {
                     return Err("RESEARCH_PUBLIC_BODY_TOO_LARGE".into());
                 }
                 raw.extend_from_slice(&chunk);
@@ -327,7 +345,16 @@ pub(crate) fn rows<T: DeserializeOwned>(
     max_rows: usize,
     error: &'static str,
 ) -> Result<Vec<T>, String> {
-    if raw.is_empty() || raw.len() > MAX_PUBLIC_BYTES {
+    rows_bounded(raw, max_rows, MAX_PUBLIC_BYTES, error)
+}
+
+pub(crate) fn rows_bounded<T: DeserializeOwned>(
+    raw: &[u8],
+    max_rows: usize,
+    max_body_bytes: usize,
+    error: &'static str,
+) -> Result<Vec<T>, String> {
+    if raw.is_empty() || raw.len() > max_body_bytes {
         return Err("RESEARCH_PUBLIC_BODY_INVALID".into());
     }
     let envelope: Envelope<T> = serde_json::from_slice(raw).map_err(|_| error)?;
@@ -538,6 +565,37 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::{test_support::RecordedGet, *};
+
+    #[test]
+    fn full_reference_get_has_separate_bounded_budget() {
+        let full = [("instType", "SWAP".to_owned())];
+        assert_eq!(
+            public_body_limit("/api/v5/public/instruments", &full),
+            MAX_PUBLIC_INSTRUMENTS_BYTES
+        );
+        assert_eq!(
+            public_body_limit(
+                "/api/v5/public/instruments",
+                &[("instType", "FUTURES".to_owned())]
+            ),
+            MAX_PUBLIC_INSTRUMENTS_BYTES
+        );
+        assert_eq!(
+            public_body_limit(
+                "/api/v5/public/instruments",
+                &[
+                    ("instType", "SWAP".to_owned()),
+                    ("instId", "BTC-USDT-SWAP".to_owned()),
+                ]
+            ),
+            MAX_PUBLIC_BYTES
+        );
+        assert_eq!(
+            public_body_limit(PUBLIC_CANDLES_PATH, &full),
+            MAX_PUBLIC_BYTES
+        );
+        const { assert!(MAX_PUBLIC_INSTRUMENTS_BYTES < MAX_FRAME_BYTES) };
+    }
 
     const RECORDED: &str = r#"{"code":"0","msg":"","data":[["1700000060000","100","120","90","110","2","200","220","1"],["1700000000000","100","110","95","105","1","100","1"]]}"#;
 

@@ -1,7 +1,10 @@
-//! Causal EMA replay. Signals at close t execute at open t+1.
+//! Causal replay for registered and composed research signals.
+//! Signals at close t execute at open t+1 through one money ledger.
+use crate::graph_signal::{GraphSignalSpec, compiled_graph};
 #[cfg(test)]
 use okx_analysis::operators::EmaParameters;
 use okx_analysis::operators::{StrategyKernel, StrategyParameters};
+use okx_analysis::query_plan::ClosedBar;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -42,6 +45,40 @@ pub struct ReplaySpec {
     pub seed: u64,
     pub stop_fraction: Option<f64>,
     pub take_profit_fraction: Option<f64>,
+}
+/// Execution assumptions shared by named and graph strategies. Graphs never
+/// define a second money model or gain financial/trading authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayExecution {
+    pub mechanics: Mechanics,
+    pub costs: Costs,
+    pub timeframe_ms: u64,
+    pub historical_observed: bool,
+    pub historical_rules: bool,
+    pub historical_fees: bool,
+    pub seed: u64,
+    pub stop_fraction: Option<f64>,
+    pub take_profit_fraction: Option<f64>,
+}
+impl From<&ReplaySpec> for ReplayExecution {
+    fn from(spec: &ReplaySpec) -> Self {
+        Self {
+            mechanics: spec.mechanics.clone(),
+            costs: spec.costs.clone(),
+            timeframe_ms: spec.timeframe_ms,
+            historical_observed: spec.historical_observed,
+            historical_rules: spec.historical_rules,
+            historical_fees: spec.historical_fees,
+            seed: spec.seed,
+            stop_fraction: spec.stop_fraction,
+            take_profit_fraction: spec.take_profit_fraction,
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphReplaySpec {
+    pub graph: GraphSignalSpec,
+    pub execution: ReplayExecution,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
@@ -94,21 +131,80 @@ fn replay_with_hash(
     known_dataset_hash: Option<&str>,
 ) -> Result<ReplayResult, String> {
     let required_warmup = spec.parameters.warmup_for(&spec.strategy_id)?;
+    let mut kernel = StrategyKernel::from_definition(&spec.strategy_id, spec.parameters)?;
+    replay_core(
+        bars,
+        &ReplayExecution::from(spec),
+        spec,
+        score_start,
+        score_end,
+        required_warmup,
+        cancel,
+        known_dataset_hash,
+        |bar| Ok(Some(kernel.push_closed(bar.close)?.unwrap_or(0))),
+    )
+}
+
+/// Replay one typed causal market-composition hypothesis through the existing
+/// next-open and exact-money engine, with no dynamically loaded code.
+/// Only graphs supported by the incremental close-only evaluator are admitted;
+/// OI/funding and non-incremental operators fail closed at compile time.
+pub fn replay_graph(
+    bars: &[Bar],
+    spec: &GraphReplaySpec,
+    score_start: usize,
+    score_end: usize,
+    cancel: &impl Fn() -> bool,
+) -> Result<ReplayResult, String> {
+    let (checked, mut stream) = compiled_graph(&spec.graph, bars.len() as u64)?;
+    replay_core(
+        bars,
+        &spec.execution,
+        spec,
+        score_start,
+        score_end,
+        checked.warmup_bars(),
+        cancel,
+        None,
+        |bar| {
+            let values = stream.on_closed_bar(ClosedBar {
+                timestamp_ms: i64::try_from(bar.time)
+                    .map_err(|_| "graph_signal:TIMESTAMP_OVERFLOW")?,
+                close: Some(bar.close),
+            })?;
+            checked.target(&values)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_core(
+    bars: &[Bar],
+    execution: &ReplayExecution,
+    identity: &impl Serialize,
+    score_start: usize,
+    score_end: usize,
+    required_warmup: usize,
+    cancel: &impl Fn() -> bool,
+    known_dataset_hash: Option<&str>,
+    mut target_on_close: impl FnMut(&Bar) -> Result<Option<i8>, String>,
+) -> Result<ReplayResult, String> {
     if bars.len() > 1_000_000 {
         return Err("LIMIT_BARS:1000000".into());
     }
     // Warm-up is a property of the selected, strictly typed definition.
-    if spec.timeframe_ms == 0
+    if execution.timeframe_ms == 0
         || score_end > bars.len()
         || score_start >= score_end
         || score_start < required_warmup
     {
         return Err("INVALID_SCORE_RANGE_OR_WARMUP".into());
     }
-    if spec.historical_observed && (!spec.historical_rules || !spec.historical_fees) {
+    if execution.historical_observed && (!execution.historical_rules || !execution.historical_fees)
+    {
         return Err("HISTORICAL_RULES_OR_FEES_MISSING".into());
     }
-    let multiplier = match spec.mechanics {
+    let multiplier = match execution.mechanics {
         Mechanics::Spot => 1.0,
         Mechanics::Linear {
             contract_multiplier,
@@ -116,21 +212,15 @@ fn replay_with_hash(
         _ => return Err("UNSUPPORTED_CONTRACT_MECHANICS".into()),
     };
     for c in [
-        spec.costs.maker_fee_bps,
-        spec.costs.taker_fee_bps,
-        spec.costs.slippage_bps,
+        execution.costs.maker_fee_bps,
+        execution.costs.taker_fee_bps,
+        execution.costs.slippage_bps,
     ] {
         if !c.is_finite() || c < 0.0 {
             return Err("INVALID_COST".into());
         }
     }
-    let (mut kernel, mut desired, mut position, mut cash, mut entry) = (
-        StrategyKernel::from_definition(&spec.strategy_id, spec.parameters)?,
-        0i8,
-        0i8,
-        10000.0,
-        0.0,
-    );
+    let (mut desired, mut position, mut cash, mut entry) = (0i8, 0i8, 10000.0, 0.0);
     let mut money = Money::new();
     let (mut trades, mut equity) = (Vec::new(), Vec::new());
     let (mut peak, mut maxdd) = (10000.0f64, 0.0f64);
@@ -146,21 +236,21 @@ fn replay_with_hash(
         {
             return Err("INVALID_BAR".into());
         }
-        if previous.is_some_and(|t| b.time != t + spec.timeframe_ms) {
+        if previous.is_some_and(|t| b.time != t + execution.timeframe_ms) {
             return Err("MISSING_OR_DUPLICATE_BAR".into());
         }
         previous = Some(b.time);
         if i >= score_start {
-            if spec.costs.observed_funding && b.funding_rate.is_none() {
+            if execution.costs.observed_funding && b.funding_rate.is_none() {
                 return Err("HISTORICAL_FUNDING_MISSING".into());
             }
             if desired != position {
                 let delta = desired - position;
-                let price =
-                    b.open * (1.0 + (delta.signum() as f64) * spec.costs.slippage_bps / 10000.0);
+                let price = b.open
+                    * (1.0 + (delta.signum() as f64) * execution.costs.slippage_bps / 10000.0);
                 let quantity = delta as f64 * multiplier;
-                let fee = quantity.abs() * price * spec.costs.taker_fee_bps / 10000.0;
-                money.trade(quantity, price, spec.costs.taker_fee_bps)?;
+                let fee = quantity.abs() * price * execution.costs.taker_fee_bps / 10000.0;
+                money.trade(quantity, price, execution.costs.taker_fee_bps)?;
                 cash = money.cash.to_f64().ok_or("MONEY_PRECISION")?;
                 trades.push(Trade {
                     time: b.time,
@@ -174,10 +264,10 @@ fn replay_with_hash(
                 entry = price;
             }
             if position != 0 {
-                let stop = spec
+                let stop = execution
                     .stop_fraction
                     .map(|v| entry * (1.0 - position as f64 * v));
-                let take = spec
+                let take = execution
                     .take_profit_fraction
                     .map(|v| entry * (1.0 + position as f64 * v));
                 let stop_hit = stop.filter(|p| {
@@ -205,10 +295,10 @@ fn replay_with_hash(
                         trigger
                     };
                     let price =
-                        adverse * (1.0 - position as f64 * spec.costs.slippage_bps / 10000.0);
+                        adverse * (1.0 - position as f64 * execution.costs.slippage_bps / 10000.0);
                     let qty = position as f64 * multiplier;
-                    let fee = qty.abs() * price * spec.costs.taker_fee_bps / 10000.0;
-                    money.trade(-qty, price, spec.costs.taker_fee_bps)?;
+                    let fee = qty.abs() * price * execution.costs.taker_fee_bps / 10000.0;
+                    money.trade(-qty, price, execution.costs.taker_fee_bps)?;
                     cash = money.cash.to_f64().ok_or("MONEY_PRECISION")?;
                     trades.push(Trade {
                         time: b.time,
@@ -240,9 +330,11 @@ fn replay_with_hash(
             maxdd = maxdd.max((peak - nav) / peak);
             equity.push((b.time, nav));
         }
-        desired = kernel.push_closed(b.close)?.unwrap_or(0);
-        if matches!(spec.mechanics, Mechanics::Spot) {
-            desired = desired.max(0)
+        if let Some(target) = target_on_close(b)? {
+            desired = target;
+            if matches!(execution.mechanics, Mechanics::Spot) {
+                desired = desired.max(0)
+            }
         }
     }
     let (mut mean, mut m2, mut samples) = (0.0, 0.0, 0usize);
@@ -258,7 +350,7 @@ fn replay_with_hash(
     }
     let var = m2 / samples.max(1) as f64;
     let sharpe = if var > 0.0 {
-        mean / var.sqrt() * (31_536_000_000.0 / spec.timeframe_ms as f64).sqrt()
+        mean / var.sqrt() * (31_536_000_000.0 / execution.timeframe_ms as f64).sqrt()
     } else {
         0.0
     };
@@ -283,7 +375,7 @@ fn replay_with_hash(
         fees: money.fees.to_f64().ok_or("MONEY_PRECISION")?,
         funding: money.funding.to_f64().ok_or("MONEY_PRECISION")?,
         benchmark: bars[score_end - 1].close / bars[score_start].open - 1.0,
-        assumptions: if spec.historical_observed {
+        assumptions: if execution.historical_observed {
             vec!["historical_observed".into()]
         } else {
             vec!["COUNTERFACTUAL: explicit fees, slippage and contract rules; not historical evidence".into()]
@@ -298,7 +390,7 @@ fn replay_with_hash(
     let hash = crate::canonical_sha256(&(
         CAUSAL_REPLAY_VERSION,
         &dataset_hash,
-        spec,
+        identity,
         &summary,
         curve_hash,
         trades_hash,
@@ -667,6 +759,9 @@ fn hash_chunks<T: Serialize>(values: &[T], cancel: &impl Fn() -> bool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::economic_audit::{audit_graph_replay, audit_replay};
+    use crate::graph_signal::{GRAPH_SIGNAL_VERSION, MissingSignalPolicy};
+    use okx_analysis::query_plan::COMPOSITION_VERSION;
     #[test]
     fn t13_streaming_dataset_hash_matches_original_replay_digest_at_page_boundaries() {
         for n in [0, 1, 4095, 4096, 4097, 8192] {
@@ -727,6 +822,126 @@ mod tests {
             stop_fraction: None,
             take_profit_fraction: None,
         }
+    }
+
+    fn graph_spec() -> GraphReplaySpec {
+        GraphReplaySpec {
+            graph: GraphSignalSpec {
+                version: GRAPH_SIGNAL_VERSION.into(),
+                graph: serde_json::from_value(serde_json::json!({
+                    "version": COMPOSITION_VERSION,
+                    "steps": [
+                        {"id":"r", "op":"returns_series", "input":"close"},
+                        {"id":"positive", "op":"greater_than", "input":"r", "threshold":0.0}
+                    ],
+                    "result_steps": ["positive"]
+                }))
+                .unwrap(),
+                signal_step: "positive".into(),
+                target_if_true: 1,
+                target_if_false: 0,
+                missing: MissingSignalPolicy::Hold,
+            },
+            execution: ReplayExecution::from(&spec()),
+        }
+    }
+
+    #[test]
+    fn graph_replay_reuses_exact_money_and_next_open_of_registered_strategy() {
+        let mut series = bars();
+        series[4].funding_rate = Some(0.001);
+        let mut named = spec();
+        named.strategy_id = "close_momentum".into();
+        named.costs.taker_fee_bps = 10.0;
+        named.costs.slippage_bps = 5.0;
+        let original = replay(&series, &named, 3, series.len(), &|| false).unwrap();
+        let mut graph = graph_spec();
+        graph.execution = ReplayExecution::from(&named);
+        let composed = replay_graph(&series, &graph, 3, series.len(), &|| false).unwrap();
+        assert_eq!(composed.equity, original.equity);
+        assert_eq!(
+            serde_json::to_value(&composed.trades).unwrap(),
+            serde_json::to_value(&original.trades).unwrap()
+        );
+        assert_eq!(composed.summary.pnl_exact, original.summary.pnl_exact);
+        assert_eq!(composed.summary.fees_exact, original.summary.fees_exact);
+        assert_eq!(
+            composed.summary.funding_exact,
+            original.summary.funding_exact
+        );
+        assert_ne!(composed.summary.funding_exact, "0");
+        assert_ne!(composed.hash, original.hash);
+        assert_eq!(composed.trades[0].time, series[3].time);
+        let checked_graph = audit_graph_replay(
+            &series,
+            &graph.execution,
+            &composed,
+            "USDT",
+            3,
+            series.len(),
+            &|| false,
+        )
+        .unwrap();
+        let checked_named =
+            audit_replay(&series, &named, &original, "USDT", 3, series.len(), &|| {
+                false
+            })
+            .unwrap();
+        assert_eq!(checked_graph.net_exact, checked_named.net_exact);
+        assert_eq!(checked_graph.fees_exact, checked_named.fees_exact);
+    }
+
+    #[test]
+    fn graph_replay_missing_input_does_not_create_trade_and_hashes_are_stable() {
+        let series = bars();
+        let mut graph = graph_spec();
+        graph.graph.target_if_false = -1;
+        assert_eq!(
+            replay_graph(&series, &graph, 1, series.len(), &|| false).unwrap_err(),
+            "INVALID_SCORE_RANGE_OR_WARMUP"
+        );
+        let first = replay_graph(&series, &graph, 2, series.len(), &|| false).unwrap();
+        let repeated = replay_graph(&series, &graph, 2, series.len(), &|| false).unwrap();
+        assert_eq!(first.hash, repeated.hash);
+        // The first close has no prior return. HOLD may not short at open 1.
+        assert_eq!(first.trades[0].time, series[2].time);
+        graph.graph.missing = MissingSignalPolicy::Flat;
+        assert_ne!(
+            first.hash,
+            replay_graph(&series, &graph, 2, series.len(), &|| false)
+                .unwrap()
+                .hash
+        );
+    }
+
+    #[test]
+    fn graph_replay_rejects_unavailable_sources_and_non_incremental_ops() {
+        let series = bars();
+        let mut graph = graph_spec();
+        graph.graph.graph.steps[0].input = "volume".into();
+        assert_eq!(
+            replay_graph(&series, &graph, 3, series.len(), &|| false).unwrap_err(),
+            "composition.stream:SOURCE_NOT_SUPPORTED:volume"
+        );
+        graph.graph.graph.steps[0].input = "close".into();
+        graph.graph.graph.steps[0].op = okx_analysis::query_plan::SeriesOp::RollingStddev;
+        graph.graph.graph.steps[0].period = Some(2);
+        assert_eq!(
+            replay_graph(&series, &graph, 3, series.len(), &|| false).unwrap_err(),
+            "composition.stream:OPERATOR_NOT_INCREMENTAL"
+        );
+        graph = graph_spec();
+        graph.graph.graph.steps.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"future", "op":"forward_return_label", "input":"close",
+                "when":"positive", "period":2
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            replay_graph(&series, &graph, 3, series.len(), &|| false).unwrap_err(),
+            "graph_signal:FORWARD_LABEL_FORBIDDEN"
+        );
     }
     #[test]
     fn legacy_grid_candidates_remain_readable_without_holdout_reports() {

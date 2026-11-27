@@ -285,6 +285,7 @@ async fn grid_result_includes_selected_train_test_and_equity() {
         ReplayPublication {
             grid: Some(grid),
             experiment: None,
+            graph_signal: None,
             economic_audit: None,
             producer: None,
         },

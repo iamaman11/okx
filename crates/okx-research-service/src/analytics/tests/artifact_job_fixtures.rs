@@ -1748,6 +1748,7 @@ async fn immutable_result_pages_and_restart_catalog() {
         ReplayPublication {
             grid: None,
             experiment: None,
+            graph_signal: None,
             economic_audit: None,
             producer: None,
         },

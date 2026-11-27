@@ -3,7 +3,9 @@
 //! cash, funding and every equity point from trade records and closed bars.
 //! It does not claim venue mark prices, historical fees or trading permission.
 use crate::economics::{QuoteAmount, SettlementCashflow};
-use crate::strategy_registry::{Bar, Mechanics, Money, ReplayResult, ReplaySpec, dec, mul};
+use crate::strategy_registry::{
+    Bar, Mechanics, Money, ReplayExecution, ReplayResult, ReplaySpec, dec, mul,
+};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::Serialize;
 
@@ -49,6 +51,28 @@ pub fn audit_replay(
     score_end: usize,
     cancel: &impl Fn() -> bool,
 ) -> Result<ReplayEconomicAudit, String> {
+    audit_graph_replay(
+        bars,
+        &ReplayExecution::from(spec),
+        result,
+        currency,
+        score_start,
+        score_end,
+        cancel,
+    )
+}
+
+/// The same independent money oracle for graph and registered strategies.
+/// Only the producer of the position intents differs.
+pub fn audit_graph_replay(
+    bars: &[Bar],
+    execution: &ReplayExecution,
+    result: &ReplayResult,
+    currency: &str,
+    score_start: usize,
+    score_end: usize,
+    cancel: &impl Fn() -> bool,
+) -> Result<ReplayEconomicAudit, String> {
     QuoteAmount::exact(currency, Decimal::ZERO)?;
     if score_start >= score_end
         || score_end > bars.len()
@@ -57,7 +81,7 @@ pub fn audit_replay(
     {
         return Err("REPLAY_AUDIT_RANGE_OR_COUNT_MISMATCH".into());
     }
-    let (multiplier, short_allowed) = match &spec.mechanics {
+    let (multiplier, short_allowed) = match &execution.mechanics {
         Mechanics::Spot => (1.0, false),
         Mechanics::Linear {
             contract_multiplier,
@@ -106,7 +130,7 @@ pub fn audit_replay(
             money.trade(
                 f64::from(trade.side) * trade.quantity,
                 trade.price,
-                spec.costs.taker_fee_bps,
+                execution.costs.taker_fee_bps,
             )?;
             let recorded_fee = money
                 .fees
@@ -119,7 +143,7 @@ pub fn audit_replay(
             position = next_position;
             next_trade += 1;
         }
-        if spec.costs.observed_funding && bar.funding_rate.is_none() {
+        if execution.costs.observed_funding && bar.funding_rate.is_none() {
             return Err("HISTORICAL_FUNDING_MISSING".into());
         }
         let rate = bar.funding_rate.unwrap_or(0.0);
@@ -202,8 +226,8 @@ pub fn audit_replay(
         accounting_identity: "gross_minus_fees_minus_signed_funding_cost_equals_net",
         trade_price_basis: "replay_fills_not_independently_attested_venue_fills",
         funding_price_basis: "recorded_closed_bar_price_not_venue_mark_price",
-        historical_rules_verified: spec.historical_rules,
-        historical_fees_verified: spec.historical_fees,
+        historical_rules_verified: execution.historical_rules,
+        historical_fees_verified: execution.historical_fees,
         historical_publication_time_verified: false,
     })
 }

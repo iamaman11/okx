@@ -14,9 +14,10 @@ provides authenticated MCP/WSS routing; financial authority is Rust with one
 shared financial SQLite. Existing Windows CONTROL owns verified component
 installation and lifecycle. Research cannot place orders or write financial state.
 
-**#510 CODE is accepted; #512 is under final CODE review in Ready PR #513 (not merged).**
-The first complete green #512 candidate was `dacab8c5` ([full CI](https://github.com/iamaman11/okx/actions/runs/44222225744)); the exact current-HEAD acceptance and any remaining conditions are tracked in [#512](https://github.com/iamaman11/okx/issues/512), not inferred from an earlier SHA.
-Independent Research-only promotion requires a previously accepted merged base and has not been demonstrated by this first full-build run. Installed, physical and live acceptance remain separate under #449.
+Historical #512 acceptance and promotion evidence belongs to [#512](https://github.com/iamaman11/okx/issues/512);
+do not infer current installed or physical status from its earlier commits.
+The current canonical `main` and [#449](https://github.com/iamaman11/okx/issues/449)
+are the source for release and installation acceptance.
 Current evidence: [testing](docs/testing.md). Research ownership and direct
 commands: [source map](docs/research-boundaries.md); supported operation owners and direct tests: [F01–F12 map](docs/acceptance/512/operation-map.md). The boundaries and acceptance
 criteria are in [#512](https://github.com/iamaman11/okx/issues/512). This refactoring
@@ -44,6 +45,18 @@ IPC → worker planner and market handler → bounded result and immutable artif
 `ResearchClient` → research worker's catalog and CPU/memory admission → replay →
 verified summary/detail/export. Live strategies use their own source path and
 pure signal kernel. CI microbenchmarks are not installed acceptance.
+
+**Researcher/operator path:** the user describes a hypothesis to ChatGPT;
+ChatGPT selects existing typed `market` and `research` operations, checks data
+with `research.validate`, submits a registered `backtest`/`grid` or a causal
+`graph_backtest`, then reads `status`, `result` and verified `export` before
+reporting the assumptions and evidence. There is no separate workflow service,
+strategy-code generator or Research UI. `graph_backtest` consumes a typed
+`okx.graph-signal/v1` composition and reuses the same next-open execution,
+funding, costs and evidence store; the initial incremental graph executor
+accepts only causal close-based inputs and its supported operators. Unsupported
+sources/operators fail explicitly. Historical rules/fees remain unverified:
+results are **counterfactual hypotheses, never trading authority**.
 
 **Trading:** an authorized `trade` MCP action → gateway → the single Agent trade
 service and financial SQLite/RiskBook → exchange API; reconcile

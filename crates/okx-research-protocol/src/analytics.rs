@@ -1,6 +1,6 @@
 //! Public compact analytics contract. No transport or financial logic.
-use crate::strategy_contract::CompositionRequest;
 pub use crate::strategy_contract::{BreakoutParameters, EmaParameters, StrategyParameters};
+use crate::strategy_contract::{CompositionRequest, GraphSignalSpec};
 use okx_research_domain::numeric::is_positive_decimal;
 use serde::{Deserialize, Serialize};
 
@@ -376,6 +376,20 @@ pub enum ResearchRequest {
         #[serde(default)]
         seed: u64,
     },
+    /// Research-only graph experiment. An existing checked signal graph is
+    /// interpreted by the same causal next-open replay, never by live Engine.
+    GraphBacktest {
+        idempotency_key: String,
+        instruments: Vec<String>,
+        timeframe_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+        graph_signal: GraphSignalSpec,
+        costs: ResearchCosts,
+        data_mode: ResearchDataMode,
+        #[serde(default)]
+        seed: u64,
+    },
     Grid {
         idempotency_key: String,
         instruments: Vec<String>,
@@ -577,6 +591,32 @@ impl ResearchRequest {
                             | "two_bar_momentum"
                     )
                     && parameters.warmup_for(strategy_id).is_ok()
+                    && costs.valid()
+            }
+            Self::GraphBacktest {
+                idempotency_key,
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                graph_signal,
+                costs,
+                ..
+            } => {
+                !idempotency_key.is_empty()
+                    && idempotency_key.len() <= 128
+                    && !instruments.is_empty()
+                    && instruments.len() <= 8
+                    && instruments.iter().all(|s| !s.is_empty() && s.len() <= 64)
+                    && instruments
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == instruments.len()
+                    && valid_range(*timeframe_ms, *start_ms, *end_ms)
+                    && ((end_ms - start_ms) / timeframe_ms).saturating_mul(instruments.len() as u64)
+                        <= 1_000_000
+                    && graph_signal.valid_structure()
                     && costs.valid()
             }
             Self::Grid {
@@ -1054,5 +1094,97 @@ mod t08_breakout_public_wire_tests {
                     .valid()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod graph_backtest_contract_tests {
+    use super::*;
+
+    fn wire() -> serde_json::Value {
+        serde_json::json!({
+            "action":"graph_backtest",
+            "idempotency_key":"graph-btc-usdt-001",
+            "instruments":["BTC-USDT","ETH-USDT"],
+            "timeframe_ms":900000,"start_ms":0,"end_ms":90000000,
+            "graph_signal":{
+                "version":"okx.graph-signal/v1",
+                "graph":{
+                    "version":"okx.market.composition/v1",
+                    "steps":[
+                        {"id":"ret","op":"returns_series","input":"close"},
+                        {"id":"rise","op":"greater_than","input":"ret","threshold":0.0}
+                    ],
+                    "result_steps":["rise"]
+                },
+                "signal_step":"rise","target_if_true":1,"target_if_false":0,"missing":"hold"
+            },
+            "costs":{"maker_fee_bps":5.0,"taker_fee_bps":10.0,
+                     "slippage_bps":2.0,"funding_mode":"zero_assumption"},
+            "data_mode":"counterfactual"
+        })
+    }
+
+    #[test]
+    fn graph_backtest_is_one_strict_typed_public_request_not_executable_code() {
+        let parsed: ResearchRequest = serde_json::from_value(wire()).unwrap();
+        assert!(parsed.valid());
+        if let ResearchRequest::GraphBacktest {
+            graph_signal,
+            seed,
+            instruments,
+            ..
+        } = parsed
+        {
+            assert_eq!(seed, 0);
+            assert_eq!(instruments.len(), 2);
+            assert!(graph_signal.valid_structure());
+        } else {
+            panic!("unexpected Research variant");
+        }
+        let mut unknown = wire();
+        unknown["script"] = serde_json::json!("buy whenever I want");
+        assert!(serde_json::from_value::<ResearchRequest>(unknown).is_err());
+    }
+
+    #[test]
+    fn graph_backtest_rejects_noncausal_oversized_or_ambiguous_envelopes() {
+        for (field, bad) in [
+            ("instruments", serde_json::json!([])),
+            ("instruments", serde_json::json!(["BTC-USDT", "BTC-USDT"])),
+            ("timeframe_ms", serde_json::json!(12345)),
+            ("end_ms", serde_json::json!(0)),
+            ("start_ms", serde_json::json!(90000001)),
+        ] {
+            let mut invalid = wire();
+            invalid[field] = bad;
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(invalid)
+                    .is_ok_and(|request| request.valid()),
+                "{field}"
+            );
+        }
+        let mut oversized = wire();
+        oversized["instruments"] = serde_json::json!(vec!["BTC-USDT"; 9]);
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(oversized)
+                .unwrap()
+                .valid()
+        );
+        let mut future = wire();
+        future["graph_signal"]["graph"]["steps"][0]["op"] =
+            serde_json::json!("forward_return_label");
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(future)
+                .unwrap()
+                .valid()
+        );
+        let mut expensive = wire();
+        expensive["end_ms"] = serde_json::json!(900000 * 600000u64);
+        assert!(
+            !serde_json::from_value::<ResearchRequest>(expensive)
+                .unwrap()
+                .valid()
+        );
     }
 }

@@ -95,6 +95,10 @@ fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
 
 fn research_job_versions(request: &ResearchRequest) -> (&'static str, &'static str) {
     match request {
+        ResearchRequest::GraphBacktest { .. } => (
+            "analytics/518.7.graph-signal-replay-v1",
+            "analytics/semantic/518.7.graph-signal-replay-v1",
+        ),
         ResearchRequest::Backtest { .. } | ResearchRequest::Grid { .. } => (
             "analytics/518.6.lossless-float-replay-inputs-v1",
             "analytics/semantic/518.6.lossless-float-replay-inputs-v1",
@@ -109,6 +113,22 @@ fn research_job_versions(request: &ResearchRequest) -> (&'static str, &'static s
 
 impl AnalyticsService {
     pub(super) async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
+        // A graph that cannot execute must not create a durable job or fetch
+        // venue data. The same pure preflight is repeated against actual bars.
+        if let ResearchRequest::GraphBacktest {
+            graph_signal,
+            timeframe_ms,
+            start_ms,
+            end_ms,
+            ..
+        } = &request
+        {
+            let bars = end_ms
+                .checked_sub(*start_ms)
+                .and_then(|range| range.checked_div(*timeframe_ms))
+                .ok_or("INVALID_GRAPH_RANGE")?;
+            okx_research::graph_signal::preflight_graph(graph_signal, bars)?;
+        }
         // Estimate the complete batch before SQL admission or fetching candles.
         // Large requests are rejected before any allocation or source I/O.
         let memory_mib = budget::estimated_mib(&request)?;
@@ -122,6 +142,9 @@ impl AnalyticsService {
         let hash = hash.strip_prefix("sha256:").unwrap_or(&hash).to_owned();
         let key = match &request {
             ResearchRequest::Backtest {
+                idempotency_key, ..
+            }
+            | ResearchRequest::GraphBacktest {
                 idempotency_key, ..
             }
             | ResearchRequest::Grid {
@@ -204,6 +227,7 @@ impl AnalyticsService {
                     }
                     let instruments = match &request {
                         ResearchRequest::Backtest { instruments, .. }
+                        | ResearchRequest::GraphBacktest { instruments, .. }
                         | ResearchRequest::Grid { instruments, .. } => instruments.clone(),
                         _ => unreachable!(),
                     };
@@ -224,6 +248,7 @@ impl AnalyticsService {
                             let observation = progress.clone().map(|p| (p, index));
                             match &mut single {
                                 ResearchRequest::Backtest { instruments, .. }
+                                | ResearchRequest::GraphBacktest { instruments, .. }
                                 | ResearchRequest::Grid { instruments, .. } => {
                                     *instruments = vec![instrument.clone()]
                                 }
@@ -380,68 +405,106 @@ impl AnalyticsService {
         cancel: Arc<cpu_executor::Cancel>,
         observation: Option<(Arc<candidate_progress::Tracker>, usize)>,
     ) -> Result<String, String> {
-        let (instruments, ms, start, end, strategy, variants, costs, mode, seed, is_grid) =
-            match request {
-                ResearchRequest::Backtest {
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    strategy_id,
-                    parameters,
-                    costs,
-                    data_mode,
-                    seed,
-                    ..
-                } => (
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    strategy_id,
-                    vec![parameters],
-                    costs,
-                    data_mode,
-                    seed,
-                    false,
-                ),
-                ResearchRequest::Grid {
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    strategy_id,
-                    variants,
-                    costs,
-                    data_mode,
-                    seed,
-                    ..
-                } => (
-                    instruments,
-                    timeframe_ms,
-                    start_ms,
-                    end_ms,
-                    strategy_id,
-                    variants,
-                    costs,
-                    data_mode,
-                    seed,
-                    true,
-                ),
-                _ => unreachable!(),
-            };
+        let (
+            instruments,
+            ms,
+            start,
+            end,
+            strategy,
+            variants,
+            graph_signal,
+            costs,
+            mode,
+            seed,
+            is_grid,
+        ) = match request {
+            ResearchRequest::Backtest {
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                strategy_id,
+                parameters,
+                costs,
+                data_mode,
+                seed,
+                ..
+            } => (
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                Some(strategy_id),
+                vec![parameters],
+                None,
+                costs,
+                data_mode,
+                seed,
+                false,
+            ),
+            ResearchRequest::Grid {
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                strategy_id,
+                variants,
+                costs,
+                data_mode,
+                seed,
+                ..
+            } => (
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                Some(strategy_id),
+                variants,
+                None,
+                costs,
+                data_mode,
+                seed,
+                true,
+            ),
+            ResearchRequest::GraphBacktest {
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                graph_signal,
+                costs,
+                data_mode,
+                seed,
+                ..
+            } => (
+                instruments,
+                timeframe_ms,
+                start_ms,
+                end_ms,
+                None,
+                Vec::new(),
+                Some(graph_signal),
+                costs,
+                data_mode,
+                seed,
+                false,
+            ),
+            _ => unreachable!(),
+        };
         if instruments.len() != 1 {
             return Err("REPLAY_REQUIRES_EXACTLY_ONE_INSTRUMENT".into());
         }
-        if !matches!(
-            strategy.as_str(),
-            "ema_cross_v1"
-                | "ema_momentum_confirm_v1"
-                | okx_analysis::operators::BREAKOUT_STRATEGY_ID
-                | "no_trade"
-                | "close_momentum"
-                | "two_bar_momentum"
-        ) {
+        if strategy.as_deref().is_some_and(|name| {
+            !matches!(
+                name,
+                "ema_cross_v1"
+                    | "ema_momentum_confirm_v1"
+                    | okx_analysis::operators::BREAKOUT_STRATEGY_ID
+                    | "no_trade"
+                    | "close_momentum"
+                    | "two_bar_momentum"
+            )
+        }) {
             return Err("UNSUPPORTED_STRATEGY".into());
         }
         if matches!(mode, ResearchDataMode::HistoricalObserved) {
@@ -470,11 +533,19 @@ impl AnalyticsService {
         if bars.len().saturating_mul(512) > 256 * 1024 * 1024 {
             return Err("RESEARCH_MEMORY_LIMIT".into());
         }
-        let variants = variants
-            .into_iter()
-            .map(|p| p.warmup_for(&strategy).map(|_| p))
-            .collect::<Result<Vec<_>, _>>()?;
-        let first = *variants.first().ok_or("EMPTY_VARIANTS")?;
+        let graph_warmup = graph_signal
+            .as_ref()
+            .map(|signal| okx_research::graph_signal::preflight_graph(signal, bars.len() as u64))
+            .transpose()?;
+        let variants = if let Some(strategy_id) = strategy.as_deref() {
+            variants
+                .into_iter()
+                .map(|p| p.warmup_for(strategy_id).map(|_| p))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        let first = variants.first().copied();
         let (mechanics, economic_basis, reference_capture) = if instruments[0].ends_with("-SWAP") {
             let reference = self
                 .sources
@@ -629,9 +700,7 @@ impl AnalyticsService {
             }
             bars = Arc::new(owned);
         }
-        let spec = ReplaySpec {
-            strategy_id: strategy,
-            parameters: first,
+        let execution = replay::ReplayExecution {
             mechanics,
             costs: Costs {
                 maker_fee_bps: costs.maker_fee_bps,
@@ -647,6 +716,23 @@ impl AnalyticsService {
             stop_fraction: None,
             take_profit_fraction: None,
         };
+        let spec = strategy.map(|strategy_id| ReplaySpec {
+            strategy_id,
+            parameters: first.expect("validated named replay has parameters"),
+            mechanics: execution.mechanics.clone(),
+            costs: execution.costs.clone(),
+            timeframe_ms: execution.timeframe_ms,
+            historical_observed: execution.historical_observed,
+            historical_rules: execution.historical_rules,
+            historical_fees: execution.historical_fees,
+            seed: execution.seed,
+            stop_fraction: execution.stop_fraction,
+            take_profit_fraction: execution.take_profit_fraction,
+        });
+        let graph_spec = graph_signal.map(|graph| replay::GraphReplaySpec {
+            graph,
+            execution: execution.clone(),
+        });
         let store = self.artifacts.clone();
         let producer = self.producer.clone();
         let artifact=self.cpu.run(cancel.clone(),move|c|{
@@ -656,7 +742,16 @@ impl AnalyticsService {
                     // Persist the exact inputs and selection policy before any
                     // replay. This is immutable artifact metadata, not another
                     // job catalog, and its ID comes from the existing store.
-                    let policy = if is_grid { Some(replay::grid_policy(bars.len(), &spec.strategy_id, &variants)?) } else { None };
+                    let policy = if is_grid {
+                        let named = spec.as_ref().ok_or("REPLAY_NAMED_SPEC_MISSING")?;
+                        Some(replay::grid_policy(
+                            bars.len(),
+                            &named.strategy_id,
+                            &variants,
+                        )?)
+                    } else {
+                        None
+                    };
                     let mut economic_basis = economic_basis;
                     if let Some(reference_capture) = reference_capture {
                         let id = store.publish_evidence(&reference_capture).map_err(|e|e.to_string())?.0;
@@ -670,27 +765,70 @@ impl AnalyticsService {
                         .as_str()
                         .ok_or("REPLAY_CURRENCY_MISSING")?
                         .to_owned();
-                    let experiment = store.publish_evidence(&json!({
+                    let mut experiment_inputs = json!({
                         "schema":"okx.research.experiment-inputs/v1",
                         "dataset_artifact":dataset,"instrument":instruments[0],
                         "requested_range":{"start_ms":start,"end_ms":end},
                         "effective_range":{"start_ms":bars.first().map(|b|b.time),"end_ms":bars.last().map(|b|b.time+ms)},
                         "bar_count":bars.len(),"timeframe_ms":ms,
-                        "code_version":replay::CAUSAL_REPLAY_VERSION,"producer":producer,"spec":spec,
+                        "code_version":replay::CAUSAL_REPLAY_VERSION,"producer":producer,"spec":&spec,
                         "variants":variants,"selection_policy":policy,"economic_basis":economic_basis,
                         "result_role":"counterfactual_research_only"
-                    })).map_err(|e|e.to_string())?.0;
-                    let(result,grid)=if is_grid{let g=replay::grid_with_observer(&bars,&spec,&variants,&cancelled,&|value|{if let Some((tracker,index))=&observation {tracker.observe(*index,value)}})?;(g.test,Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":spec.seed,"strategy_id":spec.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})))}else{(replay::replay(&bars,&spec,first.warmup_for(&spec.strategy_id)?,bars.len(),&cancelled)?,None)};
-                    let score_start = grid.as_ref()
-                        .and_then(|value| value["split_index"].as_u64())
-                        .map(|index| index as usize)
-                        .unwrap_or(first.warmup_for(&spec.strategy_id)?);
-                    let audit = okx_research::economic_audit::audit_replay(
-                        &bars, &spec, &result, &settlement_currency,
+                    });
+                    if let Some(graph) = &graph_spec {
+                        experiment_inputs
+                            .as_object_mut()
+                            .ok_or("REPLAY_INPUTS_INVALID")?
+                            .remove("spec");
+                        experiment_inputs["graph_spec"] = json!(graph);
+                        experiment_inputs["graph_warmup_bars"] =
+                            json!(graph_warmup.ok_or("GRAPH_WARMUP_MISSING")?);
+                    }
+                    let experiment = store.publish_evidence(&experiment_inputs).map_err(|e|e.to_string())?.0;
+                    let (result, grid, score_start) = if let Some(graph) = &graph_spec {
+                        let warmup = graph_warmup.ok_or("GRAPH_WARMUP_MISSING")?;
+                        (
+                            replay::replay_graph(&bars, graph, warmup, bars.len(), &cancelled)?,
+                            None,
+                            warmup,
+                        )
+                    } else {
+                        let named = spec.as_ref().ok_or("REPLAY_NAMED_SPEC_MISSING")?;
+                        if is_grid {
+                            let g = replay::grid_with_observer(
+                                &bars,
+                                named,
+                                &variants,
+                                &cancelled,
+                                &|value| {
+                                    if let Some((tracker, index)) = &observation {
+                                        tracker.observe(*index, value)
+                                    }
+                                },
+                            )?;
+                            let split = g.split_index;
+                            (
+                                g.test,
+                                Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":named.seed,"strategy_id":named.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})),
+                                split,
+                            )
+                        } else {
+                            let warmup = first
+                                .ok_or("EMPTY_VARIANTS")?
+                                .warmup_for(&named.strategy_id)?;
+                            (
+                                replay::replay(&bars, named, warmup, bars.len(), &cancelled)?,
+                                None,
+                                warmup,
+                            )
+                        }
+                    };
+                    let audit = okx_research::economic_audit::audit_graph_replay(
+                        &bars, &execution, &result, &settlement_currency,
                         score_start, bars.len(), &cancelled,
                     )?;
                     publish_replay(&store,&result,&dataset,ReplayPublication {
-                        grid, experiment:Some(&experiment), economic_audit:Some(json!(audit)),
+                        grid, experiment:Some(&experiment), graph_signal:graph_spec.as_ref().map(|spec| &spec.graph), economic_audit:Some(json!(audit)),
                         producer:producer.as_ref(),
                     },&cancelled)
                 }).await?;

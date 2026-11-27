@@ -1,53 +1,31 @@
 //! Research-only, typed bridge from a causal composition to position intent.
 //! A projection is evidence, never financial authority or an exchange order.
 use okx_analysis::query_plan::{
-    CheckedComposition, CompositionRequest, CompositionValues, SeriesOp, Unit,
+    CausalGraphStream, CheckedComposition, CompositionValues, SeriesOp, Unit,
 };
-use serde::{Deserialize, Serialize};
-
-pub const GRAPH_SIGNAL_VERSION: &str = "okx.graph-signal/v1";
-
-/// A new hypothesis is data: composing existing operations does not require a
-/// new Rust StrategyKernel variant. No arbitrary expressions or code loading.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GraphSignalSpec {
-    pub version: String,
-    pub graph: CompositionRequest,
-    pub signal_step: String,
-    pub target_if_true: i8,
-    pub target_if_false: i8,
-    pub missing: MissingSignalPolicy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MissingSignalPolicy {
-    /// Unknown inputs produce no new order, not an implicit zero.
-    Hold,
-    /// An explicitly declared, auditable flattening policy.
-    Flat,
-}
+pub use okx_analysis::query_plan::{GRAPH_SIGNAL_VERSION, GraphSignalSpec, MissingSignalPolicy};
+use std::collections::BTreeMap;
 
 pub struct CheckedGraphSignal {
     graph: CheckedComposition,
     signal_step: String,
     targets: [i8; 2],
     missing: MissingSignalPolicy,
+    warmup_bars: usize,
 }
 
-impl GraphSignalSpec {
-    pub fn compile(self, total_bars: u64) -> Result<CheckedGraphSignal, String> {
-        if self.version != GRAPH_SIGNAL_VERSION {
+impl CheckedGraphSignal {
+    pub fn compile(spec: GraphSignalSpec, total_bars: u64) -> Result<Self, String> {
+        if spec.version != GRAPH_SIGNAL_VERSION {
             return Err("graph_signal.version:UNSUPPORTED".into());
         }
-        if !(-1..=1).contains(&self.target_if_true) || !(-1..=1).contains(&self.target_if_false) {
+        if !(-1..=1).contains(&spec.target_if_true) || !(-1..=1).contains(&spec.target_if_false) {
             return Err("graph_signal:INVALID_TARGET_POSITION".into());
         }
         // A future-return label is an outcome, not a causal decision input.
         // Reject even an unused label so a strategy cannot hide leakage in
         // its declared fingerprint or later change result_steps to activate it.
-        if self
+        if spec
             .graph
             .steps
             .iter()
@@ -55,30 +33,100 @@ impl GraphSignalSpec {
         {
             return Err("graph_signal:FORWARD_LABEL_FORBIDDEN".into());
         }
-        if !self.graph.result_steps.contains(&self.signal_step) {
+        if !spec.graph.result_steps.contains(&spec.signal_step) {
             return Err("graph_signal:UNPROJECTED_SIGNAL".into());
         }
-        let checked = CheckedComposition::compile(self.graph, total_bars)?;
+        let checked = CheckedComposition::compile(spec.graph, total_bars)?;
         let output = checked
             .steps()
             .iter()
-            .find(|step| step.step.id == self.signal_step)
+            .find(|step| step.step.id == spec.signal_step)
             .ok_or("graph_signal:UNKNOWN_SIGNAL_STEP")?;
         if !matches!(output.unit, Unit::Boolean | Unit::Event) {
             return Err("graph_signal:SIGNAL_MUST_BE_BOOLEAN_OR_EVENT".into());
         }
+        let warmup_bars = required_score_start(&checked, &spec.signal_step)?;
         Ok(CheckedGraphSignal {
             graph: checked,
-            signal_step: self.signal_step,
-            targets: [self.target_if_false, self.target_if_true],
-            missing: self.missing,
+            signal_step: spec.signal_step,
+            targets: [spec.target_if_false, spec.target_if_true],
+            missing: spec.missing,
+            warmup_bars,
         })
     }
+}
+
+/// The first bar on which a signal can be acted upon at the *next open*.
+/// Every dependency path contributes its own closed-bar lag; two-input steps
+/// wait for the slower branch. Actual sparse/null observations can delay a
+/// signal further, but can never make this earliest bound earlier.
+fn required_score_start(graph: &CheckedComposition, signal_step: &str) -> Result<usize, String> {
+    let mut first_known = BTreeMap::<&str, usize>::new();
+    for checked in graph.steps() {
+        let step = &checked.step;
+        // This bounded graph evaluator admits only `close` at preflight.
+        // Unknown external sources will be rejected by CausalGraphStream.
+        let from = first_known.get(step.input.as_str()).copied().unwrap_or(0);
+        let other = step
+            .other
+            .as_deref()
+            .and_then(|input| first_known.get(input).copied())
+            .unwrap_or(0);
+        let delay = match step.op {
+            SeriesOp::ReturnsSeries | SeriesOp::RisingEdge | SeriesOp::FallingEdge => 1,
+            SeriesOp::Lag => usize::from(step.period.expect("checked lag period")),
+            SeriesOp::RollingMean
+            | SeriesOp::RollingMax
+            | SeriesOp::RollingMin
+            | SeriesOp::RollingRange
+            | SeriesOp::RollingPearson
+            | SeriesOp::RollingStddev
+            | SeriesOp::RollingZscore => {
+                usize::from(step.period.expect("checked rolling period")) - 1
+            }
+            _ => 0,
+        };
+        let start = from
+            .max(other)
+            .checked_add(delay)
+            .ok_or("graph_signal:WARMUP_OVERFLOW")?;
+        first_known.insert(&step.id, start);
+    }
+    first_known
+        .get(signal_step)
+        .ok_or("graph_signal:UNKNOWN_SIGNAL_STEP")?
+        .checked_add(1)
+        .ok_or_else(|| "graph_signal:WARMUP_OVERFLOW".into())
+}
+
+pub(crate) fn compiled_graph(
+    spec: &GraphSignalSpec,
+    total_bars: u64,
+) -> Result<(CheckedGraphSignal, CausalGraphStream), String> {
+    let checked = CheckedGraphSignal::compile(spec.clone(), total_bars)?;
+    // Admission-time proof that this graph has no unimplemented or unavailable
+    // source/operator. Source acquisition is not allowed before this check.
+    let stream = CausalGraphStream::new(checked.graph())?;
+    if total_bars <= checked.warmup_bars() as u64 {
+        return Err("graph_signal:INSUFFICIENT_BARS_FOR_WARMUP".into());
+    }
+    Ok((checked, stream))
+}
+
+/// Validate the complete causal graph without reading market data or creating
+/// a research job. Returns the minimum valid score_start index.
+pub fn preflight_graph(spec: &GraphSignalSpec, total_bars: u64) -> Result<usize, String> {
+    let (checked, _) = compiled_graph(spec, total_bars)?;
+    Ok(checked.warmup_bars())
 }
 
 impl CheckedGraphSignal {
     pub fn graph(&self) -> &CheckedComposition {
         &self.graph
+    }
+
+    pub fn warmup_bars(&self) -> usize {
+        self.warmup_bars
     }
 
     /// Pure interpretation of a previously validated closed-bar projection.
@@ -129,7 +177,7 @@ mod tests {
 
     #[test]
     fn causal_graph_interprets_historical_closed_bars_without_future_leakage() {
-        let graph = spec().compile(6).unwrap();
+        let graph = CheckedGraphSignal::compile(spec(), 6).unwrap();
         let mut prices = vec![100.0, 110.0, 90.0, 100.0, 90.0, 120.0];
         let past = graph.graph().evaluate_at(&prices, 2);
         assert_eq!(graph.target(&past).unwrap(), Some(0));
@@ -150,7 +198,7 @@ mod tests {
         let mut target = spec();
         target.target_if_true = 2;
         assert_eq!(
-            target.compile(6).err().as_deref(),
+            CheckedGraphSignal::compile(target, 6).err().as_deref(),
             Some("graph_signal:INVALID_TARGET_POSITION")
         );
 
@@ -163,7 +211,7 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(
-            label.compile(6).err().as_deref(),
+            CheckedGraphSignal::compile(label, 6).err().as_deref(),
             Some("graph_signal:FORWARD_LABEL_FORBIDDEN")
         );
 
@@ -171,20 +219,23 @@ mod tests {
         numeric.signal_step = "return".into();
         numeric.graph.result_steps.push("return".into());
         assert_eq!(
-            numeric.compile(6).err().as_deref(),
+            CheckedGraphSignal::compile(numeric, 6).err().as_deref(),
             Some("graph_signal:SIGNAL_MUST_BE_BOOLEAN_OR_EVENT")
         );
     }
 
     #[test]
     fn missing_is_not_a_trade_unless_explicit_flat_policy_is_recorded() {
-        let hold = spec().compile(3).unwrap();
+        let hold = CheckedGraphSignal::compile(spec(), 3).unwrap();
         let unknown = hold.graph().evaluate_at(&[100.0, 101.0, 102.0], 0);
         assert_eq!(hold.target(&unknown).unwrap(), None);
         let mut flatten = spec();
         flatten.missing = MissingSignalPolicy::Flat;
         assert_eq!(
-            flatten.compile(3).unwrap().target(&unknown).unwrap(),
+            CheckedGraphSignal::compile(flatten, 3)
+                .unwrap()
+                .target(&unknown)
+                .unwrap(),
             Some(0)
         );
         let mut wrong = unknown.clone();
@@ -192,6 +243,91 @@ mod tests {
         assert_eq!(
             hold.target(&wrong).unwrap_err(),
             "graph_signal:INVALID_BOOLEAN_OBSERVATION"
+        );
+    }
+
+    #[test]
+    fn nested_signal_warmup_is_longest_dependency_path_plus_next_open() {
+        let mut nested = spec();
+        nested.graph = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"r", "op":"returns_series", "input":"close"},
+                {"id":"smooth", "op":"rolling_mean", "input":"r", "period":3},
+                {"id":"delayed", "op":"lag", "input":"smooth", "period":2},
+                {"id":"positive", "op":"greater_than", "input":"delayed", "threshold":0.0},
+                {"id":"entry", "op":"rising_edge", "input":"positive"}
+            ],
+            "result_steps":["entry"]
+        }))
+        .unwrap();
+        nested.signal_step = "entry".into();
+        // returns:1 + rolling(3):2 + lag(2):2 + rising_edge:1
+        // + next_open:1 == score_start=7
+        assert_eq!(preflight_graph(&nested, 8).unwrap(), 7);
+        assert_eq!(
+            CheckedGraphSignal::compile(nested.clone(), 8)
+                .unwrap()
+                .warmup_bars(),
+            7
+        );
+        assert_eq!(
+            preflight_graph(&nested, 7).unwrap_err(),
+            "graph_signal:INSUFFICIENT_BARS_FOR_WARMUP"
+        );
+    }
+
+    #[test]
+    fn multiple_inputs_use_slower_warmup_and_1000_bars_cannot_score_1000_window() {
+        let mut branch = spec();
+        branch.graph = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"r", "op":"returns_series", "input":"close"},
+                {"id":"early", "op":"greater_than", "input":"r", "threshold":0.0},
+                {"id":"slow", "op":"rolling_mean", "input":"close", "period":5},
+                {"id":"late", "op":"greater_than", "input":"slow", "threshold":0.0},
+                {"id":"both", "op":"and", "input":"early", "other":"late"},
+                {"id":"edge", "op":"rising_edge", "input":"both"}
+            ],
+            "result_steps":["edge"]
+        }))
+        .unwrap();
+        branch.signal_step = "edge".into();
+        assert_eq!(preflight_graph(&branch, 7).unwrap(), 6);
+
+        let mut long = spec();
+        long.graph = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"slow", "op":"rolling_mean", "input":"close", "period":1000},
+                {"id":"signal", "op":"greater_than", "input":"slow", "threshold":0.0}
+            ],
+            "result_steps":["signal"]
+        }))
+        .unwrap();
+        long.signal_step = "signal".into();
+        assert_eq!(
+            preflight_graph(&long, 1000).unwrap_err(),
+            "graph_signal:INSUFFICIENT_BARS_FOR_WARMUP"
+        );
+        assert_eq!(preflight_graph(&long, 1001).unwrap(), 1000);
+    }
+
+    #[test]
+    fn preflight_rejects_unavailable_source_or_operator_without_market_reads() {
+        let mut unavailable = spec();
+        unavailable.graph.steps[0].input = "volume".into();
+        assert_eq!(
+            preflight_graph(&unavailable, 100).unwrap_err(),
+            "composition.stream:SOURCE_NOT_SUPPORTED:volume"
+        );
+        unavailable.graph.steps[0].input = "close".into();
+        unavailable.graph.steps[0].op = SeriesOp::RollingStddev;
+        unavailable.graph.steps[0].period = Some(2);
+        assert_eq!(
+            preflight_graph(&unavailable, 100).unwrap_err(),
+            "composition.stream:OPERATOR_NOT_INCREMENTAL"
         );
     }
 }

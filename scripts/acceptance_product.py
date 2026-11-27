@@ -111,7 +111,11 @@ def checked_schema_negative(route,arguments,response,proof,executed_tests,tool_c
                     and root.get("$defs",{}).get(ref[len(prefix):])==selector)
         if (root.get("type")!="object" or root.get("additionalProperties") is not False
             or not exact_link_selector(root.get("properties",{}).get("link_id"))
-            or not exact_link_selector(selected[0]["properties"].get("link_id"))):
+            # A branch-local empty schema is exact: the root validates the
+            # selector once, while additionalProperties:false on each branch
+            # still enforces its action-specific field membership.
+            or not (selected[0]["properties"].get("link_id") == {}
+                    or exact_link_selector(selected[0]["properties"].get("link_id")))):
             return False
     error=response["tool_error"]
     return (isinstance(error,str)
@@ -665,8 +669,14 @@ def self_test():
             # pattern. A relaxed $defs entry cannot certify a schema refusal.
             altered=json.loads(json.dumps(contract))
             account=next(t for t in altered["tools"] if t["name"]=="accounts")
-            self.assertIn("l",account["inputSchema"].get("$defs",{}))
-            account["inputSchema"]["$defs"]["l"]["pattern"]=".*"
+            if "l" in account["inputSchema"].get("$defs",{}):
+                account["inputSchema"]["$defs"]["l"]["pattern"]=".*"
+            else:
+                # The factored schema may keep its one selector inline at the
+                # root. Relaxing that exact authority must still fail proof.
+                self.assertEqual(account["inputSchema"]["properties"]["link_id"]
+                                 ["pattern"],"^link_[a-f0-9]{32}$")
+                account["inputSchema"]["properties"]["link_id"]["pattern"]=".*"
             args={"action":"list","raw_rpc":"forbidden"}
             response={"tool_error":repr(args)+" is not valid under any of the given schemas\n"
                       "Failed validating 'oneOf' in schema:\n"

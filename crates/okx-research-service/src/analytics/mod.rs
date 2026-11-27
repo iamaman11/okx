@@ -324,6 +324,7 @@ impl AnalyticsService {
 struct ReplayPublication<'a> {
     grid: Option<Value>,
     experiment: Option<&'a str>,
+    graph_signal: Option<&'a okx_research::graph_signal::GraphSignalSpec>,
     economic_audit: Option<Value>,
     producer: Option<&'a crate::producer::Producer>,
 }
@@ -338,6 +339,7 @@ fn publish_replay(
     let ReplayPublication {
         grid,
         experiment,
+        graph_signal,
         economic_audit,
         producer,
     } = publication;
@@ -355,7 +357,10 @@ fn publish_replay(
         }
         curve_pages.push(store.publish_evidence(&chunk).map_err(|e| e.to_string())?.0);
     }
-    let manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"economic_audit":economic_audit,"producer":producer,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
+    let mut manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"economic_audit":economic_audit,"producer":producer,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
+    if let Some(signal) = graph_signal {
+        manifest["graph_signal"] = json!(signal);
+    }
     Ok(store
         .publish_evidence(&manifest)
         .map_err(|e| e.to_string())?
@@ -621,6 +626,25 @@ fn research_capabilities() -> Value {
         "schema":"okx.research.capabilities/v1",
         "quality":"fresh",
         "strategy_ids":["ema_cross_v1","ema_momentum_confirm_v1","close_breakout_v1"],
+        "graph_backtest":{
+            "action":"graph_backtest","version":"okx.graph-signal/v1",
+            "input":"okx.market.composition/v1","sources":["close"],
+            "execution":"same_next_open_costs_funding_and_decimal_ledger_as_registered_backtest",
+            "supported_operators":["returns_series","rolling_mean","rolling_max","rolling_min","rolling_range","add_series","subtract_series","divide_series","and","or","lag","greater_than","greater_than_series","less_than","less_than_series","rising_edge","falling_edge"],
+            "unavailable_operators":["rolling_pearson","rolling_stddev","rolling_zscore","forward_return_label"],
+            "max_steps":32,"max_result_steps":14,"signal_unit":"boolean_or_event",
+            "missing_policies":["hold","flat"],"historical_observed":false,
+            "grid_selection":"not_available_for_graph_backtest","trading_authority":false,
+            "example_graph_signal":{
+                "version":"okx.graph-signal/v1",
+                "graph":{"version":"okx.market.composition/v1","steps":[
+                    {"id":"returns","op":"returns_series","input":"close"},
+                    {"id":"positive","op":"greater_than","input":"returns","threshold":0}
+                ],"result_steps":["positive"]},
+                "signal_step":"positive","target_if_true":1,"target_if_false":0,
+                "missing":"hold"
+            }
+        },
         "strategy_compositions":{"ema_momentum_confirm_v1":{"version":1,"kernels":["ema_cross_v1","close_momentum"],"parameters":"ema_fast_slow","warmup":"slow_closed_bars","disagreement":"flat","execution":"next_open_counterfactual"}},
         "strategy_definitions":{
             "ema_cross_v1":{"version":1,"parameters":{"fast":{"min":1,"max":999},"slow":{"min":2,"max":1000}},"constraint":"fast<slow","warmup":"slow_closed_bars"},

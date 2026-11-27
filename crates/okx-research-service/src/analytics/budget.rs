@@ -22,6 +22,13 @@ pub fn estimated_mib(request: &ResearchRequest) -> Result<u32, String> {
             timeframe_ms,
             ..
         } => (instruments.len(), *start_ms, *end_ms, *timeframe_ms, 1),
+        ResearchRequest::GraphBacktest {
+            instruments,
+            start_ms,
+            end_ms,
+            timeframe_ms,
+            ..
+        } => (instruments.len(), *start_ms, *end_ms, *timeframe_ms, 1),
         ResearchRequest::Grid {
             instruments,
             start_ms,
