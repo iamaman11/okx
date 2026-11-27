@@ -425,6 +425,83 @@ async fn public_strategy_capital_uses_authenticated_flat_opening_and_paused_auth
     fixture.finish().await;
 }
 
+/// The strategy may be durably approved and enabled while the optional signal
+/// source is unavailable. An Engine maintenance turn must fail closed before
+/// it claims a decision, creates an intent or contacts a venue; the original
+/// Native strategy owner must still accept an explicit Stop without Research.
+#[tokio::test]
+async fn approved_strategy_without_live_source_never_claims_or_trades_and_can_stop() {
+    let fixture = Fixture::new().await;
+    let capture = fixture.owner.recorded_capture_gate.write().await;
+
+    let created = completed_data(fixture.request(create("source_absent_create")).await);
+    let approved = completed_data(
+        fixture
+            .request(StrategyRequest::Start {
+                idempotency_key: "source_absent_approve".into(),
+                instance_id: INSTANCE.into(),
+                expected_revision: 1,
+                configuration_digest: created["configuration_digest"].as_str().unwrap().into(),
+            })
+            .await,
+    );
+    assert_eq!(approved["instance"]["enabled"], true);
+    assert_eq!(approved["instance"]["policy_revision"], 2);
+
+    let instances = fixture
+        .owner
+        .execution
+        .store
+        .strategy_instances(deadline())
+        .await
+        .unwrap();
+    let instance = instances
+        .iter()
+        .find(|instance| instance.instance_id == INSTANCE)
+        .expect("approved strategy must persist in the Native SQL owner");
+    let engine = fixture.ctx.finance.trade().unwrap();
+    assert!(
+        engine.live_source.read().await.is_none(),
+        "no synthetic analytics source may be installed by the test"
+    );
+    let financial_before = money(&fixture).await;
+    let requests_before = fixture.feed.requests.lock().unwrap().clone();
+    let posts_before = fixture.feed.outbound_posts.lock().unwrap().clone();
+    let denied_before = fixture.feed.denied_routes.lock().unwrap().clone();
+
+    assert_eq!(
+        engine
+            .strategy_turn(&fixture.owner, instance)
+            .await
+            .unwrap_err(),
+        "ANALYTICS_SOURCE_NOT_READY"
+    );
+    // Exercise the shipping loop over enabled SQL strategies as well as its
+    // private one-strategy error path; it deliberately swallows errors.
+    engine.strategy_decisions_turn().await;
+    assert_eq!(money(&fixture).await, financial_before);
+    assert_eq!(*fixture.feed.requests.lock().unwrap(), requests_before);
+    assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts_before);
+    assert_eq!(*fixture.feed.denied_routes.lock().unwrap(), denied_before);
+
+    let stopped = completed_data(
+        fixture
+            .request(StrategyRequest::Stop {
+                idempotency_key: "source_absent_stop".into(),
+                instance_id: INSTANCE.into(),
+            })
+            .await,
+    );
+    assert_eq!(stopped["instance"]["enabled"], false);
+    assert_eq!(stopped["instance"]["policy_revision"], 3);
+    assert_eq!(money(&fixture).await, financial_before);
+    assert_eq!(*fixture.feed.requests.lock().unwrap(), requests_before);
+    assert_eq!(*fixture.feed.outbound_posts.lock().unwrap(), posts_before);
+    assert_eq!(*fixture.feed.denied_routes.lock().unwrap(), denied_before);
+    drop(capture);
+    fixture.finish().await;
+}
+
 /// Bounded S2-05 proof: original intent creation is deliberately through the
 /// SQL owner, not a claimed successful exchange admission. Public Update and
 /// public Execute replay must nevertheless preserve that immutable identity.
