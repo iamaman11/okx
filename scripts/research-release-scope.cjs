@@ -7,6 +7,7 @@ const {verify, verifyEngineInputs, verifyUnchangedOwnerInputs} = require('./ci-c
 const baselineCiOnly = new Set([
   '.github/workflows/ci.yml',
   'scripts/check_ci_native_scope.py',
+  'scripts/test-ci-main-routing.cjs',
   'scripts/prepare-research-release.ps1',
   'scripts/research-release-scope.cjs',
   'scripts/test-research-release-scope.cjs',

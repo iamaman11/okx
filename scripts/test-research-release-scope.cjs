@@ -17,6 +17,12 @@ const pureCoreFile = 'crates/okx-strategy-core/src/operators.rs';
 const analysisFile = 'crates/okx-analysis/src/lib.rs';
 const mixedFiles = [analysisFile, 'crates/okx-host-controller/src/control_ack.rs'];
 assert.equal(checkMixed(meta, meta, mixedFiles).engine_windows_cargo_closure_identical,true);
+// The published Native base predates this CI-only routing test. It cannot
+// change a deployable owner, but unrelated scripts must remain forbidden.
+assert.equal(checkMixed(meta, meta, [...mixedFiles, 'scripts/test-ci-main-routing.cjs'])
+  .engine_windows_cargo_closure_identical, true);
+for (const file of ['scripts/ci-component-impact.cjs', 'crates/okx-trading-engine/src/query.rs'])
+  assert.throws(()=>checkMixed(meta, meta, [...mixedFiles,file]),/OUTSIDE_MIXED_OWNER_SCOPE/);
 const engineOnlyFiles = ['crates/okx-trading-engine/src/query.rs', 'docs/engine.md'];
 assert.equal(checkEngine(meta, meta, engineOnlyFiles).other_windows_cargo_closures_identical, true);
 for (const file of ['crates/okx-research-service/src/analytics/market.rs',
