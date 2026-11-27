@@ -27,7 +27,9 @@ use tokio_tungstenite::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::lifecycle_executor::HostExecutor;
+use crate::{
+    HostControlResult, auth::load_native_attestor_token, lifecycle_executor::HostExecutor,
+};
 
 const FRAME_SCHEMA: &str = "okx.control-attestor.frame/v1";
 const ATTESTOR_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/attestor";
@@ -255,6 +257,11 @@ async fn run_session(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
+                // A live socket can stay open after Edge fingerprint rotation.
+                // Recheck the local credential on the existing heartbeat so
+                // its next reconnect uses the replacement without restarting
+                // CONTROL (or either native child process).
+                ensure_current_credential(token, load_native_attestor_token())?;
                 timeout(Duration::from_secs(2), sender.send(Message::Ping(Vec::new().into())))
                     .await.map_err(|_| "ATTESTOR_PING_TIMEOUT")?
                     .map_err(|_| "ATTESTOR_PING_FAILED")?;
@@ -322,18 +329,37 @@ fn retry_after_session(current: u64, elapsed: Duration) -> (u64, u64) {
     (wait, wait.saturating_mul(2).min(MAX_RETRY_SECONDS))
 }
 
+/// The running CONTROL owns the native Credential Manager entry. A rotated or
+/// revoked key must end this attestor-only socket, not restart CONTROL or its
+/// Engine/Research children. Errors are fixed codes: never log bearer bytes.
+fn ensure_current_credential(
+    active: &str,
+    loaded: HostControlResult<Option<Zeroizing<String>>>,
+) -> Result<(), &'static str> {
+    match loaded {
+        Ok(Some(current)) if current.as_str() == active => Ok(()),
+        Ok(Some(_)) => Err("ATTESTOR_CREDENTIAL_ROTATED"),
+        Ok(None) => Err("ATTESTOR_CREDENTIAL_REVOKED"),
+        Err(_) => Err("ATTESTOR_CREDENTIAL_UNAVAILABLE"),
+    }
+}
+
 /// Best-effort by construction: a missing or disconnected attestor never
 /// changes CONTROL lifecycle, GitHub owner, or existing Research transport.
 pub async fn run(token: Zeroizing<String>, requests: mpsc::Sender<ObservationRequest>) {
     let mut retry_seconds = INITIAL_RETRY_SECONDS;
+    let mut token = Some(token);
     loop {
         if requests.is_closed() {
             return;
         }
         let started = Instant::now();
-        let outcome = tokio::select! {
-            outcome = run_session(&token, &requests) => outcome,
-            _ = requests.closed() => return,
+        let outcome = match token.as_deref() {
+            Some(token) => tokio::select! {
+                outcome = run_session(token, &requests) => outcome,
+                _ = requests.closed() => return,
+            },
+            None => Err("ATTESTOR_CREDENTIAL_REVOKED"),
         };
         if let Err(code) = outcome {
             eprintln!("CONTROL attestor unavailable: {code}; read-only evidence remains partial");
@@ -344,12 +370,50 @@ pub async fn run(token: Zeroizing<String>, requests: mpsc::Sender<ObservationReq
             _ = sleep(Duration::from_secs(wait)) => {},
             _ = requests.closed() => return,
         }
+        // Re-read after every disconnected session. Keeping only the initial
+        // bearer would make a replaced Credential Manager key unusable until
+        // a CONTROL restart, which can also disturb its owned child processes.
+        token = match load_native_attestor_token() {
+            Ok(current) => current,
+            Err(_) => {
+                eprintln!(
+                    "CONTROL attestor credential unavailable; read-only evidence remains partial"
+                );
+                None
+            }
+        };
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attestor_credential_rotation_is_fail_closed_and_never_echoes_secrets() {
+        let original = "a".repeat(64);
+        let replacement = "b".repeat(64);
+        assert_eq!(
+            ensure_current_credential(&original, Ok(Some(Zeroizing::new(original.clone())))),
+            Ok(())
+        );
+        assert_eq!(
+            ensure_current_credential(&original, Ok(Some(Zeroizing::new(replacement.clone())))),
+            Err("ATTESTOR_CREDENTIAL_ROTATED")
+        );
+        assert_eq!(
+            ensure_current_credential(&original, Ok(None)),
+            Err("ATTESTOR_CREDENTIAL_REVOKED")
+        );
+        let error = ensure_current_credential(
+            &original,
+            Err(crate::HostControlError::SecretStore(replacement.clone())),
+        )
+        .unwrap_err();
+        assert_eq!(error, "ATTESTOR_CREDENTIAL_UNAVAILABLE");
+        assert!(!error.contains(&original));
+        assert!(!error.contains(&replacement));
+    }
 
     #[test]
     fn attestor_reconnect_backoff_recovers_after_stable_session() {

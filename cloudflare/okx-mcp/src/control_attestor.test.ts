@@ -18,7 +18,7 @@ const controlStatus = () => ({
 });
 type Fault = "none" | "wrong_nonce" | "wrong_research_session" | "pid" | "sha" |
   "extra_status" | "extra_frame" | "future" | "expired" | "generation_changed" |
-  "invalid_process_generation" | "not_running" | "drop" | "close";
+  "invalid_process_generation" | "not_running" | "drop" | "close" | "rotate_inflight";
 
 async function run(fault: Fault = "none") {
   let attestorAttachment: any = {role: "control-attestor", admittedCredentialFingerprint: controlHash,
@@ -75,6 +75,9 @@ async function run(fault: Fault = "none") {
       lastResponse = response;
       queueMicrotask(() => {
         if (fault === "generation_changed") researchAttachment.generation++;
+        // The response was created under the old credential, but Edge's
+        // binding changes before the old CONTROL socket delivers it.
+        if (fault === "rotate_inflight") env.CONTROL_ATTEST_TOKEN_SHA256 = "a".repeat(64);
         void runtime.webSocketMessage(controlWs, JSON.stringify(response));
       });
     },
@@ -153,6 +156,28 @@ for (const fault of ["wrong_nonce", "wrong_research_session", "pid", "sha",
   check(fixture.observed.status === "UNVERIFIED" && !!fixture.observed.reason_code &&
     fixture.observed.pid === null && fixture.observed.process_generation === null,
     `${fault}: malformed/stale CONTROL observation must not be promoted`);
+}
+
+// A late answer after an in-place credential rotation must be discarded,
+// settle the active challenge with an explicit revoked reason, and close the
+// old CONTROL WSS. A new attestation must never reuse a prior PASS.
+{
+  const revoked = await run("rotate_inflight");
+  check(revoked.observed.status === "UNVERIFIED" &&
+    revoked.observed.reason_code === "CONTROL_ATTEST_CREDENTIAL_REVOKED" &&
+    revoked.observed.pid === null && revoked.observed.process_generation === null,
+    "in-flight credential rotation must report revoked rather than stale socket");
+  check(revoked.getControlClosed() === "attestor credential revoked" &&
+    (revoked.runtime as any).attestorPending.size === 0,
+    "old CONTROL WSS closed and in-flight challenge cleaned after revocation");
+  const stillRevoked: any = await (await revoked.runtime.fetch(new Request(
+    "https://internal/attestation/research"))).json();
+  check(stillRevoked.status === "UNVERIFIED" &&
+    stillRevoked.reason_code === "CONTROL_ATTEST_OFFLINE" &&
+    stillRevoked.pid === null,
+    "revoked generation cannot cache or replay a prior PASS");
+  check((await run()).observed.status === "PASS",
+    "new independently admitted attestor session can still PASS");
 }
 
 // Replayed observations have no pending challenge. A replay cannot silently
