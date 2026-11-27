@@ -685,6 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn research_starts_only_after_finite_supervisor_job_receipt() {
+        use futures_util::FutureExt as _;
         use tokio::io::AsyncWriteExt as _;
         let (mut writer, mut reader) = tokio::io::duplex(256);
         writer.write_all(SUPERVISOR_GATE).await.unwrap();
@@ -693,6 +694,30 @@ mod tests {
             supervisor_gate(&mut reader, Duration::from_secs(1))
                 .await
                 .is_ok()
+        );
+
+        // A partial receipt must not start Research. Even the complete marker
+        // is not authorization until CONTROL closes the stdin gate: a second
+        // frame or a bearer appended after it must remain rejectable.
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        let pending = supervisor_gate(&mut reader, Duration::from_secs(1));
+        tokio::pin!(pending);
+        writer.write_all(&SUPERVISOR_GATE[..8]).await.unwrap();
+        assert!(pending.as_mut().now_or_never().is_none());
+        writer.write_all(&SUPERVISOR_GATE[8..]).await.unwrap();
+        assert!(pending.as_mut().now_or_never().is_none());
+        drop(writer);
+        assert!(pending.await.is_ok(), "closed exact gate must release Research");
+
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        writer.write_all(SUPERVISOR_GATE).await.unwrap();
+        writer.write_all(b"unauthorized-extra-frame").await.unwrap();
+        drop(writer);
+        assert_eq!(
+            supervisor_gate(&mut reader, Duration::from_secs(1))
+                .await
+                .unwrap_err(),
+            "RESEARCH_SUPERVISOR_ASSIGNMENT_INVALID"
         );
 
         for invalid in [&b"READY\n"[..], &b"RESEARCH_HOST_JOB_ASSIGNED"[..]] {

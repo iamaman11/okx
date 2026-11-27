@@ -311,6 +311,60 @@ impl ResearchSupervisor {
         Ok(())
     }
 
+    /// Cleanup must close stdin *first*: if Job termination and KillProcess
+    /// both fail, an unopened Research gate still reaches EOF and the helper
+    /// never waits indefinitely on a blocked child.
+    fn stop_unreleased_child(child: &mut Child, job: Option<&AgentJob>) {
+        drop(child.stdin.take());
+        if let Some(job) = job {
+            let _ = job.terminate();
+        }
+        let _ = child.kill();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) if Instant::now() >= deadline => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    }
+
+    /// One indivisible ordering boundary: Job assignment is already complete,
+    /// and CONTROL must durably commit the generation before issuing the only
+    /// Research startup receipt. Both production launch and the real Windows
+    /// child test exercise this exact function.
+    fn persist_generation_and_release_gate(
+        &mut self,
+        next: ResearchDesiredState,
+        child: &mut Child,
+        job: &AgentJob,
+    ) -> HostControlResult<()> {
+        if let Err(error) = self.persist(next) {
+            Self::stop_unreleased_child(child, Some(job));
+            return Err(error);
+        }
+        // Research waits for this exact marker followed by EOF before
+        // creating its nested Job, credentials client or Edge connection.
+        let gate_result = (|| -> std::io::Result<()> {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "research startup gate missing",
+                )
+            })?;
+            stdin.write_all(HOST_JOB_ASSIGNED_MARKER)?;
+            stdin.flush()?;
+            drop(stdin);
+            Ok(())
+        })();
+        if let Err(error) = gate_result {
+            Self::stop_unreleased_child(child, Some(job));
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     fn running(&mut self) -> HostControlResult<bool> {
         let exit = match self.child.as_mut() {
             Some(child) => child.try_wait()?,
@@ -445,38 +499,15 @@ impl ResearchSupervisor {
         }
         let job = AgentJob::new()?;
         let mut child = command.spawn()?;
+        // AgentJob::assign already terminates and reaps on a failed assignment.
         job.assign(&mut child)?;
-        // The Research executable waits at this bounded stdin gate BEFORE it
-        // self-assigns its memory Job. Job assignment must therefore precede
-        // any Research runtime startup, and the marker must end with EOF.
-        let gate_result = (|| -> std::io::Result<()> {
-            let mut stdin = child.stdin.take().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "research startup gate missing",
-                )
-            })?;
-            stdin.write_all(HOST_JOB_ASSIGNED_MARKER)?;
-            stdin.flush()?;
-            drop(stdin);
-            Ok(())
-        })();
-        if let Err(error) = gate_result {
-            let _ = job.terminate();
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error.into());
-        }
+        // Persist the generation BEFORE granting the Research child permission
+        // to initialize its Edge session. The gate is released only inside
+        // this guarded operation, also exercised by the Windows child test.
         let pid = child.id();
         let mut next = self.desired.clone();
         next.process_generation = generation;
-        if let Err(error) = self.store.save(&next) {
-            let _ = job.terminate();
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-        self.desired = next;
+        self.persist_generation_and_release_gate(next, &mut child, &job)?;
         self.child = Some(child);
         self.job = Some(job);
         self.active_sha256 = Some(image.sha256);
@@ -940,6 +971,152 @@ mod tests {
         if std::env::var_os("OKX_RESEARCH_SUPERVISOR_TEST_CHILD").is_some() {
             std::thread::sleep(Duration::from_secs(25));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn research_supervisor_gate_probe_child() {
+        let Some(marker) = std::env::var_os("OKX_RESEARCH_SUPERVISOR_GATE_PROBE") else {
+            return;
+        };
+        let root = std::env::var_os("OKX_RESEARCH_SUPERVISOR_STATE_PROOF_ROOT").unwrap();
+        let mut receipt = Vec::new();
+        std::io::stdin()
+            .take(129)
+            .read_to_end(&mut receipt)
+            .unwrap();
+        if receipt == HOST_JOB_ASSIGNED_MARKER {
+            let generation = ResearchStateStore::new(Path::new(&root))
+                .read()
+                .ok()
+                .map(|state| state.process_generation);
+            fs::write(
+                PathBuf::from(marker),
+                format!("research-gate-released:{generation:?}"),
+            )
+            .unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn generation_commit_precedes_gate_and_failed_commit_never_releases() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-research-generation-gate-{}-{}",
+            std::process::id(),
+            fresh_scope().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let marker = root.join("research-gate-released");
+        let mut owner = ResearchSupervisor::at(root.clone(), root.join("runtime")).unwrap();
+        owner
+            .persist(ResearchDesiredState {
+                schema: RESEARCH_DESIRED_SCHEMA.into(),
+                desired_running: true,
+                expected_worker_sha256: Some("a".repeat(64)),
+                host_scope: Some("b".repeat(64)),
+                catalog: Some(CatalogBinding::HostScoped),
+                process_generation: 0,
+            })
+            .unwrap();
+        let previous = owner.desired.clone();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "research_supervisor::tests::research_supervisor_gate_probe_child",
+            ])
+            .env("OKX_RESEARCH_SUPERVISOR_GATE_PROBE", &marker)
+            .env("OKX_RESEARCH_SUPERVISOR_STATE_PROOF_ROOT", &root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let job = AgentJob::new().unwrap();
+        job.assign(&mut child).unwrap();
+        // Inject a real atomic-store validation failure while the child is
+        // waiting for its stdin gate. No production filesystem is touched.
+        fs::remove_file(&owner.store.path).unwrap();
+        fs::create_dir(&owner.store.path).unwrap();
+        let mut next = previous.clone();
+        next.process_generation = 1;
+        assert_eq!(
+            owner
+                .persist_generation_and_release_gate(next, &mut child, &job)
+                .unwrap_err()
+                .code(),
+            "RESEARCH_STATE_CORRUPT"
+        );
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(!marker.exists(), "uncommitted generation released Research gate");
+        assert_eq!(owner.desired, previous);
+        assert!(owner.child.is_none());
+        assert!(owner.job.is_none());
+        assert_eq!(owner.restart_attempt, 0);
+        drop(job);
+
+        // This time permit the exact same production helper to release a gate.
+        // The child reads the durable state immediately after that receipt and
+        // proves the saved generation preceded its right to start.
+        fs::remove_dir(&owner.store.path).unwrap();
+        owner.persist(previous).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "research_supervisor::tests::research_supervisor_gate_probe_child",
+            ])
+            .env("OKX_RESEARCH_SUPERVISOR_GATE_PROBE", &marker)
+            .env("OKX_RESEARCH_SUPERVISOR_STATE_PROOF_ROOT", &root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let job = AgentJob::new().unwrap();
+        job.assign(&mut child).unwrap();
+        let mut next = owner.desired.clone();
+        next.process_generation = 1;
+        owner
+            .persist_generation_and_release_gate(next, &mut child, &job)
+            .unwrap();
+        assert_eq!(owner.store.read().unwrap().process_generation, 1);
+        assert!(child.wait().unwrap().success());
+        assert_eq!(fs::read(&marker).unwrap(), b"research-gate-released:Some(1)");
+        drop(job);
+
+        // A delivery failure *after* the durable commit must not roll the
+        // generation backwards or block CONTROL indefinitely waiting for a
+        // child that never received its gate. The caller gets a typed error
+        // and may schedule its usual bounded restart with generation 2 saved.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "research_supervisor::tests::research_supervisor_sleeper_child",
+            ])
+            .env("OKX_RESEARCH_SUPERVISOR_TEST_CHILD", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let job = AgentJob::new().unwrap();
+        job.assign(&mut child).unwrap();
+        let mut next = owner.desired.clone();
+        next.process_generation = 2;
+        assert_eq!(
+            owner
+                .persist_generation_and_release_gate(next, &mut child, &job)
+                .unwrap_err()
+                .code(),
+            "IO_ERROR"
+        );
+        assert_eq!(owner.store.read().unwrap().process_generation, 2);
+        assert!(child.try_wait().unwrap().is_some());
+        assert_eq!(owner.restart_attempt, 0);
+        assert!(owner.retry_at.is_none());
+        drop(job);
+        drop(owner);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]
