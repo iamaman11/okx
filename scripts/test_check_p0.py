@@ -192,8 +192,14 @@ class FeedbackTests(unittest.TestCase):
         for names, expected in (
             (["docs/testing.md"], ("docs", "", "false")),
             (["cloudflare/okx-mcp/src/mcp.ts"], ("cloudflare", "mcp,wire,worker", "true")),
-            (["crates/okx-host-launcher/src/main.rs", "cloudflare/okx-mcp/src/mcp.ts"],
+            (["crates/okx-host-launcher/src/logging.rs", "cloudflare/okx-mcp/src/mcp.ts"],
              ("host-launcher", "host,mcp,wire,worker", "true")),
+            (["crates/okx-host-launcher/src/main.rs", "cloudflare/okx-mcp/src/mcp.ts"],
+             ("full", "expanded", "true")),
+            (["crates/okx-host-controller/src/attestor.rs", "cloudflare/okx-mcp/src/mcp.ts"],
+             ("host-controller", "host,mcp,wire,worker", "true")),
+            (["crates/okx-host-controller/src/runtime.rs", "cloudflare/okx-mcp/src/mcp.ts"],
+             ("full", "expanded", "true")),
             (["crates/okx-trade-execution/src/lib.rs", "crates/okx-analysis/src/lib.rs"],
              ("full", "expanded", "false")),
         ):
@@ -204,15 +210,27 @@ class FeedbackTests(unittest.TestCase):
 
     def test_host_source_uses_owner_and_consumer_not_expanded(self):
         for path in (
-            "crates/okx-host-controller/src/main.rs",
-            "crates/okx-host-controller/src/lifecycle/activation.rs",
-            "crates/okx-host-protocol/src/lib.rs",
-            "crates/okx-host-launcher/src/main.rs",
+            "crates/okx-host-controller/src/attestor.rs",
+            "crates/okx-host-controller/tests/research_supervisor.rs",
+            "crates/okx-host-protocol/tests/research_wire.rs",
+            "crates/okx-host-launcher/src/logging.rs",
             "crates/okx-host-launcher/src/stdio_capture.rs",
+            "crates/okx-host-launcher/tests/launcher_process.rs",
         ):
             self.assertEqual(select_draft("modified", path), {"host"})
             self.assertEqual(select_draft("added", path), {"host"})
             self.assertEqual(select_draft("removed", path), {"expanded"})
+        for path in (
+            "crates/okx-host-controller/src/main.rs",
+            "crates/okx-host-controller/src/lifecycle/activation.rs",
+            "crates/okx-host-controller/src/runtime.rs",
+            "crates/okx-host-controller/src/artifact.rs",
+            "crates/okx-host-controller/src/desired.rs",
+            "crates/okx-host-protocol/src/lib.rs",
+            "crates/okx-host-launcher/src/main.rs",
+            "crates/okx-host-launcher/src/lib.rs",
+        ):
+            self.assertEqual(select_draft("modified", path), {"expanded"})
         for path in (
             "crates/okx-host-controller/Cargo.toml",
             "crates/okx-host-launcher/build.rs",
@@ -224,7 +242,7 @@ class FeedbackTests(unittest.TestCase):
 
     def test_host_protocol_feedback_runs_bridge_without_engine_or_finance(self):
         with patch("check_p0.tests", return_value="") as run_tests:
-            execute(select_draft("modified", "crates/okx-host-protocol/src/lib.rs"))
+            execute(select_draft("modified", "crates/okx-host-protocol/tests/research_wire.rs"))
         packages = [call.args[0] for call in run_tests.call_args_list]
         self.assertEqual(packages, [
             "okx-host-protocol", "okx-host-launcher", "okx-host-controller", "okx-bridge-mcp",
