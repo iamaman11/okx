@@ -153,12 +153,19 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(researchComponent, /test-research-cargo-fingerprint-evidence\.ps1/);
   assert.match(researchFingerprintFixture, /RESEARCH_FINGERPRINT_SYNTHETIC_PARSER=PASS/);
   assert.match(researchFingerprintFixture, /FsStatusOutdated/);
+  assert.match(researchFingerprintFixture, /StaleItem\(ChangedFile/);
+  assert.match(researchFingerprintFixture, /StaleItem\(MissingFile/);
+  assert.match(researchFingerprintFixture, /StaleItem\(FailedToReadMetadata/);
+  assert.match(researchFingerprintFixture, /StaleDepFingerprint/);
+  assert.match(researchFingerprintFixture, /StaleItem\(Unknown/);
   assert.match(researchFingerprintFixture, /UnitDependencyInfoChanged/);
   assert.match(researchFingerprintFixture, /fingerprint error for okx-research-service/);
   assert.match(researchFingerprintFixture, /fingerprint error for untrusted-other/);
   assert.match(researchFingerprintFixture, /fingerprint error for okx-research v0\.1\.0/);
   assert.match(researchFingerprintFixture, /checking a different unit/);
   assert.match(researchFingerprintFixture, /RESEARCH_FINGERPRINT_REASON_CLASSIFICATION_MISMATCH/);
+  assert.match(researchFingerprintFixture, /RESEARCH_FINGERPRINT_CARGO100_ANCHOR_NOT_FOUND/);
+  assert.match(researchFingerprintFixture, /RESEARCH_FINGERPRINT_LEGACY_ANCHOR_MISLABELED/);
   // Cargo fingerprint logging cannot be configured at job scope, because
   // Swatinem/rust-cache includes env variables in its key. Three commands
   // only get bounded INFO logs after cache restoration, and raw traces may
@@ -200,7 +207,7 @@ function validate(yaml, fileNames) {
     'RELEASE_FINGERPRINT_RAW_PATHS_MUST_NOT_ENTER_UPLOADED_BUILD_LOG');
   assert.match(researchFingerprint, /Select-Object -First 513/);
   assert.match(researchFingerprint, /Select-Object -First 33/);
-  assert.match(researchFingerprint, /source_utc=\{1:yyyy-MM-ddTHH:mm:ss\.fffZ\}/);
+  assert.match(researchFingerprint, /source_utc=\{2:yyyy-MM-ddTHH:mm:ss\.fffZ\}/);
   assert.match(researchFingerprint, /Sort-Object -Property LastWriteTimeUtc -Descending/);
   assert.match(researchFingerprint, /illustrative mtime sample/);
   assert.match(researchFingerprint, /NOT per-unit freshness proof/);
@@ -1431,6 +1438,69 @@ function validateFingerprintErrorEvidence(script) {
     'MTIME_SAMPLE_MUST_NOT_CLAIM_UNIT_FRESHNESS_PROOF');
 }
 validateFingerprintErrorEvidence(researchFingerprint);
+// Cargo 1.100 changed the default on-disk build-unit directory layout. The
+// original snapshot only inspected legacy `.fingerprint/<pkg>-<hash>` and
+// falsely reported six depinfo_count=0 samples despite an exact restored key.
+// Never treat that old path as authoritative for a current Cargo unit.
+function validateResearchCargoLayoutEvidence(script) {
+  for (const required of [
+    "Join-Path $profileRoot 'build'",
+    'Join-Path $modernBuild $crate',
+    "Join-Path $unit.FullName 'fingerprint'",
+    "Get-ChildItem -LiteralPath $unitFingerprint -File -Filter 'dep-*'",
+    "if ($layout -eq 'cargo100')",
+    "'fs_status_unspecified'",
+    String.raw`FsStatusOutdated\(StaleItem\(ChangedFile\b`,
+    String.raw`FsStatusOutdated\(StaleItem\(MissingFile\b`,
+    String.raw`FsStatusOutdated\(StaleItem\(FailedToReadMetadata\b`,
+    String.raw`FsStatusOutdated\(StaleDepFingerprint\b`,
+  ]) {
+    assert.ok(script.includes(required), `CARGO_1_100_LAYOUT_OR_STALE_REASON_MISSING:${required}`);
+  }
+  assert.match(script, /layout=\$layout/);
+  assert.match(script, /sample_limit_reached/);
+  assert.match(script, /NOT per-unit freshness proof/);
+}
+validateResearchCargoLayoutEvidence(researchFingerprint);
+function validateFingerprintLayoutFixture(fixture) {
+  for (const required of [
+    '$env:RUNNER_TEMP',
+    'target/release/build/okx-research-domain/unit123/fingerprint',
+    'target/release/.fingerprint/okx-research-protocol-unit456',
+    'Write-ResearchCargoMtimeSnapshot -Profile release',
+    'layout=cargo100 source_utc=',
+    'layout=legacy source_utc=',
+    'RESEARCH_FINGERPRINT_CARGO100_ANCHOR_NOT_FOUND',
+    'RESEARCH_FINGERPRINT_LEGACY_ANCHOR_MISLABELED',
+    '$env:GITHUB_WORKSPACE = $priorWorkspace',
+    '$env:CARGO_TARGET_DIR = $priorTarget',
+    '$env:GITHUB_STEP_SUMMARY = $priorSummary',
+    'Remove-Item -LiteralPath $fixtureRoot -Recurse -Force',
+  ]) {
+    assert.ok(fixture.includes(required), `CARGO_100_EXECUTABLE_LAYOUT_FIXTURE_MISSING:${required}`);
+  }
+}
+validateFingerprintLayoutFixture(researchFingerprintFixture);
+for (const [before, after, reason] of [
+  ['layout=cargo100 source_utc=', 'layout=legacy source_utc=', 'MODERN_LAYOUT_RUNTIME_ASSERT_REQUIRED'],
+  ['layout=legacy source_utc=', 'layout=cargo100 source_utc=', 'LEGACY_LAYOUT_RUNTIME_ASSERT_REQUIRED'],
+  ['$env:GITHUB_WORKSPACE = $priorWorkspace', '$env:GITHUB_WORKSPACE = $fixtureRoot', 'RESTORE_WORKSPACE_REQUIRED'],
+  ['Remove-Item -LiteralPath $fixtureRoot -Recurse -Force', 'Write-Host TMP_LEFT_BEHIND', 'CLEAN_ONLY_OWNED_TEMP_REQUIRED'],
+]) {
+  assert.ok(researchFingerprintFixture.includes(before), `CARGO_100_FIXTURE_MUTATION_NOT_FOUND:${reason}`);
+  assert.throws(() => validateFingerprintLayoutFixture(researchFingerprintFixture.replace(before, after)), reason);
+}
+for (const [before, after, reason] of [
+  ["Join-Path $profileRoot 'build'", "Join-Path $profileRoot '.fingerprint'", 'CARGO_100_PATH_REQUIRED'],
+  ["Join-Path $unit.FullName 'fingerprint'", "Join-Path $unit.FullName 'stale'", 'CARGO_100_UNIT_FINGERPRINT_REQUIRED'],
+  ["Get-ChildItem -LiteralPath $unitFingerprint -File -Filter 'dep-*'", "Get-ChildItem -LiteralPath $legacyFingerprints -File -Filter 'dep-*'", 'CARGO_100_DEPINFO_REQUIRED'],
+  ["if ($layout -eq 'cargo100')", "if ($layout -eq 'legacy')", 'NO_LEGACY_ANCHOR_SUBSTITUTION'],
+  [String.raw`FsStatusOutdated\(StaleItem\(ChangedFile\b`, String.raw`\bChangedFile\b`, 'NESTED_ENUM_NOT_ARBITRARY_PATH'],
+  ["'fs_status_unspecified'", "'changed_file_mtime'", 'UNKNOWN_STALE_ITEM_NOT_INVENTED'],
+]) {
+  assert.ok(researchFingerprint.includes(before), `CARGO_100_NEGATIVE_MUTATION_NOT_FOUND:${reason}`);
+  assert.throws(() => validateResearchCargoLayoutEvidence(researchFingerprint.replace(before, after)), reason);
+}
 for (const [before, after, reason] of [
   ['fingerprint (dirty|error) for', 'fingerprint dirty for', 'ERROR_HEADERS_MUST_NOT_DISAPPEAR'],
   ['$Counts.workspace[$crate].error_headers++', 'Write-Host raw_error', 'ERROR_COUNT_MUST_BE_PER_CRATE'],
