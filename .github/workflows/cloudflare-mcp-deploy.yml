@@ -44,8 +44,10 @@ jobs:
         env:
           OKX_RESEARCH_RUNTIME_TOKEN_SHA256: ${{ secrets.OKX_RESEARCH_RUNTIME_TOKEN_SHA256 }}
           OKX_CONTROL_ATTEST_TOKEN_SHA256: ${{ secrets.OKX_CONTROL_ATTEST_TOKEN_SHA256 }}
+          OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
         run: |
           set -euo pipefail
+          test -n "$OKX_MCP_OWNER_SECRET" || { echo 'MCP owner secret missing'; exit 25; }
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN missing"; exit 20; }
           # Only the public SHA-256 fingerprint is supplied. Never pass or
           # print the Research bearer outside its Windows Credential Manager.
@@ -72,13 +74,11 @@ jobs:
           INITIALIZE_V2: ${{ inputs.initialize_clean_v2 }}
           INSTALLATION_ID: ${{ inputs.installation_id }}
           BUNDLE_SHA256: ${{ inputs.accepted_bundle_sha256 }}
-          OKX_MCP_OWNER_SECRET: ${{ secrets.OKX_MCP_OWNER_SECRET }}
         run: |
           set -euo pipefail
           if [[ "$INITIALIZE_V2" == "true" ]]; then
             [[ "$INSTALLATION_ID" =~ ^[A-Za-z][A-Za-z0-9_-]{7,63}$ ]] || { echo 'invalid native installation identity'; exit 23; }
             [[ "$BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'accepted GitHub bundle fingerprint required'; exit 24; }
-            test -n "$OKX_MCP_OWNER_SECRET" || { echo 'MCP owner secret missing'; exit 25; }
           fi
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -152,7 +152,6 @@ jobs:
           INSTALLATION_ID: ${{ inputs.installation_id }}
         run: |
           set -euo pipefail
-          test -n "$OKX_MCP_OWNER_SECRET" || { echo "MCP owner secret missing"; exit 25; }
           # New Worker version propagation is not instantaneous. HTTP 200
           # plus jq's object construction is NOT evidence that new fields exist:
           # missing fields become null and previously passed deploy acceptance.
@@ -189,7 +188,8 @@ jobs:
                 (.explicit_pause | type) == "boolean" and
                 (.identity_verified | type) == "boolean"))
             ' >/dev/null 2>&1 <<< "$inspected"; then
-              jq -e -c '{schema,state,installation_id,accounts_total,revision,release_present,account_access,real_accounts_enabled,all_new_real_risk_paused,risk}' <<< "$inspected"
+              # The typed jq predicate above is the receipt; never log the
+              # private installation identity or per-account access records.
               echo "OWNER_POLICY_READBACK_CURRENT=PASS"
               exit 0
             fi
