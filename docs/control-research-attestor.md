@@ -32,9 +32,15 @@ or Research runtime sockets.
 
 1. Complete the required source, Windows, Worker, and negative protocol CI.
    Do not infer a production `PASS` from CI fixtures alone.
-2. Deploy the accepted Worker version with the independent
-   `CONTROL_ATTEST_TOKEN_SHA256` fingerprint. It must be exactly 64 lowercase
-   hex characters corresponding to a **new** CONTROL-only token generated from
+2. In the protected GitHub deploy environment set the optional
+   `OKX_CONTROL_ATTEST_TOKEN_SHA256` secret to the independent fingerprint;
+   the existing `cloudflare-mcp-deploy.yml` passes it as
+   `CONTROL_ATTEST_TOKEN_SHA256` only into the release configuration. Missing
+   secret generates the explicit invalid `disabled` binding and keeps production
+   attestation disabled, even if an earlier out-of-band Wrangler secret used
+   the same name (Cloudflare replaces that secret when deploying this variable).
+   Deploy the accepted Worker version with this fingerprint. It must be
+   exactly 64 lowercase hex characters corresponding to a **new** CONTROL-only token generated from
    32 cryptographically random bytes and encoded as 64 lowercase hex digits;
    never use the GitHub, Engine, or Research bearer. Store the actual token
    only in Windows Credential Manager using the explicit CONTROL

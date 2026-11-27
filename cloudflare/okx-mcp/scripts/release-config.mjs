@@ -2,10 +2,14 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// A variable with this name replaces any older out-of-band Wrangler secret.
+// This value cannot authenticate: Worker and DO require exactly 64 lowercase hex.
+const DISABLED_CONTROL_ATTEST_FINGERPRINT = 'disabled';
+
 // The only deploy-specific values come from the accepted Git tree and a
-// protected GitHub environment secret containing the *fingerprint*, never the
-// Research bearer. Existing OAuth KV, Durable Object and bindings survive.
-export function releaseConfig(config, sourceTree, researchFingerprint) {
+// protected GitHub environment secrets containing *fingerprints*, never the
+// Research or CONTROL bearers. Existing OAuth KV, Durable Object and bindings survive.
+export function releaseConfig(config, sourceTree, researchFingerprint, controlFingerprint) {
   if (!/^[0-9a-f]{40}$/.test(sourceTree)) throw Error('invalid release source tree');
   if (!config || typeof config !== 'object' || Array.isArray(config)
       || config.name !== 'okx-cloudflare-mcp' || config.main !== 'src/index.ts') {
@@ -23,11 +27,23 @@ export function releaseConfig(config, sourceTree, researchFingerprint) {
   if (researchFingerprint === vars.RUNTIME_TOKEN_SHA256) {
     throw Error('Research and Engine runtime fingerprints must be distinct');
   }
+  const controlEnabled = controlFingerprint !== undefined && controlFingerprint !== '';
+  if (controlEnabled && (typeof controlFingerprint !== 'string'
+      || !/^[0-9a-f]{64}$/.test(controlFingerprint))) {
+    throw Error('optional protected CONTROL attestor fingerprint invalid');
+  }
+  if (controlEnabled && (controlFingerprint === vars.RUNTIME_TOKEN_SHA256
+      || controlFingerprint === researchFingerprint)) {
+    throw Error('CONTROL attestor fingerprint must be distinct from runtime owners');
+  }
   if (Object.hasOwn(vars, 'RELEASE_SOURCE_TREE')) {
     throw Error('release tree must be owned exclusively by exact deploy workflow');
   }
   if (Object.hasOwn(vars, 'RESEARCH_RUNTIME_TOKEN_SHA256')) {
     throw Error('Research fingerprint must be owned exclusively by protected deploy environment');
+  }
+  if (Object.hasOwn(vars, 'CONTROL_ATTEST_TOKEN_SHA256')) {
+    throw Error('CONTROL attestor fingerprint must be owned exclusively by protected deploy environment');
   }
   if (!Array.isArray(config.kv_namespaces)
       || !config.kv_namespaces.some((binding) => binding.binding === 'OAUTH_KV' && binding.id)
@@ -38,6 +54,8 @@ export function releaseConfig(config, sourceTree, researchFingerprint) {
   return { ...config, vars: {
     ...vars, RELEASE_SOURCE_TREE: sourceTree,
     RESEARCH_RUNTIME_TOKEN_SHA256: researchFingerprint,
+    CONTROL_ATTEST_TOKEN_SHA256: controlEnabled
+      ? controlFingerprint : DISABLED_CONTROL_ATTEST_FINGERPRINT,
   } };
 }
 
@@ -46,7 +64,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const sourceTree = process.argv[2];
   const canonical = JSON.parse(readFileSync('wrangler.jsonc', 'utf8'));
   const config = releaseConfig(canonical, sourceTree,
-    process.env.OKX_RESEARCH_RUNTIME_TOKEN_SHA256);
+    process.env.OKX_RESEARCH_RUNTIME_TOKEN_SHA256,
+    process.env.OKX_CONTROL_ATTEST_TOKEN_SHA256);
   writeFileSync(process.argv[3], JSON.stringify(config, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   console.log('RELEASE_CONFIG_BINDINGS=VERIFIED');
 }

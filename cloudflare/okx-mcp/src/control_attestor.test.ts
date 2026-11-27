@@ -145,11 +145,12 @@ for (const event of ["webSocketClose", "webSocketError"] as const) {
   check(!JSON.stringify(fixture.challenge).includes(controlHash), "challenge omits credential fingerprint");
 }
 
-// Missing configuration remains dormant and never probes runtime sockets.
-{
-  const runtime = new RuntimeSession({getWebSockets: () => {throw Error("disabled attestor looked at sockets");}} as any, {} as any);
+// Missing or explicitly invalid configuration remains dormant, even when
+// an earlier out-of-band Worker secret used this same binding name.
+for (const env of [{}, {CONTROL_ATTEST_TOKEN_SHA256: "disabled"}]) {
+  const runtime = new RuntimeSession({getWebSockets: () => {throw Error("disabled attestor looked at sockets");}} as any, env as any);
   const result: any = await (await runtime.fetch(new Request("https://internal/attestation/research"))).json();
-  check(result.reason_code === "CONTROL_ATTEST_NOT_CONFIGURED", "absent credential remains dormant");
+  check(result.reason_code === "CONTROL_ATTEST_NOT_CONFIGURED", "invalid or absent credential remains dormant");
 }
 
 // Worker must refuse unauthenticated /attestor before constructing a DO stub.
@@ -164,6 +165,11 @@ for (const event of ["webSocketClose", "webSocketError"] as const) {
     check([401,426].includes(result.status), "unauthorized attestor rejected at Worker");
   }
   check(calls === 0, "unauthenticated attestor never bills Durable Object");
+  const disabled = await defaultHandler.fetch(new Request("https://fixture/attestor", {
+    headers: {upgrade: "websocket", authorization: "Bearer wrong"},
+  }), {...env, CONTROL_ATTEST_TOKEN_SHA256: "disabled"});
+  check(disabled.status === 503 && calls === 0,
+    "explicit disabled sentinel blocks stale Worker secret before Durable Object");
   const collided = await defaultHandler.fetch(new Request("https://fixture/attestor", {
     headers: {upgrade: "websocket", authorization: "Bearer wrong"},
   }), {...env, CONTROL_ATTEST_TOKEN_SHA256: researchHash});
