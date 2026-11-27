@@ -1119,6 +1119,161 @@ mod tests {
     }
 
     #[test]
+    fn golden_named_momentum_replay_preserves_money_and_artifact_identity() {
+        // Independent next-open oracle for an original, registered strategy.
+        // Close 90 at bar 1 requests SHORT at open 80 on bar 2. Close 100
+        // after close 80 on bar 3 requests LONG at open 110 on bar 4.
+        // The reversal is one BUY of two units, not two independent fills.
+        let opens: [f64; 5] = [100.0, 100.0, 80.0, 90.0, 110.0];
+        let closes: [f64; 5] = [100.0, 90.0, 80.0, 100.0, 120.0];
+        let bars = (0..5)
+            .map(|i| Bar {
+                time: i as u64 * 60_000,
+                open: opens[i],
+                high: opens[i].max(closes[i]) + 1.0,
+                low: opens[i].min(closes[i]) - 1.0,
+                close: closes[i],
+                volume: 1.0,
+                funding_rate: Some(if i == 2 { 0.01 } else { 0.0 }),
+            })
+            .collect::<Vec<_>>();
+        let mut spec = spec();
+        spec.strategy_id = "close_momentum".into();
+        spec.parameters = EmaParameters { fast: 1, slow: 2 }.into();
+        spec.mechanics = Mechanics::Linear {
+            contract_multiplier: 1.0,
+        };
+        spec.timeframe_ms = 60_000;
+        spec.costs = Costs {
+            maker_fee_bps: 0.0,
+            taker_fee_bps: 100.0,
+            slippage_bps: 0.0,
+            observed_funding: true,
+        };
+
+        let result = replay(&bars, &spec, 1, 5, &|| false).unwrap();
+        assert_eq!(result.code_version, CAUSAL_REPLAY_VERSION);
+        assert_eq!(result.trades.len(), 2);
+        assert_eq!(
+            result
+                .trades
+                .iter()
+                .map(|t| (t.time, t.side, t.quantity, t.price, t.fee, t.reason.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (120_000, -1, 1.0, 80.0, 0.8, "next_bar_signal"),
+                (240_000, 1, 2.0, 110.0, 2.2, "next_bar_signal")
+            ]
+        );
+        // Independent exact-Decimal oracle:
+        // short entry fee 80 * .01 = .8; reversal fee 220 * .01 = 2.2;
+        // funding on the short -1 * 80 * .01 = -.8 (income of +.8);
+        // closing equity 10000 + 80 - .8 + .8 - 220 - 2.2 + 120
+        // = 9977.8. No historical fee/rule claims are implied.
+        assert_eq!(result.summary.pnl_exact, "-22.2");
+        assert_eq!(result.summary.fees_exact, "3");
+        assert_eq!(result.summary.funding_exact, "0.8");
+        assert_eq!(result.summary.turnover, 300.0);
+        assert_eq!(result.summary.trades, 2);
+        assert_eq!(result.equity.len(), 4);
+        for (actual, (time, expected)) in result.equity.iter().zip([
+            (60_000, 10000.0),
+            (120_000, 10000.0),
+            (180_000, 9980.0),
+            (240_000, 9977.8),
+        ]) {
+            assert_eq!(actual.0, time);
+            assert!((actual.1 - expected).abs() < 1e-9);
+        }
+        let audit = crate::economic_audit::audit_replay(
+            &bars,
+            &spec,
+            &result,
+            "USDT",
+            1,
+            5,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(audit.net_exact, result.summary.pnl_exact);
+        assert_eq!(audit.fees_exact, result.summary.fees_exact);
+
+        // Artifact IDs are content-derived: identical inputs repeat exactly;
+        // a changed source observation or fee assumption cannot reuse a prior
+        // dataset/result digest. No unverified literal SHA is hard-coded.
+        let repeated = replay(&bars, &spec, 1, 5, &|| false).unwrap();
+        assert_eq!(result.dataset_hash, repeated.dataset_hash);
+        assert_eq!(result.hash, repeated.hash);
+        assert!(result.hash.starts_with("sha256:"));
+        assert_eq!(result.hash.len(), 71);
+        let mut different_cost = spec.clone();
+        different_cost.costs.taker_fee_bps = 200.0;
+        let repriced = replay(&bars, &different_cost, 1, 5, &|| false).unwrap();
+        assert_eq!(result.dataset_hash, repriced.dataset_hash);
+        assert_ne!(result.hash, repriced.hash);
+        assert_ne!(result.summary.pnl_exact, repriced.summary.pnl_exact);
+        let mut revised_bars = bars;
+        revised_bars[2].funding_rate = Some(0.02);
+        let revised = replay(&revised_bars, &spec, 1, 5, &|| false).unwrap();
+        assert_ne!(result.dataset_hash, revised.dataset_hash);
+        assert_ne!(result.hash, revised.hash);
+    }
+
+    #[test]
+    fn golden_graph_missing_signal_hold_vs_explicit_flat_preserves_fee_oracle() {
+        // The first close-to-close return is positive. Later equal closes
+        // yield 0/0, an explicit missing signal; HOLD must retain the long,
+        // while FLAT sells it at the NEXT open, never at the missing close.
+        let opens: [f64; 5] = [100.0, 100.0, 100.0, 120.0, 130.0];
+        let closes: [f64; 5] = [100.0, 110.0, 110.0, 110.0, 90.0];
+        let bars = (0..5)
+            .map(|i| Bar {
+                time: i as u64 * 60_000,
+                open: opens[i],
+                high: opens[i].max(closes[i]) + 1.0,
+                low: opens[i].min(closes[i]) - 1.0,
+                close: closes[i],
+                volume: 1.0,
+                funding_rate: None,
+            })
+            .collect::<Vec<_>>();
+        let mut graph = graph_spec();
+        graph.graph.graph.steps.insert(
+            1,
+            serde_json::from_value(serde_json::json!({
+                "id":"self_ratio", "op":"divide_series", "input":"r", "other":"r"
+            }))
+            .unwrap(),
+        );
+        graph.graph.graph.steps[2].input = "self_ratio".into();
+        graph.execution.mechanics = Mechanics::Spot;
+        graph.execution.timeframe_ms = 60_000;
+        graph.execution.costs = Costs {
+            maker_fee_bps: 0.0,
+            taker_fee_bps: 100.0,
+            slippage_bps: 0.0,
+            observed_funding: false,
+        };
+        let hold = replay_graph(&bars, &graph, 2, 5, &|| false).unwrap();
+        assert_eq!(hold.trades.len(), 1);
+        assert_eq!(hold.trades[0].time, 120_000);
+        assert_eq!(hold.trades[0].side, 1);
+        assert_eq!(hold.summary.pnl_exact, "-11");
+        assert_eq!(hold.summary.fees_exact, "1");
+
+        graph.graph.missing = MissingSignalPolicy::Flat;
+        let flat = replay_graph(&bars, &graph, 2, 5, &|| false).unwrap();
+        assert_eq!(flat.trades.len(), 2);
+        assert_eq!(flat.trades[1].time, 180_000);
+        assert_eq!(flat.trades[1].side, -1);
+        assert_eq!(flat.trades[1].price, 120.0);
+        assert_eq!(flat.summary.pnl_exact, "17.8");
+        assert_eq!(flat.summary.fees_exact, "2.2");
+        assert_eq!(hold.dataset_hash, flat.dataset_hash);
+        assert_ne!(hold.hash, flat.hash);
+    }
+
+    #[test]
     fn c15_identical_seed_and_inputs_repeat_exact_financial_hashes() {
         let input = bars();
         let parameters = spec();
