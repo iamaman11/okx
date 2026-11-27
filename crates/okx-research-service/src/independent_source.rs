@@ -594,7 +594,7 @@ mod tests {
             public_body_limit(PUBLIC_CANDLES_PATH, &full),
             MAX_PUBLIC_BYTES
         );
-        assert!(MAX_PUBLIC_INSTRUMENTS_BYTES < MAX_FRAME_BYTES);
+        const { assert!(MAX_PUBLIC_INSTRUMENTS_BYTES < MAX_FRAME_BYTES) };
     }
 
     const RECORDED: &str = r#"{"code":"0","msg":"","data":[["1700000060000","100","120","90","110","2","200","220","1"],["1700000000000","100","110","95","105","1","100","1"]]}"#;
