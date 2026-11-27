@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use okx_github::GitHubClient;
 use okx_host_controller::{
     HostControlResult,
-    auth::{load_native_github_token, store_native_github_token},
+    auth::{load_native_github_token, store_native_attestor_token, store_native_github_token},
     legacy_bootstrap,
     lifecycle_executor::{HostExecutor, install_current_executable, recover_existing_controller},
     root_migration,
@@ -38,6 +38,10 @@ enum Command {
 
     /// Store the GitHub control token from stdin in Windows Credential Manager.
     SetGithubToken,
+
+    /// Explicitly store the independent read-only Edge attestor bearer.
+    /// Existing installations remain unchanged until this is invoked.
+    SetAttestorToken,
 
     /// One-shot staged activator for a previously verified controller update.
     ActivateControllerUpdate {
@@ -109,6 +113,22 @@ async fn run(cli: Cli) -> HostControlResult<()> {
                 "{}",
                 serde_json::json!({
                     "schema": "okx.host-control.github-token/v1",
+                    "stored": true
+                })
+            );
+        }
+        Command::SetAttestorToken => {
+            let mut token = read_stdin()?;
+            while matches!(token.as_bytes().last(), Some(b'\r' | b'\n')) {
+                token.pop();
+            }
+            let result = store_native_attestor_token(&token);
+            token.zeroize();
+            result?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "okx.host-control.attestor-token/v1",
                     "stored": true
                 })
             );

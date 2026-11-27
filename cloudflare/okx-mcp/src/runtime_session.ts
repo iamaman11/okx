@@ -4,9 +4,13 @@ import {validGovernance,accessEnabled,validLimits} from "./account_governance.js
 import { handleNativeRiskCommand } from "./risk_authority.js";
 import {
   ACK_DEADLINE_MS,
+  CONTROL_ATTEST_DEADLINE_MS,
+  CONTROL_ATTEST_FRAME_SCHEMA,
+  type ControlAttestorAttachment,
   type Env,
   FRAME_SCHEMA,
   type Json,
+  isObject,
   MAX_BODY_BYTES,
   MAX_INFLIGHT,
   MAX_READ_INFLIGHT,
@@ -40,6 +44,58 @@ function credentialFingerprint(value: unknown): string | null {
 }
 
 type RuntimeOwner = "engine" | "research";
+type AttestationResult = {
+  schema: "okx.research.attestation/v1";
+  status: "PASS" | "UNVERIFIED";
+  reason_code: string | null;
+  pid: number | null;
+  active_worker_sha256: string | null;
+  installed_worker_sha256: string | null;
+  process_generation: number | null;
+  observed_at_ms: number | null;
+  research_connection_generation: number | null;
+};
+type AttestorPending = {
+  requestId: string;
+  nonce: string;
+  generation: number;
+  sessionId: string;
+  research: { sessionId: string; generation: number; pid: number; sha256: string };
+  issuedAtMs: number;
+  deadlineMs: number;
+  resolve: (value: AttestationResult) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+const ATTEST_PENDING_LIMIT = 3;
+const ATTEST_FRAME_LIMIT_BYTES = 8 * 1024;
+const CONTROL_STATUS_FIELDS = ["active_worker_sha256", "catalog_mode", "desired_running", "installed_worker_sha256", "last_error", "phase", "pid", "process_generation", "retry_in_ms", "schema"];
+const CONTROL_REPLY_FIELDS = ["connection_generation", "nonce", "observed_at_ms", "request_id", "research_connection_generation", "research_session_id", "schema", "session_id", "status", "type"];
+function exactFields(value: Record<string, unknown>, names: string[]): boolean {
+  return Object.keys(value).sort().join(",") === names.join(",");
+}
+function validUnsigned(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function validResearchStatus(value: unknown): value is Record<string, unknown> {
+  if (!isObject(value) || !exactFields(value, CONTROL_STATUS_FIELDS)) return false;
+  const sha = (v: unknown) => v === null || (typeof v === "string" && /^[0-9a-f]{64}$/.test(v));
+  const pid = value.pid;
+  return value.schema === "okx.host-control.research-runtime/v1" &&
+    typeof value.desired_running === "boolean" && validUnsigned(value.process_generation) &&
+    (pid === null || (validUnsigned(pid) && pid > 0 && pid <= 4_294_967_295)) &&
+    sha(value.active_worker_sha256) && sha(value.installed_worker_sha256) &&
+    ["STOPPED", "STARTING", "RUNNING_UNVERIFIED", "RESTART_WAIT", "INVALID_PROVENANCE"].includes(String(value.phase)) &&
+    ["HOST_INDEPENDENT", "EXISTING_SCOPED"].includes(String(value.catalog_mode)) &&
+    (value.retry_in_ms === null || (validUnsigned(value.retry_in_ms) && value.retry_in_ms <= 600_000)) &&
+    (value.last_error === null || (typeof value.last_error === "string" && /^[A-Z0-9_]{1,128}$/.test(value.last_error))) &&
+    (pid === null || (Number(value.process_generation) > 0 && value.active_worker_sha256 !== null)) &&
+    (value.phase !== "RUNNING_UNVERIFIED" || pid !== null);
+}
+function unverified(reason_code: string, research_connection_generation: number | null = null): AttestationResult {
+  return {schema: "okx.research.attestation/v1", status: "UNVERIFIED", reason_code,
+    pid: null, active_worker_sha256: null, installed_worker_sha256: null,
+    process_generation: null, observed_at_ms: null, research_connection_generation};
+}
 function ownerOfflineReason(owner: RuntimeOwner): string {
   return owner === "research" ? "RESEARCH_RUNTIME_OFFLINE" : "RUNTIME_OFFLINE";
 }
@@ -77,6 +133,9 @@ export class RuntimeSession {
   private state: any;
   private env: Env;
   private pending = new Map<string, Pending>();
+  // Ephemeral, read-only challenges. Hibernation drops the map and therefore
+  // fails closed: a late/replayed response cannot satisfy a new request.
+  private attestorPending = new Map<string, AttestorPending>();
   private admissions = { engine: new OwnerAdmission(), research: new OwnerAdmission() };
 
   constructor(state: any, env: Env) {
@@ -132,6 +191,12 @@ export class RuntimeSession {
     }
     if (url.pathname === "/runtime") {
       return this.acceptRuntime(request);
+    }
+    if (url.pathname === "/attestor") {
+      return this.acceptAttestor(request);
+    }
+    if (url.pathname === "/attestation/research" && request.method === "GET") {
+      return Response.json(await this.attestResearch(), {headers: {"cache-control": "no-store"}});
     }
     if (url.pathname === "/status") {
       const observed=await this.status(url.searchParams.get("probe") === "1",
@@ -246,6 +311,196 @@ export class RuntimeSession {
     return new Response(null, { status: 101, webSocket: client } as any);
   }
 
+  private async acceptAttestor(request: Request): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket")
+      return new Response("websocket required", {status: 426});
+    const control = credentialFingerprint(this.env.CONTROL_ATTEST_TOKEN_SHA256);
+    const engine = credentialFingerprint(this.env.RUNTIME_TOKEN_SHA256);
+    const research = credentialFingerprint(this.env.RESEARCH_RUNTIME_TOKEN_SHA256);
+    if (!control || control === engine || control === research)
+      return new Response("attestor disabled", {status: 503});
+    const auth = request.headers.get("authorization") ?? "";
+    if (!auth.startsWith("Bearer ") || auth.length > 512)
+      return new Response("unauthorized", {status: 401});
+    if (!sameHex(control, await sha256Hex(auth.slice(7))))
+      return new Response("unauthorized", {status: 401});
+
+    // An attestor connection is never counted as a runtime generation and
+    // can never receive /dispatch, policy snapshots or risk-control frames.
+    const generation = Number(await this.state.storage.get("control_attestor_generation") ?? 0) + 1;
+    await this.state.storage.put("control_attestor_generation", generation);
+    const pair = new (globalThis as any).WebSocketPair();
+    const client = pair[0] as WebSocket;
+    const server = pair[1] as any;
+    const attachment: ControlAttestorAttachment = {role: "control-attestor",
+      admittedCredentialFingerprint: control, sessionId: `control_${crypto.randomUUID()}`,
+      generation, hello: false, connectedAtMs: Date.now()};
+    server.serializeAttachment(attachment);
+    this.state.acceptWebSocket(server, ["attestor"]);
+    return new Response(null, {status: 101, webSocket: client} as any);
+  }
+
+  private activeAttestor(): {ws: any; attachment: ControlAttestorAttachment} | null {
+    const currentFingerprint = credentialFingerprint(this.env.CONTROL_ATTEST_TOKEN_SHA256);
+    let selected: {ws: any; attachment: ControlAttestorAttachment} | null = null;
+    for (const ws of this.state.getWebSockets("attestor") as any[]) {
+      const attachment = ws.deserializeAttachment() as ControlAttestorAttachment | null;
+      if (attachment?.role !== "control-attestor" || attachment.hello !== true ||
+          !currentFingerprint || attachment.admittedCredentialFingerprint !== currentFingerprint) continue;
+      if (!selected || attachment.generation > selected.attachment.generation)
+        selected = {ws, attachment};
+    }
+    return selected;
+  }
+
+  private settleAttestor(requestId: string, value: AttestationResult): void {
+    const pending = this.attestorPending.get(requestId);
+    if (!pending) return;
+    this.attestorPending.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(value);
+  }
+
+  private rejectAttestorGeneration(generation: number, reason: string): void {
+    for (const [requestId, pending] of this.attestorPending) {
+      if (pending.generation === generation)
+        this.settleAttestor(requestId, unverified(reason, pending.research.generation));
+    }
+  }
+
+  private async receiveAttestor(ws: any, frame: unknown, bytes: number): Promise<void> {
+    const a = ws.deserializeAttachment() as ControlAttestorAttachment;
+    const currentFingerprint = credentialFingerprint(this.env.CONTROL_ATTEST_TOKEN_SHA256);
+    if (!currentFingerprint || a.admittedCredentialFingerprint !== currentFingerprint ||
+        currentFingerprint === credentialFingerprint(this.env.RUNTIME_TOKEN_SHA256) ||
+        currentFingerprint === credentialFingerprint(this.env.RESEARCH_RUNTIME_TOKEN_SHA256)) {
+      this.rejectAttestorGeneration(a.generation, "CONTROL_ATTEST_CREDENTIAL_REVOKED");
+      ws.close(1008, "attestor credential revoked"); return;
+    }
+    if (bytes > ATTEST_FRAME_LIMIT_BYTES || !isObject(frame) || frame.schema !== CONTROL_ATTEST_FRAME_SCHEMA) {
+      this.rejectAttestorGeneration(a.generation, "CONTROL_ATTEST_FRAME_INVALID");
+      ws.close(bytes > ATTEST_FRAME_LIMIT_BYTES ? 1009 : 1008, "invalid control frame");
+      return;
+    }
+    if (frame.type === "hello_control") {
+      if (a.hello || !exactFields(frame, ["connection_id", "schema", "type"]) ||
+          typeof frame.connection_id !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(frame.connection_id)) {
+        ws.close(1008, "invalid control hello"); return;
+      }
+      a.hello = true;
+      ws.serializeAttachment(a);
+      // Attestor rotation is independent of both native runtime owners.
+      for (const old of this.state.getWebSockets("attestor") as any[]) {
+        if (old === ws) continue;
+        const prior = old.deserializeAttachment() as ControlAttestorAttachment | null;
+        if (prior?.role === "control-attestor" && prior.hello === true) {
+          this.rejectAttestorGeneration(prior.generation, "CONTROL_ATTEST_SOCKET_STALE");
+          try { old.close(1012, "attestor new generation"); } catch {}
+        }
+      }
+      ws.send(JSON.stringify({schema: CONTROL_ATTEST_FRAME_SCHEMA, type: "hello_ack",
+        session_id: a.sessionId, connection_generation: a.generation}));
+      return;
+    }
+    if (!a.hello || frame.type !== "research_observation" || !exactFields(frame, CONTROL_REPLY_FIELDS)) {
+      this.rejectAttestorGeneration(a.generation, "CONTROL_ATTEST_FRAME_INVALID");
+      ws.close(1008, "unexpected control frame"); return;
+    }
+    const pending = typeof frame.request_id === "string" ? this.attestorPending.get(frame.request_id) : undefined;
+    if (!pending || pending.generation !== a.generation || pending.sessionId !== a.sessionId ||
+        frame.session_id !== a.sessionId || frame.connection_generation !== a.generation ||
+        frame.nonce !== pending.nonce ||
+        frame.research_session_id !== pending.research.sessionId ||
+        frame.research_connection_generation !== pending.research.generation) {
+      this.rejectAttestorGeneration(a.generation, "CONTROL_ATTEST_RESPONSE_MISMATCH");
+      ws.close(1008, "unmatched observation"); return;
+    }
+    const now = Date.now();
+    // CONTROL has a host clock; allow bounded clock skew, but never a
+    // response outside the Edge-issued challenge's own elapsed TTL.
+    if (now > pending.deadlineMs || now < pending.issuedAtMs ||
+        !validUnsigned(frame.observed_at_ms) ||
+        frame.observed_at_ms < pending.issuedAtMs - 3_000 ||
+        frame.observed_at_ms > now + 3_000 || !validResearchStatus(frame.status)) {
+      this.settleAttestor(pending.requestId, unverified("CONTROL_ATTEST_RESPONSE_INVALID", pending.research.generation));
+      ws.close(1008, "invalid observation"); return;
+    }
+    const observed = frame.status;
+    if (observed.desired_running !== true || observed.phase !== "RUNNING_UNVERIFIED" ||
+        observed.pid !== pending.research.pid || observed.process_generation === 0 ||
+        observed.active_worker_sha256 !== pending.research.sha256 ||
+        observed.installed_worker_sha256 !== pending.research.sha256) {
+      this.settleAttestor(pending.requestId, unverified("CONTROL_RESEARCH_PID_SHA_MISMATCH", pending.research.generation));
+      return;
+    }
+    this.settleAttestor(pending.requestId, {
+      schema: "okx.research.attestation/v1", status: "PASS", reason_code: null,
+      pid: observed.pid as number, active_worker_sha256: observed.active_worker_sha256 as string,
+      installed_worker_sha256: observed.installed_worker_sha256 as string,
+      process_generation: observed.process_generation as number,
+      observed_at_ms: frame.observed_at_ms, research_connection_generation: pending.research.generation,
+    });
+  }
+
+  private async attestResearch(): Promise<AttestationResult> {
+    const fingerprint = credentialFingerprint(this.env.CONTROL_ATTEST_TOKEN_SHA256);
+    if (!fingerprint || fingerprint === credentialFingerprint(this.env.RUNTIME_TOKEN_SHA256) ||
+        fingerprint === credentialFingerprint(this.env.RESEARCH_RUNTIME_TOKEN_SHA256))
+      return unverified("CONTROL_ATTEST_NOT_CONFIGURED");
+    const research = this.activeSocket("research");
+    if (!research || !research.attachment.agentPid || !research.attachment.agentBinarySha256)
+      return unverified("RESEARCH_EDGE_SESSION_UNAVAILABLE");
+    const attestor = this.activeAttestor();
+    if (!attestor) return unverified("CONTROL_ATTEST_OFFLINE", research.attachment.generation);
+    if (this.attestorPending.size >= ATTEST_PENDING_LIMIT)
+      return unverified("CONTROL_ATTEST_BUSY", research.attachment.generation);
+    const sameResearch = () => {
+      const current = this.activeSocket("research");
+      return current !== null && current.ws === research.ws && current.attachment.sessionId === research.attachment.sessionId &&
+        current.attachment.generation === research.attachment.generation &&
+        current.attachment.agentPid === research.attachment.agentPid &&
+        current.attachment.agentBinarySha256 === research.attachment.agentBinarySha256;
+    };
+    try { await this.proveFresh(research); }
+    catch { return unverified("RESEARCH_EDGE_SESSION_NOT_FRESH", research.attachment.generation); }
+    if (!sameResearch()) return unverified("RESEARCH_EDGE_GENERATION_CHANGED", research.attachment.generation);
+    if (this.activeAttestor()?.ws !== attestor.ws)
+      return unverified("CONTROL_ATTEST_SOCKET_STALE", research.attachment.generation);
+    // Multiple HTTP diagnostics can finish their Research pings together.
+    // Re-check admission AFTER that await to keep the challenge map bounded.
+    if (this.attestorPending.size >= ATTEST_PENDING_LIMIT)
+      return unverified("CONTROL_ATTEST_BUSY", research.attachment.generation);
+    const requestId = `att_${crypto.randomUUID()}`;
+    const nonce = `nonce_${crypto.randomUUID()}`;
+    const issuedAtMs = Date.now();
+    const deadlineMs = issuedAtMs + CONTROL_ATTEST_DEADLINE_MS;
+    const result = new Promise<AttestationResult>((resolve) => {
+      const timer = setTimeout(() => this.settleAttestor(requestId,
+        unverified("CONTROL_ATTEST_TIMEOUT", research.attachment.generation)), CONTROL_ATTEST_DEADLINE_MS);
+      this.attestorPending.set(requestId, {requestId, nonce, generation: attestor.attachment.generation,
+        sessionId: attestor.attachment.sessionId, research: {
+          sessionId: research.attachment.sessionId, generation: research.attachment.generation,
+          pid: research.attachment.agentPid!, sha256: research.attachment.agentBinarySha256!},
+        issuedAtMs, deadlineMs, resolve, timer});
+    });
+    try {
+      attestor.ws.send(JSON.stringify({schema: CONTROL_ATTEST_FRAME_SCHEMA, type: "observe_research",
+        request_id: requestId, nonce, session_id: attestor.attachment.sessionId,
+        connection_generation: attestor.attachment.generation,
+        research_session_id: research.attachment.sessionId,
+        research_connection_generation: research.attachment.generation, deadline_ms: deadlineMs}));
+    } catch {
+      this.settleAttestor(requestId, unverified("CONTROL_ATTEST_SEND_FAILED", research.attachment.generation));
+    }
+    const observed = await result;
+    // A valid process observation from CONTROL still cannot be promoted when
+    // Research reconnects during the challenge or CONTROL rotates meanwhile.
+    if (!sameResearch()) return unverified("RESEARCH_EDGE_GENERATION_CHANGED", research.attachment.generation);
+    if (this.activeAttestor()?.ws !== attestor.ws)
+      return unverified("CONTROL_ATTEST_SOCKET_STALE", research.attachment.generation);
+    return observed;
+  }
+
   async webSocketMessage(ws: any, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") {
       ws.close(1003, "text frames only");
@@ -258,10 +513,22 @@ export class RuntimeSession {
       ws.close(1009, "frame too large");
       return;
     }
+    const bytes = new TextEncoder().encode(message).byteLength;
+    const kind = ws.deserializeAttachment?.();
+    if (kind?.role === "control-attestor" && bytes > ATTEST_FRAME_LIMIT_BYTES) {
+      this.rejectAttestorGeneration(kind.generation, "CONTROL_ATTEST_FRAME_INVALID");
+      ws.close(1009, "control frame too large");
+      return;
+    }
 
     let frame: any;
     try { frame = JSON.parse(message); } catch {
+      if (kind?.role === "control-attestor") this.rejectAttestorGeneration(kind.generation, "CONTROL_ATTEST_FRAME_INVALID");
       ws.close(1007, "invalid json");
+      return;
+    }
+    if (kind?.role === "control-attestor") {
+      await this.receiveAttestor(ws, frame, bytes);
       return;
     }
     const attachment = ws.deserializeAttachment() as SocketAttachment;
@@ -384,16 +651,26 @@ export class RuntimeSession {
   }
 
   async webSocketClose(ws: any): Promise<void> {
-    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
-    if (attachment?.generation) {
-      this.rejectGeneration(attachment.generation, ownerOfflineReason(socketOwner(attachment) ?? "engine"));
+    const attachment = ws.deserializeAttachment() as (SocketAttachment | ControlAttestorAttachment) | null;
+    if (attachment && "role" in attachment && attachment.role === "control-attestor") {
+      this.rejectAttestorGeneration(attachment.generation, "CONTROL_ATTEST_OFFLINE");
+      return;
+    }
+    const native = attachment as SocketAttachment | null;
+    if (native?.generation) {
+      this.rejectGeneration(native.generation, ownerOfflineReason(socketOwner(native) ?? "engine"));
     }
   }
 
   async webSocketError(ws: any): Promise<void> {
-    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
-    if (attachment?.generation) {
-      this.rejectGeneration(attachment.generation, ownerOfflineReason(socketOwner(attachment) ?? "engine"));
+    const attachment = ws.deserializeAttachment() as (SocketAttachment | ControlAttestorAttachment) | null;
+    if (attachment && "role" in attachment && attachment.role === "control-attestor") {
+      this.rejectAttestorGeneration(attachment.generation, "CONTROL_ATTEST_OFFLINE");
+      return;
+    }
+    const native = attachment as SocketAttachment | null;
+    if (native?.generation) {
+      this.rejectGeneration(native.generation, ownerOfflineReason(socketOwner(native) ?? "engine"));
     }
   }
 

@@ -1,5 +1,6 @@
 pub mod account_catalog;
 pub mod artifact;
+pub mod attestor;
 pub mod auth;
 pub mod autostart;
 pub mod background_process;
@@ -46,6 +47,9 @@ pub enum HostControlError {
 
     #[error("GitHub control token is invalid")]
     InvalidGithubToken,
+
+    #[error("CONTROL attestor token is invalid")]
+    InvalidAttestorToken,
 
     #[error("native Windows host control is unavailable on this platform")]
     UnsupportedPlatform,
@@ -200,6 +204,7 @@ impl HostControlError {
             Self::SecretStore(_) => "SECRET_STORE_ERROR",
             Self::GithubTokenNotFound => "GITHUB_TOKEN_NOT_FOUND",
             Self::InvalidGithubToken => "INVALID_GITHUB_TOKEN",
+            Self::InvalidAttestorToken => "INVALID_ATTESTOR_TOKEN",
             Self::UnsupportedPlatform => "UNSUPPORTED_PLATFORM",
             Self::InvalidPollInterval => "INVALID_POLL_INTERVAL",
             Self::RepositoryMissing => "REPOSITORY_MISSING",

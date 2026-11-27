@@ -11,6 +11,7 @@ name = "okx-host-control"
 path = "src/main.rs"
 
 [dependencies]
+futures-util = { version = "0.3", features = ["sink"] }
 jiff = "1.0"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.4"
@@ -23,7 +24,8 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 zip = { version = "=9.8.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
