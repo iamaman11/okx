@@ -46,6 +46,7 @@ const nativeCacheJobs = [
   ['trading_engine_regressions_windows', 'v2-rust', 'trading-engine-tests-windows', 'false'],
   ['trading_engine_build_windows', 'v1-rust', 'trading-engine-release-windows', 'false'],
   ['research_ipc_windows', 'v2-research-sccache', 'research-service-windows', 'false'],
+  ['research_clippy_windows', 'v2-research-sccache', 'research-service-windows', 'false'],
   ['research_service_tests_windows', 'v2-research-sccache', 'research-service-windows', 'false'],
   ['research_component_release_windows', 'v2-research-sccache', 'research-service-windows', 'false'],
   ['trusted_main_cache_prime', warmPrefix, warmSharedKey, mainCacheWriter],
@@ -76,7 +77,9 @@ function validate(yaml, fileNames) {
   assert.equal(map.size, entries.length, 'DUPLICATE_JOB_ID');
   // Finance, independent regressions and release share a single workflow.
   // The only cache-only job primes exact accepted main, outside the PR gate.
-  assert.ok(map.size <= 18, 'OBSOLETE_JOB_GRAPH_REGRESSION');
+  // One additional independently required Research-only Clippy owner. No
+  // duplicate CI aggregator or new finance runner is permitted.
+  assert.ok(map.size <= 19, 'OBSOLETE_JOB_GRAPH_REGRESSION');
   for (const unused of ['required_classify', 'research_package_proof', 'draft-trading-migration-512',
     'draft-riskbook-migration-510', 'trading_safety_acceptance_windows', 'cloudflare_deploy', 'readonly_observer',
     'production_recovery_promote', 'named_validate', 'all26_windows_targeted', 'required_linux', 'required_windows']) {
@@ -101,12 +104,12 @@ function validate(yaml, fileNames) {
     assert.match(step, /^          cache-on-failure: false$/m);
     if (['host_controller_launcher_checks', 'trading_engine_acceptance_windows', 'trading_engine_isolation_windows',
       'trading_engine_regressions_windows',
-      'trading_engine_build_windows', 'research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) {
+      'trading_engine_build_windows', 'research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) {
       for (const profile of ['DEV', 'TEST'])
         assert.match(block, new RegExp(`^      CARGO_PROFILE_${profile}_DEBUG: 0$`, 'm'));
     }
   }
-  const sccacheJobs = ['research_ipc_windows', 'research_service_tests_windows',
+  const sccacheJobs = ['research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows',
     'research_component_release_windows', 'trusted_main_cache_prime'];
   for (const [id, block] of map) {
     if (!sccacheJobs.includes(id)) {
@@ -180,6 +183,7 @@ function validate(yaml, fileNames) {
     'AUDIT_REQUIRED_FOR_FRESH_READY_AND_UNVERIFIED_MAIN_ONLY');
   assert.match(audit, /!contains\(fromJSON\('\["docs","cloudflare"\]'\), needs\.component_impact\.outputs\.component_scope\)/);
   const research = job('research_service_tests_windows');
+  const researchClippy = job('research_clippy_windows');
   const researchIpc = job('research_ipc_windows');
   const researchComponent = job('research_component_release_windows');
   assert.match(audit, /node scripts\/test-research-trusted-cargo-freshness\.cjs/,
@@ -199,7 +203,8 @@ function validate(yaml, fileNames) {
     'CHANGED_SOURCE_MUST_BE_NEWER_THAN_ALL_CACHED_UNITS');
   for (const [id, cacheId, label, profile, buildLabel] of [
     ['research_ipc_windows', 'research-ipc-cache', 'IPC', 'debug', 'All ten real Research child IPC process tests'],
-    ['research_service_tests_windows', 'research-cache', 'owner', 'debug', 'Fresh Strategy Core, Research and Worker owner checks'],
+    ['research_clippy_windows', 'research-cache', 'Clippy', 'debug', 'Fresh standalone Research Clippy and Rust formatting'],
+    ['research_service_tests_windows', 'research-cache', 'owner', 'debug', 'Fresh Research Clippy and Rust formatting'],
     ['research_component_release_windows', 'research-release-cache', 'release', 'release', 'Build self-contained Research-only Windows component'],
   ]) {
     const block = job(id);
@@ -220,7 +225,7 @@ function validate(yaml, fileNames) {
       `TRUSTED_MTIME_FAILURE_MUST_BLOCK_BUILD:${id}`);
   }
   for (const [id, block] of map) {
-    if (['research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) continue;
+    if (['research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) continue;
     assert.doesNotMatch(block, /node scripts\/research-trusted-cargo-freshness\.cjs/,
       `TRUSTED_MTIME_FORBIDDEN_IN_UNRELATED_JOB:${id}`);
   }
@@ -249,7 +254,7 @@ function validate(yaml, fileNames) {
   // never enter the build artifact uploaded for provenance/timings.
   for (const [id, stepName, profile, exitCapture, jobLabel] of [
     ['research_ipc_windows', 'All ten real Research child IPC process tests', 'debug', 'code', 'ipc'],
-    ['research_service_tests_windows', 'Fresh Strategy Core, Research and Worker owner checks', 'debug', 'clippyCode', 'owner'],
+    ['research_service_tests_windows', 'Fresh Research Clippy and Rust formatting', 'debug', 'clippyCode', 'owner'],
     ['research_component_release_windows', 'Build self-contained Research-only Windows component', 'release', 'buildCode', 'release'],
   ]) {
     const block = job(id);
@@ -298,13 +303,52 @@ function validate(yaml, fileNames) {
   assert.doesNotMatch(researchFingerprint, /Write-Host \$value|Add-Content[^\n]*\$value|Set-ItemProperty|Set-Content|Remove-Item/,
     'RAW_FINGERPRINT_LOG_OR_TARGET_MUTATION_FORBIDDEN');
   for (const [id] of nativeCacheJobs) {
-    if (['research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) continue;
+    if (['research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows', 'research_component_release_windows'].includes(id)) continue;
     assert.doesNotMatch(job(id), /CARGO_LOG/, `FINGERPRINT_MUST_NOT_SCOPE_TO_OTHER_NATIVE_JOB:${id}`);
   }
   assert.match(research, /prefix-key: v2-research-sccache/);
   assert.match(research, /shared-key: research-service-windows/);
   assert.match(research, /save-if: false/,
     'PR_RESEARCH_CANNOT_WRITE_REUSABLE_ACCEPTED_MAIN_CACHE');
+  // CONTROL's Ready-v3 verifier requires an exact job.name 'research-windows'.
+  // Matrix jobs get suffixes at GitHub's REST boundary, so leave that owner
+  // unmapped. A separately named Research-only Clippy job runs in parallel;
+  // ci must explicitly validate both and preserve the mixed single-runner
+  // Engine-origin producer without changing the accepted artifact policy.
+  assert.match(research, /^    name: research-windows$/m,
+    'RESEARCH_READY_V3_UNMATRICED_NAME_REQUIRED');
+  assert.doesNotMatch(research, /^    strategy:|matrix\.owner_check/m,
+    'READY_V3_OWNER_MUST_NEVER_EXPAND_MATRIX_CHECK_NAMES');
+  assert.match(researchClippy, /^    name: research-clippy-windows$/m);
+  assert.match(researchClippy, /needs\.component_impact\.outputs\.research_only == 'true'/,
+    'RESEARCH_CLIPPY_MUST_NEVER_TRIGGER_ON_OTHER_OWNERS');
+  assert.match(researchClippy, /RESEARCH_CLIPPY_NOT_EXACT_PR_HEAD/,
+    'RESEARCH_CLIPPY_MUST_CHECK_IMMUTABLE_SOURCE');
+  assert.match(researchClippy, /cargo fmt --all -- --check/,
+    'RESEARCH_ONLY_CLIPPY_MUST_RETAIN_FORMAT_CHECK');
+  assert.match(researchClippy,
+    /cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings/,
+    'RESEARCH_ONLY_CLIPPY_MUST_RETAIN_WARNINGS_GATE');
+  const clippyHeader = '      - name: Fresh Research Clippy and Rust formatting';
+  const testsHeader = '      - name: Fresh Strategy Core, Research and Worker owner tests';
+  assert.equal(research.split(clippyHeader).length, 2,
+    'MIXED_RESEARCH_CLIPPY_EXACTLY_ONCE');
+  assert.equal(research.split(testsHeader).length, 2,
+    'RESEARCH_OWNER_TESTS_EXACTLY_ONCE');
+  assert.match(research.slice(research.indexOf(clippyHeader), research.indexOf(testsHeader)),
+    /if: needs\.component_impact\.outputs\.component_scope == 'research-host'/,
+    'RESEARCH_ONLY_TESTS_RUNNER_MUST_NOT_DUPLICATE_CLIPPY');
+  const ownerTestsEnd = research.indexOf('\n      - uses: actions/setup-node@', research.indexOf(testsHeader));
+  const ownerTests = research.slice(research.indexOf(testsHeader), ownerTestsEnd);
+  assert.doesNotMatch(ownerTests, /^        if:/m,
+    'RESEARCH_OWNER_TESTS_MUST_RUN_ON_EVERY_RESEARCH_ROUTE');
+  assert.match(ownerTests,
+    /cargo test --locked -p okx-research-service --lib --bins -- --test-threads 2/,
+    'RESEARCH_WORKER_RETAIN_BOUNDED_TEST_PARALLELISM');
+  assert.match(ownerTests, /research_starts_only_after_finite_supervisor_job_receipt/,
+    'RESEARCH_OWNER_TESTS_RETAIN_SECRET_WITNESSES');
+  assert.match(research, /mixed_base_head: \$\{\{ steps\.mixed_evidence\.outputs\.base_head \}\}/,
+    'MIXED_ENGINE_PROOF_CANNOT_BE_DROPPED');
   assert.match(research, /if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true'/,
     'MAIN_MUST_NOT_BUILD_UNREVIEWED_RESEARCH_ORIGIN');
   assert.match(researchIpc, /if: github\.event_name == 'pull_request' && needs\.component_impact\.outputs\.build_required == 'true' && needs\.component_impact\.outputs\.research_only == 'true'/,
@@ -349,9 +393,9 @@ function validate(yaml, fileNames) {
     assert.ok(step.includes('if: ' + researchTransportCondition),
       'MIXED_RESEARCH_HOST_TRANSPORT_NOT_REQUIRED:' + marker);
   }
-  // Three transport steps plus two mixed-owner provenance steps share the
-  // exact condition. Every missing step is also checked by its own marker.
-  assert.equal(research.split('if: ' + researchTransportCondition).length - 1, 5,
+  // Mixed Clippy, three transport steps and two provenance steps share the
+  // exact condition. Their individual witnesses are checked separately.
+  assert.equal(research.split('if: ' + researchTransportCondition).length - 1, 6,
     'MIXED_RESEARCH_HOST_TRANSPORT_AND_PROVENANCE_SCOPE_DRIFT');
   for (const marker of [
     'uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
@@ -697,7 +741,7 @@ function validate(yaml, fileNames) {
   const directOwners = ['component_impact', 'dependency-audit', 'architecture_contracts',
     'rust_tests_linux', 'cloudflare_mcp_contracts', 'host_controller_launcher_checks',
     'trading_engine_acceptance_windows', 'trading_engine_isolation_windows', 'trading_engine_regressions_windows',
-    'trading_engine_build_windows', 'research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows'];
+    'trading_engine_build_windows', 'research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows', 'research_component_release_windows'];
   assert.ok(requiredCi.includes('needs: [' + directOwners.join(', ') + ']'),
     'CI_MUST_WAIT_FOR_EVERY_OWNER_DIRECTLY');
   assert.ok(requiredCi.includes("if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)"));
@@ -719,6 +763,8 @@ function validate(yaml, fileNames) {
     "check_result '${{ needs.research_service_tests_windows.result }}' success research-windows",
     "check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows",
     "check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows",
+    "check_result '${{ needs.research_clippy_windows.result }}' success research-clippy-windows",
+    "check_result '${{ needs.research_clippy_windows.result }}' skipped research-clippy-windows",
     "check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows",
     "check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows",
     "check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows",
@@ -740,6 +786,8 @@ function validate(yaml, fileNames) {
     ['research_service_tests_windows', 'skipped', 3],
     ['research_ipc_windows', 'success', 1],
     ['research_ipc_windows', 'skipped', 4],
+    ['research_clippy_windows', 'success', 1],
+    ['research_clippy_windows', 'skipped', 4],
     ['research_component_release_windows', 'success', 1],
     ['research_component_release_windows', 'skipped', 4],
     ['host_controller_launcher_checks', 'success', 2],
@@ -967,13 +1015,17 @@ assert.throws(() => validate(changeJobInput(source, 'required_ci',
   'needs: [component_impact, architecture_contracts,'), workflows),
   'SINGLE_CI_CANNOT_DROP_AUDIT_DEPENDENCY');
 assert.throws(() => validate(changeJobInput(source, 'required_ci',
-  'trading_engine_build_windows, research_ipc_windows, research_service_tests_windows, research_component_release_windows]',
-  'trading_engine_build_windows, research_ipc_windows, research_service_tests_windows]'), workflows),
+  'trading_engine_build_windows, research_ipc_windows, research_clippy_windows, research_service_tests_windows, research_component_release_windows]',
+  'trading_engine_build_windows, research_ipc_windows, research_clippy_windows, research_service_tests_windows]'), workflows),
   'SINGLE_CI_MUST_WAIT_FOR_RESEARCH_RELEASE_AND_TESTS');
 assert.throws(() => validate(changeJobInput(source, 'required_ci',
-  'trading_engine_build_windows, research_ipc_windows, research_service_tests_windows, research_component_release_windows]',
-  'trading_engine_build_windows, research_service_tests_windows, research_component_release_windows]'), workflows),
+  'trading_engine_build_windows, research_ipc_windows, research_clippy_windows, research_service_tests_windows, research_component_release_windows]',
+  'trading_engine_build_windows, research_clippy_windows, research_service_tests_windows, research_component_release_windows]'), workflows),
   'SINGLE_CI_MUST_WAIT_FOR_ACTUAL_RESEARCH_IPC_RUNNER');
+assert.throws(() => validate(changeJobInput(source, 'required_ci',
+  'research_ipc_windows, research_clippy_windows, research_service_tests_windows',
+  'research_ipc_windows, research_service_tests_windows'), workflows),
+  'SINGLE_CI_MUST_WAIT_FOR_RESEARCH_CLIPPY');
 assert.throws(() => validate(changeJobInput(source, 'dependency-audit',
   "needs.component_impact.outputs.build_required == 'true' &&",
   'true &&'), workflows),
@@ -1002,6 +1054,8 @@ for (const [old, replacement, reason] of [
     'true', 'SKIPPED_REGRESSIONS'],
   ["check_result '${{ needs.research_service_tests_windows.result }}' success research-windows",
     'true', 'RESEARCH_OWNER'],
+  ["check_result '${{ needs.research_clippy_windows.result }}' success research-clippy-windows",
+    'true', 'RESEARCH_CLIPPY_OWNER'],
   ["check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows",
     'true', 'RESEARCH_IPC_OWNER'],
   ["check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows",
@@ -1043,6 +1097,18 @@ assert.throws(() => validate(source.replace('options: [tests, release, research,
   'MANUAL_CACHE_INPUT_MUST_RETAIN_RESEARCH_CHOICE');
 assert.throws(() => validate(source.replace('        default: both', '        default: tests'), workflows),
   'MANUAL_CACHE_PROFILE_DEFAULT_MUST_WARM_BOTH');
+for (const [id, before, after, reason] of [
+  ['research_clippy_windows', 'name: research-clippy-windows', 'name: research-windows',
+    'CLIPPY_JOB_CANNOT_IMPERSONATE_READY_V3_OWNER'],
+  ['research_clippy_windows', "needs.component_impact.outputs.research_only == 'true'", 'false',
+    'SCOPED_CLIPPY_CANNOT_BE_UNREACHABLE'],
+  ['research_service_tests_windows', "if: needs.component_impact.outputs.component_scope == 'research-host'", 'if: false',
+    'MIXED_CLIPPY_MUST_RUN'],
+  ['research_clippy_windows', 'cargo clippy --locked -p okx-strategy-core', 'echo skipped-clippy -p okx-strategy-core',
+    'RESEARCH_CLIPPY_ACTUAL_COMMAND_REQUIRED'],
+]) {
+  assert.throws(() => validate(changeJobInput(source, id, before, after), workflows), reason);
+}
 assert.throws(() => validate(source.replace(selectedCacheMatrix,
   '        profile: [tests, release]'), workflows),
   'MANUAL_SINGLE_PROFILE_MUST_NOT_LAUNCH_BOTH_RUNNERS');
@@ -1059,7 +1125,7 @@ assert.throws(() => validate(source.replace("|| '[]') }}", "|| '[\"tests\",\"rel
 assert.throws(() => validate(changeJobInput(source, 'research_service_tests_windows',
   '          save-if: false', '          save-if: true'), workflows),
   'RESEARCH_PR_CACHE_MUST_REMAIN_READ_ONLY');
-for (const id of ['research_ipc_windows', 'research_service_tests_windows', 'research_component_release_windows']) {
+for (const id of ['research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows', 'research_component_release_windows']) {
   assert.throws(() => validate(changeJobInput(source, id,
     'SCCACHE_GHA_RW_MODE=READ_ONLY', 'SCCACHE_GHA_RW_MODE=READ_WRITE'), workflows),
   `RESEARCH_SCCACHE_PR_WRITER_FORBIDDEN:${id}`);
@@ -1074,7 +1140,7 @@ assert.throws(() => validate(changeJobInput(source, 'trusted_main_cache_prime',
   "        if: matrix.profile == 'research'\n        id: research-sccache",
   "        id: research-sccache"), workflows),
 'MAIN_NON_RESEARCH_PRIME_MUST_NOT_INSTALL_SCCACHE');
-for (const id of ['research_ipc_windows', 'research_service_tests_windows',
+for (const id of ['research_ipc_windows', 'research_clippy_windows', 'research_service_tests_windows',
   'research_component_release_windows', 'trusted_main_cache_prime']) {
   assert.throws(() => validate(changeJobInput(source, id,
     'continue-on-error: true # Cache observability must not replace',
