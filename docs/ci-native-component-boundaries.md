@@ -18,15 +18,15 @@ jobs were removed from the main workflow.
 
 | Changed files (complete GitHub diff) | Direct owner and consumers | Ready CI | Native release artifact |
 | --- | --- | --- | --- |
-| Only audited Launcher diagnostics source (`logging.rs`, `stdio_capture.rs`) or Launcher tests (+ docs) | Launcher and CONTROL consumer | `host-windows`; no Trading Engine/SQL compilation | Strict, **non-installable** four-file `okx-host-component-<PR_HEAD_SHA>` proof; not a Native ReleaseSet |
-| Only audited CONTROL read-only attestor (`attestor.rs`), Host protocol/controller tests, optional audited Launcher source (+ docs/Edge) | Host Controller, Launcher and relevant Edge consumers | `host-windows` (+ `cloudflare-mcp` for Edge changes); no Trading Engine/SQL compilation | Strict, **non-installable** four-file `okx-host-component-<PR_HEAD_SHA>` proof; no accepted-main Host publisher or installer |
+| Only audited Launcher diagnostics source (`logging.rs`, `stdio_capture.rs`) or Launcher tests (+ docs) | Launcher and CONTROL consumer | Parallel `host-windows` and `host-contracts-windows`; no Trading Engine/SQL compilation | Strict, **non-installable** four-file `okx-host-component-<PR_HEAD_SHA>` proof; not a Native ReleaseSet |
+| Only audited CONTROL read-only attestor (`attestor.rs`), Host protocol/controller tests, optional audited Launcher source (+ docs/Edge) | Host Controller, Launcher and relevant Edge consumers | Parallel `host-windows` and `host-contracts-windows` (+ `cloudflare-mcp` for Edge changes); no Trading Engine/SQL compilation | Strict, **non-installable** four-file `okx-host-component-<PR_HEAD_SHA>` proof; no accepted-main Host publisher or installer |
 | CONTROL/Launcher entrypoints, Engine install/desired state/lifecycle, shared Host protocol implementation, unknown Host implementation | Engine lifecycle and all possibly affected consumers | Full Native matrix (fail closed) | Full bundle only after accepted finance and lifecycle checks |
 | Trading Engine/TradeService, `okx-trade-execution` or financial SQL | Trading Engine, RiskBook, SQL and trade-side consumers | Mandatory financial `engine-windows`, independent `trading-engine-regressions-windows`, parallel `trading-engine-build-windows` and portable Rust checks | Full verified Windows bundle on qualifying PR |
 | Shared `okx-api`, `okx-market-runtime`, `okx-ipc-contracts`, root Cargo files, build scripts, installer/packaging scripts or CI workflow | All affected consumers | Full Native matrix (fail closed) | Full only after acceptance |
 | Narrow Research/Host `Cargo.toml` with optional `Cargo.lock` | Only that owner and its actual consumers | Scoped **only after exact before/after Windows Cargo closure proof**, including versions/features/dev dependencies; otherwise full Native | Research-only standalone three-file component when its exact owner scope qualifies; host-only nondeployable evidence otherwise |
 | Research-only owner changes; unchanged Engine/Host release closure | Research/IPC consumers | `research-windows` and independently verified Cargo closure, exact Ready PR attempt and `ci` | Raw `okx-research-component-<PR_HEAD_SHA>` CI artifact: only `Cargo.lock`, `manifest.json` (`okx.windows.research-component/v3`), `okx-research-service.exe`; append-only `research-component-<MERGE_SHA>` after verified merge, no Engine files |
 | Documentation only / Cloudflare-only | Documentation / MCP | Existing scoped gates | No fresh Native build |
-| Mixed Research + explicitly isolated Host source with proven unchanged Engine dependency/lifecycle | Research and Host consumers | `research-windows` and `host-windows`, no Engine compilation | Separate Research/Host evidence; not a replacement Native base |
+| Mixed Research + explicitly isolated Host source with proven unchanged Engine dependency/lifecycle | Research and Host consumers | `research-windows`, `host-windows` and `host-contracts-windows`, no Engine compilation | Separate Research/Host evidence; not a replacement Native base |
 | Unknown/shared impact, unsafe mixed changes, renames, incomplete diff | All potentially affected consumers | Full Native matrix (fail closed) | Only if accepted |
 
 Research coverage is monotonic across owner combinations: adding Host source
@@ -88,10 +88,12 @@ receipt identities and preserves its original resource-budget and witness
 checks; these timings diagnose slow setup, entry, settlement, release or cold
 reopen, but are not independent proof of financial correctness.
 
-The host job runs the existing installation-root safety fixture, architecture
-guard, formatting, clippy, Rust tests and Windows release builds for both
-CONTROL and Launcher. Its exact source HEAD, tree, component scope and binary
-hashes are retained as **non-deployable** evidence. For a Host-only PR it also
+Two independent Windows jobs execute in parallel on the same immutable PR
+HEAD. `host-contracts-windows` runs the existing installation-root safety
+fixture, architecture guard, formatting, Clippy and typed consumer Rust tests.
+The separate `host-windows` producer compiles CONTROL and Launcher release
+executables from a clean checkout, retaining exact HEAD, tree, component scope
+and binary hashes as **non-deployable** evidence. For a Host-only PR it also
 uploads the actual CONTROL and Launcher executables, `Cargo.lock`, and strict
 `okx.windows.host-component/v1` manifest with the exact four-file allowlist.
 The manifest binds the PR HEAD, tree, exact pinned compiler identity
@@ -105,10 +107,12 @@ drift, malformed identities, byte mismatches, ZIP overlays/NUL aliases,
 unconsumed bytes hidden after a member's DEFLATE end marker, and unsafe ZIP
 entries. Git checkout cleanliness is checked both before and after the
 release build, preventing PR-controlled build scripts from altering source
-bytes after the recorded HEAD/tree. The Host executable build and immutable
-Actions upload occur **before** any PR-owned Rust tests, on an exact-head checkout,
-so test code cannot rewrite retained bytes after publication. A later failing
-test leaves an unaccepted artifact, not an accepted component. The
+bytes after the recorded HEAD/tree. Producer and test runners never share a
+checkout or target directory; test code cannot rewrite retained bytes at any
+stage. A later failing test leaves an unaccepted artifact, not an accepted
+component, even when the producer separately uploaded non-installable
+evidence. The single required `ci` status verifies **both** jobs with
+fail-closed per-route assertions. The
 manifest's `ci_status_policy` is a **policy identifier, not a verified Ready
 receipt**: neither the producer nor the byte verifier authenticates Actions
 status, the accepted-main tree or a protected publication origin. Existing
@@ -118,7 +122,8 @@ expires with the configured Actions retention and is not an accepted release.
 **Next mandatory gate, before any Host-only deployment:** add an independent
 publisher in the protected `main` CI that resolves the *exact* first-attempt
 Ready PR run for the accepted tree, checks `select-checks`,
-`architecture-contracts`, `dependency-audit`, `host-windows`, `ci` and all
+`architecture-contracts`, `dependency-audit`, `host-windows`,
+`host-contracts-windows`, `ci` and all
 applicable consumer checks against the versioned Host roster, and verifies
 the original Actions artifact ID, SHA-256 digest and all four files. Require
 immutable accepted-main origin plus a complete, compatible installed Native
@@ -145,14 +150,17 @@ dependency audit; new or unverified trees still require a fresh audit.
 Both publishers require this explicit skipped result, successful `ci` and
 the same exact Ready provenance before releasing any accepted bytes.
 
-The Host-only runner now restores the existing **trusted main Engine-test
-Cargo cache** read-only. Its debug/test profiles match that seed, which
-already compiles Host Clippy and test dependencies. It builds only the two
-Host release binaries from the changed source and never compiles Engine;
-it no longer writes an isolated ~390 MB cache per Host PR. The cache is
-not guaranteed to hit when Cargo.lock/toolchain/profile inputs change.
-Release compilation and cross-PR warm speed still need a real Host-only
-Ready measurement; avoiding a cache write alone does not prove speedup.
+Both Host runners restore **trusted-main Cargo caches read-only**, using
+distinct profiles. `host-contracts-windows` restores the shared Engine/Host
+test cache (`v2-rust`); `host-windows` restores the release cache
+(`v1-rust`) with the same profile fingerprint as the trusted-main release
+seed. Both set `save-if: false`, preventing PR cache poisoning.
+The producer builds only two Host release binaries from the changed source
+and never compiles Engine. A cache hit is not guaranteed after lockfile,
+toolchain or fingerprint changes; a hit also does not prove that an edited
+Host crate avoided compilation. Real Ready measurements must distinguish
+cache restore, release build, wall time and aggregate Windows runner-minutes.
+Splitting the jobs can increase runner-minutes even when wall time improves.
 
 Only a manual `workflow_dispatch` on accepted `main`
 with `prime_windows_cargo_cache=true` starts cache warming. The
@@ -176,12 +184,14 @@ retain the expanded Draft checks.
 
 Acceptance controls:
 
-1. A CONTROL-only or Launcher-only Rust diff selects its own Windows job;
-   that job compiles both host owner/consumer crates, never Agent/Execution.
+1. A CONTROL-only or Launcher-only Rust diff selects both parallel Host jobs;
+   they compile their own Host owner/consumer crates, never Agent/Execution.
 2. A shared IPC, Cargo manifest, SQL or Engine diff selects full financial CI.
 3. A mixed host and non-host diff cannot inherit the cheap host path.
-4. `ci` directly rejects failed or unexpectedly skipped `host-windows`,
-   with no extra aggregate job.
+4. `ci` directly requires successful `host-windows` **and**
+   `host-contracts-windows` when Host is affected; otherwise both must be
+   explicitly skipped. Failed, neutral, cancelled or unexpectedly skipped
+   results cannot satisfy the sole protected status. No extra aggregator.
 5. Changes to these classifier/workflow/architecture rules themselves select
    `full`; the first adoption therefore requires existing full acceptance.
 
