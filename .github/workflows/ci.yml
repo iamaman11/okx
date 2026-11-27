@@ -1374,12 +1374,114 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_IPC_SCCACHE_STATS_UNAVAILABLE' }
           $stats | Where-Object { [string]$_ -match '^\s*(Compile requests|Cache hits|Cache misses|Cache read errors|Cache write errors|Non-cacheable compilations)' } | Out-Host
 
+  research_clippy_windows:
+    # Separate only standalone Research's Clippy from its 233 Worker tests.
+    # CONTROL Ready-v3 requires one *exact* research-windows check name, so
+    # unlike a matrix this job has a distinct non-Ready check name and the
+    # required ci job explicitly verifies BOTH owner results.
+    name: research-clippy-windows
+    needs: component_impact
+    if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && needs.component_impact.outputs.research_only == 'true'
+    runs-on: windows-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Require exact immutable PR HEAD for Research Clippy
+        shell: pwsh
+        run: |
+          $expected = '${{ github.event.pull_request.head.sha }}'
+          if ($expected -cnotmatch '^[0-9a-f]{40}$' -or
+              (git rev-parse HEAD).Trim() -cne $expected) {
+            throw 'RESEARCH_CLIPPY_NOT_EXACT_PR_HEAD'
+          }
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master snapshot 2026-09-29
+        with:
+          toolchain: 1.100.0
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: research-cache
+        with:
+          prefix-key: v2-research-sccache
+          shared-key: research-service-windows
+          cache-workspace-crates: true
+          save-if: false
+          cache-on-failure: false
+      - name: Export Research Clippy cache runtime credentials
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Install pinned Research Clippy compiler cache
+        id: research-sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      - name: Enable read-only Research Clippy compiler cache
+        shell: pwsh
+        run: |
+          'SCCACHE_GHA_ENABLED=on' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_VERSION=okx-research-sccache-v1' >> $env:GITHUB_ENV
+          'SCCACHE_GHA_RW_MODE=READ_ONLY' >> $env:GITHUB_ENV
+          'RUSTC_WRAPPER=sccache' >> $env:GITHUB_ENV
+      - name: Prefer cached offline Cargo sources for Clippy when complete
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & cargo fetch --locked --offline 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            'CARGO_NET_OFFLINE=true' >> $env:GITHUB_ENV
+            'Research Clippy Cargo registry: complete local cache; offline' >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            'Research Clippy Cargo registry: incomplete cache; ordinary online fallback' >> $env:GITHUB_STEP_SUMMARY
+            $global:LASTEXITCODE = 0
+          }
+      - name: Retain only byte-identical Research Clippy Cargo fingerprints
+        shell: pwsh
+        env:
+          OKX_RESEARCH_PR_SHA: ${{ github.event.pull_request.head.sha }}
+          OKX_RESEARCH_ONLY: ${{ needs.component_impact.outputs.research_only }}
+        run: |
+          node scripts/research-trusted-cargo-freshness.cjs "profile=debug" "head=$env:OKX_RESEARCH_PR_SHA" "cacheHit=${{ steps.research-cache.outputs.cache-hit }}" "researchOnly=$env:OKX_RESEARCH_ONLY"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Fresh standalone Research Clippy and Rust formatting
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
+          "Research Clippy Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          . ./scripts/research-cargo-fingerprint-evidence.ps1
+          & ./scripts/test-research-cargo-fingerprint-evidence.ps1
+          Write-ResearchCargoMtimeSnapshot -Profile debug
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $fingerprintCounts = New-ResearchCargoFingerprintCounts
+          $env:CARGO_LOG = 'cargo::compiler::fingerprint=info'
+          cargo clippy --locked -p okx-strategy-core -p okx-research -p okx-research-service -p okx-analysis --all-targets -- -D warnings 2>&1 |
+            ForEach-Object { if (-not (Test-ResearchCargoFingerprintLogLine -Line $_ -Counts $fingerprintCounts)) { $_ } }
+          $clippyCode = $LASTEXITCODE
+          Remove-Item Env:CARGO_LOG
+          Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job clippy
+          if ($clippyCode -ne 0) { exit $clippyCode }
+      - name: Research Clippy compiler cache statistics
+        if: always() && steps.research-sccache.outcome == 'success'
+        continue-on-error: true # Cache observability must not replace Clippy acceptance.
+        shell: pwsh
+        run: |
+          $stats = @(& sccache --show-stats 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw 'RESEARCH_CLIPPY_SCCACHE_STATS_UNAVAILABLE' }
+          $stats | Where-Object { [string]$_ -match '^\s*(Compile requests|Cache hits|Cache misses|Cache read errors|Cache write errors|Non-cacheable compilations)' } | Out-Host
+
   research_service_tests_windows:
     name: research-windows
     needs: component_impact
     # A successful, identical PR tree is already accepted; main must reuse it.
-    # This job proves owner tests and actual MCP/DO/WSS behavior. The separate
-    # release-profile job may mint bytes, but the sole ci gate requires both.
+    # This name is an exact Ready-v3 artifact provenance gate in CONTROL.
+    # Research-only Clippy runs in a separate required parallel Windows job;
+    # mixed Research+Host keeps its Clippy and provenance on this one runner.
     if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')
     runs-on: windows-latest
     env:
@@ -1453,12 +1555,13 @@ jobs:
         run: |
           node scripts/research-trusted-cargo-freshness.cjs "profile=debug" "head=$env:OKX_RESEARCH_PR_SHA" "cacheHit=${{ steps.research-cache.outputs.cache-hit }}" "researchOnly=$env:OKX_RESEARCH_ONLY"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Fresh Strategy Core, Research and Worker owner checks
+      - name: Fresh Research Clippy and Rust formatting
+        if: needs.component_impact.outputs.component_scope == 'research-host'
         shell: pwsh
         run: |
           # One isolated Cargo target root for the owner test profile.
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
-          "Research Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          "Research Clippy Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
           . ./scripts/research-cargo-fingerprint-evidence.ps1
           & ./scripts/test-research-cargo-fingerprint-evidence.ps1
           Write-ResearchCargoMtimeSnapshot -Profile debug
@@ -1476,6 +1579,13 @@ jobs:
           Remove-Item Env:CARGO_LOG
           Write-ResearchCargoFingerprintCounts -Counts $fingerprintCounts -Job owner
           if ($clippyCode -ne 0) { exit $clippyCode }
+      - name: Fresh Strategy Core, Research and Worker owner tests
+        shell: pwsh
+        run: |
+          # The original owner tests run after Clippy for mixed Research+Host
+          # and concurrently with the separately required Research-only Clippy.
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
+          "Research test Cargo cache exact hit: ${{ steps.research-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
           $ownerLog = Join-Path $env:RUNNER_TEMP 'research-native-owner-tests.log'
           cargo test --locked -p okx-strategy-core -p okx-research -p okx-analysis 2>&1 |
             Tee-Object -FilePath $ownerLog
@@ -1769,7 +1879,7 @@ jobs:
     # The sole required status checks owner jobs directly. A skipped job may
     # satisfy a GitHub branch rule, so require each expected result explicitly.
     name: ci
-    needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_ipc_windows, research_service_tests_windows, research_component_release_windows]
+    needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_ipc_windows, research_clippy_windows, research_service_tests_windows, research_component_release_windows]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
@@ -1805,6 +1915,7 @@ jobs:
               '${{ needs.trading_engine_regressions_windows.result }}' \
               '${{ needs.trading_engine_build_windows.result }}' \
               '${{ needs.research_ipc_windows.result }}' \
+              '${{ needs.research_clippy_windows.result }}' \
               '${{ needs.research_service_tests_windows.result }}' \
               '${{ needs.research_component_release_windows.result }}'; do
               check_result "$item" skipped accepted-main-reuse
@@ -1831,6 +1942,7 @@ jobs:
               check_result '${{ needs.rust_tests_linux.result }}' skipped portable-rust
               check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
               check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows
+              check_result '${{ needs.research_clippy_windows.result }}' skipped research-clippy-windows
               check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
               check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
               check_result '${{ needs.trading_engine_acceptance_windows.result }}' skipped engine-windows
@@ -1849,6 +1961,7 @@ jobs:
                   test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_OWNER_ONLY
                   [[ '${{ needs.research_component_release_windows.outputs.research_component_sha256 }}' =~ ^[0-9a-f]{64}$ ]]
                   check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows
+                  check_result '${{ needs.research_clippy_windows.result }}' success research-clippy-windows
                   check_result '${{ needs.research_service_tests_windows.result }}' success research-windows
                   check_result '${{ needs.research_component_release_windows.result }}' success research-component-windows
                   check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows
@@ -1857,6 +1970,7 @@ jobs:
                   test '${{ needs.component_impact.outputs.native_proof }}' = RESEARCH_HOST_OWNER_CHECKS
                   [[ '${{ needs.research_service_tests_windows.outputs.mixed_base_head }}' =~ ^[0-9a-f]{40}$ ]]
                   check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows
+                  check_result '${{ needs.research_clippy_windows.result }}' skipped research-clippy-windows
                   check_result '${{ needs.research_service_tests_windows.result }}' success research-windows
                   check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
                   check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows
@@ -1864,6 +1978,7 @@ jobs:
                 *)
                   test '${{ needs.component_impact.outputs.native_proof }}' = HOST_WINDOWS_OWNER_AND_CONSUMER
                   check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows
+                  check_result '${{ needs.research_clippy_windows.result }}' skipped research-clippy-windows
                   check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
                   check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
                   check_result '${{ needs.host_controller_launcher_checks.result }}' success host-windows
@@ -1877,6 +1992,7 @@ jobs:
               check_result '${{ needs.trading_engine_regressions_windows.result }}' success engine-regressions
               check_result '${{ needs.trading_engine_build_windows.result }}' success engine-build
               check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows
+              check_result '${{ needs.research_clippy_windows.result }}' skipped research-clippy-windows
               check_result '${{ needs.research_service_tests_windows.result }}' skipped research-windows
               check_result '${{ needs.research_component_release_windows.result }}' skipped research-component-windows
               check_result '${{ needs.host_controller_launcher_checks.result }}' skipped host-windows

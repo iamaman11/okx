@@ -339,7 +339,7 @@ def _self_test() -> None:
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
     assert "--filter-platform x86_64-pc-windows-msvc" in workflow
     protected = workflow.split("\n  required_ci:\n", 1)[1].split("\n  trading_engine_build_windows:\n", 1)[0]
-    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_ipc_windows, research_service_tests_windows, research_component_release_windows]" in protected
+    assert "needs: [component_impact, dependency-audit, architecture_contracts, rust_tests_linux, cloudflare_mcp_contracts, host_controller_launcher_checks, trading_engine_acceptance_windows, trading_engine_isolation_windows, trading_engine_regressions_windows, trading_engine_build_windows, research_ipc_windows, research_clippy_windows, research_service_tests_windows, research_component_release_windows]" in protected
     assert "check_result '${{ needs.research_ipc_windows.result }}' success research-ipc-windows" in protected
     assert protected.count("check_result '${{ needs.research_ipc_windows.result }}' skipped research-ipc-windows") == 4
     for owner in ("trading_engine_acceptance_windows", "trading_engine_isolation_windows",
@@ -372,7 +372,8 @@ def _self_test() -> None:
     assert "standalone_research_status_is_typed_and_does_not_claim_edge_online" in host, "HOST_RESEARCH_STATUS_TYPED_WITNESS_REQUIRED"
     assert "research_token_provision_command_has_no_bearer_fields" in host, "HOST_RESEARCH_SECRET_WIRE_WITNESS_REQUIRED"
     assert "control_bridge_denies_research_mutations_before_network" in host, "HOST_BRIDGE_MUTATION_DENIAL_WITNESS_REQUIRED"
-    research_ipc = workflow.split("\n  research_ipc_windows:\n", 1)[1].split("\n  research_service_tests_windows:\n", 1)[0]
+    research_ipc = workflow.split("\n  research_ipc_windows:\n", 1)[1].split("\n  research_clippy_windows:\n", 1)[0]
+    research_clippy = workflow.split("\n  research_clippy_windows:\n", 1)[1].split("\n  research_service_tests_windows:\n", 1)[0]
     research = workflow.split("\n  research_service_tests_windows:\n", 1)[1].split("\n  research_component_release_windows:\n", 1)[0]
     research_release = workflow.split("\n  research_component_release_windows:\n", 1)[1].split("\n  required_ci:\n", 1)[0]
     assert "if: github.event_name == 'pull_request' && needs.component_impact.outputs.build_required == 'true' && (needs.component_impact.outputs.research_only == 'true' || needs.component_impact.outputs.component_scope == 'research-host')" in research
@@ -401,11 +402,23 @@ def _self_test() -> None:
     ):
         assert witness in research, f"RESEARCH_WINDOWS_SECRET_WITNESS_REQUIRED:{witness}"
     assert "cargo fmt --all -- --check" in research, "SCOPED_RESEARCH_MUST_VERIFY_RUST_FORMATTING"
-    # Both parallel Windows jobs restore the same immutable trusted-main
-    # Research cache into their own isolated Cargo target directories.
+    # The separate Research-only Clippy and exact-name Ready-v3 owner tests,
+    # plus component release, restore the same read-only Cargo cache into
+    # their own isolated Windows target directories. Mixed Research+Host
+    # retains Clippy and provenance on the single exact research-windows job.
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research
+    assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research_clippy
     assert "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6" in research_release
-    assert research.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 1
+    assert research.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 2
+    assert "name: research-windows" in research
+    assert "matrix.owner_check" not in research and "    strategy:" not in research
+    assert "name: research-clippy-windows" in research_clippy
+    assert "RESEARCH_CLIPPY_NOT_EXACT_PR_HEAD" in research_clippy
+    assert "needs.component_impact.outputs.research_only == 'true'" in research_clippy
+    assert "if: needs.component_impact.outputs.component_scope == 'research-host'" in research
+    assert "check_result '${{ needs.research_clippy_windows.result }}' success research-clippy-windows" in protected
+    assert "research_clippy_windows, research_service_tests_windows" in protected
+    assert research_clippy.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 1
     assert research_release.count("Join-Path $env:GITHUB_WORKSPACE 'target'") == 1
 
     def files(*paths):
