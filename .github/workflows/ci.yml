@@ -1204,6 +1204,26 @@ jobs:
             throw 'BOTH_TERMINAL_SOURCE_FRONTIER_WITNESSES_REQUIRED'
           }
 
+      - name: Exact source-capture queue retry negative control
+        if: matrix.suite == 'engine'
+        shell: pwsh
+        run: |
+          # Execute the new unit negative, not just compile it into the 62
+          # fixed financial witnesses. Other typed SQL/queue errors must
+          # remain hard failures; no deadline, actor or frontier is relaxed.
+          $testName = 'accounts::native_trade_contracts::filled_fixture::source_read_fixture_retry_is_exact_and_never_accepts_other_finance_errors'
+          $output = & cargo test --locked -p okx-trading-engine --lib $testName -- --exact --test-threads 1 2>&1
+          $code = $LASTEXITCODE
+          $output | Out-Host
+          if ($code -ne 0) { exit $code }
+          $log = $output -join "`n"
+          $passedLine = '(?m)^test ' + [regex]::Escape($testName)
+          $oneSelected = 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured;'
+          if ($log -notmatch ($passedLine + ' \.\.\. ok$') -or
+              $log -notmatch ($oneSelected + ' [1-9][0-9]* filtered out;')) {
+            throw 'SOURCE_CAPTURE_QUEUE_RETRY_NEGATIVE_TEST_NOT_EXECUTED'
+          }
+
       # K9 runs once on its own runner, not beside isolated OS/SQL clocks.
       - name: Worker library regression and actual IPC child
         if: matrix.suite == 'research'
