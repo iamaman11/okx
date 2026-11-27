@@ -441,10 +441,7 @@ async fn approved_strategy_without_live_source_never_claims_or_trades_and_can_st
                 idempotency_key: "source_absent_approve".into(),
                 instance_id: INSTANCE.into(),
                 expected_revision: 1,
-                configuration_digest: created["configuration_digest"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
+                configuration_digest: created["configuration_digest"].as_str().unwrap().into(),
             })
             .await,
     );
@@ -473,7 +470,10 @@ async fn approved_strategy_without_live_source_never_claims_or_trades_and_can_st
     let denied_before = fixture.feed.denied_routes.lock().unwrap().clone();
 
     assert_eq!(
-        engine.strategy_turn(&fixture.owner, instance).await.unwrap_err(),
+        engine
+            .strategy_turn(&fixture.owner, instance)
+            .await
+            .unwrap_err(),
         "ANALYTICS_SOURCE_NOT_READY"
     );
     // Exercise the shipping loop over enabled SQL strategies as well as its
