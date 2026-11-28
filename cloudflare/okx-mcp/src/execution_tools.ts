@@ -108,19 +108,19 @@ const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destruct
  strategies:{description:'Trading',readOnlyHint:false,destructiveHint:true},
  // `screen` can persist a Research job. A multi-action descriptor must not
  // claim that every action is read-only; it still has no destructive effect.
- market:{description:'Market; screen may write',readOnlyHint:false,destructiveHint:false},
- research:{description:'Research',readOnlyHint:false,destructiveHint:true},
+ market:{description:'composition; screen may create job',readOnlyHint:false,destructiveHint:false},
+ research:{description:'Study',readOnlyHint:false,destructiveHint:true},
  portfolio:{description:'Portfolio',readOnlyHint:true,destructiveHint:false},
  diagnostics:{description:'Trace',readOnlyHint:true,destructiveHint:false},
 };
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  preview:{description:'Preview',readOnlyHint:true,destructiveHint:false},
  execute:{description:'Real order; loss; approval/limits/STOP',readOnlyHint:false,destructiveHint:true},
- status:{description:'Status',readOnlyHint:true,destructiveHint:false},
+ status:{description:'State',readOnlyHint:true,destructiveHint:false},
  cancel:{description:'Cancel',readOnlyHint:false,destructiveHint:true},
  close:{description:'Close',readOnlyHint:false,destructiveHint:true},
- capabilities:{description:'Rights',readOnlyHint:true,destructiveHint:false},
- preflight:{description:'Ready?',readOnlyHint:true,destructiveHint:false},
+ capabilities:{description:'Caps',readOnlyHint:true,destructiveHint:false},
+ preflight:{description:'Check',readOnlyHint:true,destructiveHint:false},
 };
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
