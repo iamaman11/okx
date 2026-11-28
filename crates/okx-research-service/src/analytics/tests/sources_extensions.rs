@@ -5,6 +5,7 @@ use okx_research_protocol::analytics::{
     EmaParameters, FundingMode, MarketAction, MarketRequest, ResearchCosts, ResearchDataMode,
     ResearchRequest, ResearchResultView,
 };
+use okx_research_protocol::edge::{ResearchCommand, ResearchRequestEnvelope};
 use serde_json::json;
 
 const CANDLE_INTERVAL_MS: u64 = 60_000;
@@ -84,6 +85,132 @@ async fn graph_preflight_rejects_unsupported_source_without_job_or_venue_get() {
     assert_eq!(
         service.research(request).await.unwrap_err(),
         "composition.stream:SOURCE_NOT_SUPPORTED:volume"
+    );
+    assert!(service.jobs.snapshot().is_empty());
+    assert!(transport.routes.lock().unwrap().is_empty());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn graph_admission_identifies_invalid_field_at_edge_and_owner_without_side_effects() {
+    let transport = RecordedGet::new(vec![]);
+    let (root, service) = service_with_source(transport.client());
+    let base = json!({
+        "action":"graph_backtest", "idempotency_key":"typed-graph-admission",
+        "instruments":["BTC-USDT"],"timeframe_ms":CANDLE_INTERVAL_MS,
+        "start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,
+        "graph_signal":{
+            "version":"okx.graph-signal/v1",
+            "graph":{"version":"okx.market.composition/v1","steps":[
+                {"id":"gain","op":"returns_series","input":"close"},
+                {"id":"signal","op":"greater_than","input":"gain","threshold":0.0}
+            ],"result_steps":["signal"]},
+            "signal_step":"signal","target_if_true":1,"target_if_false":0,
+            "missing":"hold"
+        },
+        "costs":{"maker_fee_bps":0,"taker_fee_bps":10,"slippage_bps":5,
+            "funding_mode":"zero_assumption"},
+        "data_mode":"counterfactual"
+    });
+    for (pointer, bad, reason) in [
+        (
+            "/graph_signal/version",
+            json!("bad"),
+            "graph_signal.version:UNSUPPORTED",
+        ),
+        (
+            "/graph_signal/graph/steps/0/input",
+            json!("private/source"),
+            "graph_signal.graph.steps[0].input:INVALID_REFERENCE",
+        ),
+        (
+            "/graph_signal/graph/steps/1/op",
+            json!("forward_return_label"),
+            "graph_signal.graph.steps[1].op:FORWARD_LABEL_FORBIDDEN",
+        ),
+        (
+            "/graph_signal/signal_step",
+            json!("unused"),
+            "graph_signal.signal_step:UNPROJECTED",
+        ),
+        (
+            "/graph_signal/target_if_true",
+            json!(2),
+            "graph_signal.target_if_true:INVALID_POSITION",
+        ),
+        (
+            "/costs/taker_fee_bps",
+            json!(-1),
+            "research.graph_backtest.costs.taker_fee_bps:OUT_OF_RANGE",
+        ),
+        (
+            "/timeframe_ms",
+            json!(1),
+            "research.graph_backtest.timeframe_ms:UNSUPPORTED",
+        ),
+        (
+            "/end_ms",
+            json!(CANDLE_START_MS + 1_000_001 * CANDLE_INTERVAL_MS),
+            "research.graph_backtest.range:RESOURCE_LIMIT",
+        ),
+        (
+            "/instruments/0",
+            json!(""),
+            "research.graph_backtest.instruments[0]:INVALID_LENGTH",
+        ),
+    ] {
+        let mut value = base.clone();
+        *value.pointer_mut(pointer).unwrap() = bad;
+        let envelope: ResearchRequestEnvelope = serde_json::from_value(json!({
+            "schema":"okx.agent.request/v1","request_id":"typed_graph_request_001",
+            "operation":{"type":"research","request":value.clone()}
+        }))
+        .unwrap();
+        assert_eq!(
+            ResearchCommand::try_from(envelope).err().unwrap(),
+            reason,
+            "{pointer}: Edge"
+        );
+        let request: ResearchRequest = serde_json::from_value(value).unwrap();
+        assert!(!request.valid(), "{pointer}");
+        assert_eq!(
+            service.research(request).await.unwrap_err(),
+            reason,
+            "{pointer}: owner"
+        );
+    }
+    assert!(service.jobs.snapshot().is_empty());
+    assert!(transport.routes.lock().unwrap().is_empty());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn graph_compiler_unit_rejection_precedes_job_and_source_access() {
+    let transport = RecordedGet::new(vec![]);
+    let (root, service) = service_with_source(transport.client());
+    let request: ResearchRequest = serde_json::from_value(json!({
+        "action":"graph_backtest", "idempotency_key":"graph-non-boolean-signal",
+        "instruments":["BTC-USDT"],"timeframe_ms":CANDLE_INTERVAL_MS,
+        "start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,
+        "graph_signal":{
+            "version":"okx.graph-signal/v1",
+            "graph":{"version":"okx.market.composition/v1","steps":[
+                {"id":"gain","op":"returns_series","input":"close"}
+            ],"result_steps":["gain"]},
+            "signal_step":"gain","target_if_true":1,"target_if_false":0,
+            "missing":"hold"
+        },
+        "costs":{"maker_fee_bps":0,"taker_fee_bps":10,"slippage_bps":5,
+            "funding_mode":"zero_assumption"},
+        "data_mode":"counterfactual"
+    }))
+    .unwrap();
+    assert!(request.valid());
+    assert_eq!(
+        service.research(request).await.unwrap_err(),
+        "graph_signal:SIGNAL_MUST_BE_BOOLEAN_OR_EVENT"
     );
     assert!(service.jobs.snapshot().is_empty());
     assert!(transport.routes.lock().unwrap().is_empty());

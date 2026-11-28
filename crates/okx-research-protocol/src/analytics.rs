@@ -504,6 +504,71 @@ impl ResearchCosts {
     }
 }
 impl ResearchRequest {
+    /// Field-specific admission for a graph experiment. This is the single
+    /// structural source of truth for both `valid()` and the Research owner;
+    /// the causal Rust compiler separately checks units, references and work.
+    pub fn validate_graph_backtest(&self) -> Result<(), String> {
+        let Self::GraphBacktest {
+            idempotency_key,
+            instruments,
+            timeframe_ms,
+            start_ms,
+            end_ms,
+            graph_signal,
+            costs,
+            ..
+        } = self
+        else {
+            return Err("INVALID_RESEARCH_REQUEST".into());
+        };
+        if !(1..=128).contains(&idempotency_key.len()) {
+            return Err("research.graph_backtest.idempotency_key:INVALID_LENGTH".into());
+        }
+        if !(1..=8).contains(&instruments.len()) {
+            return Err("research.graph_backtest.instruments:INVALID_COUNT".into());
+        }
+        for (index, instrument) in instruments.iter().enumerate() {
+            if !(1..=64).contains(&instrument.len()) {
+                return Err(format!(
+                    "research.graph_backtest.instruments[{index}]:INVALID_LENGTH"
+                ));
+            }
+        }
+        if instruments
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != instruments.len()
+        {
+            return Err("research.graph_backtest.instruments:DUPLICATE".into());
+        }
+        if !matches!(
+            *timeframe_ms,
+            60000 | 180000 | 300000 | 900000 | 1800000 | 3600000 | 14400000 | 86400000
+        ) {
+            return Err("research.graph_backtest.timeframe_ms:UNSUPPORTED".into());
+        }
+        if end_ms <= start_ms {
+            return Err("research.graph_backtest.range:INVALID".into());
+        }
+        let bars = (end_ms - start_ms) / timeframe_ms;
+        if bars > 1_000_000 || bars.saturating_mul(instruments.len() as u64) > 1_000_000 {
+            return Err("research.graph_backtest.range:RESOURCE_LIMIT".into());
+        }
+        for (field, value) in [
+            ("maker_fee_bps", costs.maker_fee_bps),
+            ("taker_fee_bps", costs.taker_fee_bps),
+            ("slippage_bps", costs.slippage_bps),
+        ] {
+            if !value.is_finite() || !(0.0..=10000.0).contains(&value) {
+                return Err(format!(
+                    "research.graph_backtest.costs.{field}:OUT_OF_RANGE"
+                ));
+            }
+        }
+        graph_signal.validate_structure()
+    }
+
     pub fn valid(&self) -> bool {
         match self {
             Self::Capabilities {} => true,
@@ -600,32 +665,7 @@ impl ResearchRequest {
                     && parameters.warmup_for(strategy_id).is_ok()
                     && costs.valid()
             }
-            Self::GraphBacktest {
-                idempotency_key,
-                instruments,
-                timeframe_ms,
-                start_ms,
-                end_ms,
-                graph_signal,
-                costs,
-                ..
-            } => {
-                !idempotency_key.is_empty()
-                    && idempotency_key.len() <= 128
-                    && !instruments.is_empty()
-                    && instruments.len() <= 8
-                    && instruments.iter().all(|s| !s.is_empty() && s.len() <= 64)
-                    && instruments
-                        .iter()
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .len()
-                        == instruments.len()
-                    && valid_range(*timeframe_ms, *start_ms, *end_ms)
-                    && ((end_ms - start_ms) / timeframe_ms).saturating_mul(instruments.len() as u64)
-                        <= 1_000_000
-                    && graph_signal.valid_structure()
-                    && costs.valid()
-            }
+            Self::GraphBacktest { .. } => self.validate_graph_backtest().is_ok(),
             Self::Grid {
                 idempotency_key,
                 instruments,

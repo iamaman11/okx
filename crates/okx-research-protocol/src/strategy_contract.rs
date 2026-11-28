@@ -123,26 +123,92 @@ impl GraphSignalSpec {
     /// Reject oversized or obviously unsafe envelopes before allocating a job.
     /// The checked graph compiler performs unit, reference, and cost analysis.
     pub fn valid_structure(&self) -> bool {
-        self.version == GRAPH_SIGNAL_VERSION
-            && self.graph.version == "okx.market.composition/v1"
-            && (1..=32).contains(&self.graph.steps.len())
-            && (1..=14).contains(&self.graph.result_steps.len())
-            && self.graph.result_steps.contains(&self.signal_step)
-            && valid_step_id(&self.signal_step)
-            && self.graph.result_steps.iter().all(|id| valid_step_id(id))
-            && self.graph.steps.iter().all(|step| {
-                valid_step_id(&step.id)
-                    && valid_source_ref(&step.input)
-                    && step.other.as_deref().is_none_or(valid_source_ref)
-                    && step.when.as_deref().is_none_or(valid_step_id)
-                    && step
-                        .period
-                        .is_none_or(|period| (1..=1000).contains(&period))
-                    && step.threshold.is_none_or(f64::is_finite)
-                    && step.op != SeriesOp::ForwardReturnLabel
-            })
-            && (-1..=1).contains(&self.target_if_true)
-            && (-1..=1).contains(&self.target_if_false)
+        self.validate_structure().is_ok()
+    }
+
+    /// Bounded field paths and stable codes; no user-controlled text escapes
+    /// into a public error. The same validator owns `valid_structure` and
+    /// Research admission, so the two paths cannot drift.
+    pub fn validate_structure(&self) -> Result<(), String> {
+        if self.version != GRAPH_SIGNAL_VERSION {
+            return Err("graph_signal.version:UNSUPPORTED".into());
+        }
+        if self.graph.version != "okx.market.composition/v1" {
+            return Err("graph_signal.graph.version:UNSUPPORTED".into());
+        }
+        if !(1..=32).contains(&self.graph.steps.len()) {
+            return Err("graph_signal.graph.steps:INVALID_COUNT".into());
+        }
+        if !(1..=14).contains(&self.graph.result_steps.len()) {
+            return Err("graph_signal.graph.result_steps:INVALID_COUNT".into());
+        }
+        if !valid_step_id(&self.signal_step) {
+            return Err("graph_signal.signal_step:INVALID_ID".into());
+        }
+        for (index, id) in self.graph.result_steps.iter().enumerate() {
+            if !valid_step_id(id) {
+                return Err(format!(
+                    "graph_signal.graph.result_steps[{index}]:INVALID_ID"
+                ));
+            }
+        }
+        if !self.graph.result_steps.contains(&self.signal_step) {
+            return Err("graph_signal.signal_step:UNPROJECTED".into());
+        }
+        for (index, step) in self.graph.steps.iter().enumerate() {
+            if !valid_step_id(&step.id) {
+                return Err(format!("graph_signal.graph.steps[{index}].id:INVALID_ID"));
+            }
+            if !valid_source_ref(&step.input) {
+                return Err(format!(
+                    "graph_signal.graph.steps[{index}].input:INVALID_REFERENCE"
+                ));
+            }
+            if step
+                .other
+                .as_deref()
+                .is_some_and(|other| !valid_source_ref(other))
+            {
+                return Err(format!(
+                    "graph_signal.graph.steps[{index}].other:INVALID_REFERENCE"
+                ));
+            }
+            if step
+                .when
+                .as_deref()
+                .is_some_and(|when| !valid_step_id(when))
+            {
+                return Err(format!("graph_signal.graph.steps[{index}].when:INVALID_ID"));
+            }
+            if step
+                .period
+                .is_some_and(|period| !(1..=1000).contains(&period))
+            {
+                return Err(format!(
+                    "graph_signal.graph.steps[{index}].period:OUT_OF_RANGE"
+                ));
+            }
+            if step
+                .threshold
+                .is_some_and(|threshold| !threshold.is_finite())
+            {
+                return Err(format!(
+                    "graph_signal.graph.steps[{index}].threshold:NONFINITE"
+                ));
+            }
+            if step.op == SeriesOp::ForwardReturnLabel {
+                return Err(format!(
+                    "graph_signal.graph.steps[{index}].op:FORWARD_LABEL_FORBIDDEN"
+                ));
+            }
+        }
+        if !(-1..=1).contains(&self.target_if_true) {
+            return Err("graph_signal.target_if_true:INVALID_POSITION".into());
+        }
+        if !(-1..=1).contains(&self.target_if_false) {
+            return Err("graph_signal.target_if_false:INVALID_POSITION".into());
+        }
+        Ok(())
     }
 }
 
@@ -271,21 +337,36 @@ mod tests {
         });
         let graph: GraphSignalSpec = serde_json::from_value(wire.clone()).unwrap();
         assert!(graph.valid_structure());
+        assert!(graph.validate_structure().is_ok());
         assert_eq!(serde_json::to_value(&graph).unwrap(), wire);
 
-        for (field, bad) in [
-            ("version", serde_json::json!("unknown")),
-            ("signal_step", serde_json::json!("missing")),
-            ("target_if_true", serde_json::json!(2)),
-            ("target_if_false", serde_json::json!(-2)),
+        for (field, bad, expected) in [
+            (
+                "version",
+                serde_json::json!("unknown"),
+                "graph_signal.version:UNSUPPORTED",
+            ),
+            (
+                "signal_step",
+                serde_json::json!("missing"),
+                "graph_signal.signal_step:UNPROJECTED",
+            ),
+            (
+                "target_if_true",
+                serde_json::json!(2),
+                "graph_signal.target_if_true:INVALID_POSITION",
+            ),
+            (
+                "target_if_false",
+                serde_json::json!(-2),
+                "graph_signal.target_if_false:INVALID_POSITION",
+            ),
         ] {
             let mut changed = wire.clone();
             changed[field] = bad;
-            assert!(
-                !serde_json::from_value::<GraphSignalSpec>(changed)
-                    .is_ok_and(|spec| spec.valid_structure()),
-                "{field}"
-            );
+            let spec: GraphSignalSpec = serde_json::from_value(changed).unwrap();
+            assert!(!spec.valid_structure(), "{field}");
+            assert_eq!(spec.validate_structure().unwrap_err(), expected, "{field}");
         }
         let mut unknown = wire.clone();
         unknown["unexpected"] = serde_json::json!("forbidden");
@@ -293,10 +374,11 @@ mod tests {
 
         let mut future = wire.clone();
         future["graph"]["steps"][1]["op"] = serde_json::json!("forward_return_label");
-        assert!(
-            !serde_json::from_value::<GraphSignalSpec>(future)
-                .unwrap()
-                .valid_structure()
+        let future: GraphSignalSpec = serde_json::from_value(future).unwrap();
+        assert!(!future.valid_structure());
+        assert_eq!(
+            future.validate_structure().unwrap_err(),
+            "graph_signal.graph.steps[1].op:FORWARD_LABEL_FORBIDDEN"
         );
 
         let mut oversized = wire;
@@ -304,10 +386,81 @@ mod tests {
             serde_json::json!({"id":"a","op":"returns_series","input":"close"});
             33
         ]);
-        assert!(
-            !serde_json::from_value::<GraphSignalSpec>(oversized)
-                .unwrap()
-                .valid_structure()
+        let oversized: GraphSignalSpec = serde_json::from_value(oversized).unwrap();
+        assert!(!oversized.valid_structure());
+        assert_eq!(
+            oversized.validate_structure().unwrap_err(),
+            "graph_signal.graph.steps:INVALID_COUNT"
+        );
+    }
+
+    #[test]
+    fn graph_signal_reports_indexed_fields_without_echoing_user_input() {
+        let base = serde_json::json!({
+            "version":GRAPH_SIGNAL_VERSION,
+            "graph":{"version":"okx.market.composition/v1","steps":[
+                {"id":"gain","op":"returns_series","input":"close"},
+                {"id":"signal","op":"greater_than","input":"gain","threshold":0.0}
+            ],"result_steps":["signal"]},
+            "signal_step":"signal","target_if_true":1,"target_if_false":0,"missing":"hold"
+        });
+        for (pointer, bad, expected) in [
+            (
+                "/graph/version",
+                serde_json::json!("future"),
+                "graph_signal.graph.version:UNSUPPORTED",
+            ),
+            (
+                "/graph/steps/0/id",
+                serde_json::json!("Invalid/ID"),
+                "graph_signal.graph.steps[0].id:INVALID_ID",
+            ),
+            (
+                "/graph/steps/0/input",
+                serde_json::json!("close/private/value"),
+                "graph_signal.graph.steps[0].input:INVALID_REFERENCE",
+            ),
+            (
+                "/graph/steps/1/threshold",
+                serde_json::json!(0),
+                "graph_signal.graph.steps[1].threshold:NONFINITE",
+            ),
+            (
+                "/graph/result_steps/0",
+                serde_json::json!("Bad ID"),
+                "graph_signal.graph.result_steps[0]:INVALID_ID",
+            ),
+        ] {
+            let mut wire = base.clone();
+            *wire.pointer_mut(pointer).unwrap() = bad;
+            let mut spec: GraphSignalSpec = serde_json::from_value(wire).unwrap();
+            if pointer.ends_with("/threshold") {
+                // JSON cannot carry NaN/Inf; exercise the Rust-typed caller.
+                spec.graph.steps[1].threshold = Some(f64::INFINITY);
+            }
+            assert_eq!(
+                spec.validate_structure().unwrap_err(),
+                expected,
+                "{pointer}"
+            );
+        }
+        let mut spec: GraphSignalSpec = serde_json::from_value(base).unwrap();
+        spec.graph.steps[1].period = Some(0);
+        assert_eq!(
+            spec.validate_structure().unwrap_err(),
+            "graph_signal.graph.steps[1].period:OUT_OF_RANGE"
+        );
+        spec.graph.steps[1].period = None;
+        spec.graph.steps[1].other = Some("bad/ref".into());
+        assert_eq!(
+            spec.validate_structure().unwrap_err(),
+            "graph_signal.graph.steps[1].other:INVALID_REFERENCE"
+        );
+        spec.graph.steps[1].other = None;
+        spec.graph.steps[1].when = Some("bad/when".into());
+        assert_eq!(
+            spec.validate_structure().unwrap_err(),
+            "graph_signal.graph.steps[1].when:INVALID_ID"
         );
     }
 }

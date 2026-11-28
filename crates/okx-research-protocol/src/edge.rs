@@ -244,32 +244,38 @@ mod edge_lanes_tests {
 }
 
 impl TryFrom<ResearchRequestEnvelope> for ResearchCommand {
-    type Error = &'static str;
+    type Error = String;
 
     fn try_from(envelope: ResearchRequestEnvelope) -> Result<Self, Self::Error> {
         if envelope.account.is_some() {
-            return Err("RESEARCH_OPERATION_FORBIDDEN");
+            return Err("RESEARCH_OPERATION_FORBIDDEN".into());
         }
         if !envelope.valid_envelope() {
-            return Err("INVALID_RESEARCH_REQUEST");
+            return Err("INVALID_RESEARCH_REQUEST".into());
         }
         let command = match envelope.operation {
             ResearchOperation::Market { request } if request.valid() => Self::Market(request),
             ResearchOperation::MarketCapabilities => Self::MarketCapabilities,
+            ResearchOperation::Research {
+                request: request @ ResearchRequest::GraphBacktest { .. },
+            } => {
+                request.validate_graph_backtest()?;
+                Self::Research(request)
+            }
             ResearchOperation::Research { request } if request.valid() => Self::Research(request),
             ResearchOperation::PortfolioScenario { request } if request.valid() => {
                 Self::PortfolioScenario(request)
             }
             ResearchOperation::Diagnostics { request } => {
                 if request.account.is_some() || request.view.as_deref() != Some("research") {
-                    return Err("RESEARCH_OPERATION_FORBIDDEN");
+                    return Err("RESEARCH_OPERATION_FORBIDDEN".into());
                 }
                 if !request.reference.as_ref().is_some_and(|v| {
                     (1..=128).contains(&v.len())
                         && v.bytes()
                             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':'))
                 }) {
-                    return Err("INVALID_RESEARCH_REQUEST");
+                    return Err("INVALID_RESEARCH_REQUEST".into());
                 }
                 Self::ExplainJob(request.reference)
             }
@@ -301,8 +307,8 @@ impl TryFrom<ResearchRequestEnvelope> for ResearchCommand {
                     instrument_type,
                 }
             }
-            ResearchOperation::Forbidden => return Err("RESEARCH_OPERATION_FORBIDDEN"),
-            _ => return Err("INVALID_RESEARCH_REQUEST"),
+            ResearchOperation::Forbidden => return Err("RESEARCH_OPERATION_FORBIDDEN".into()),
+            _ => return Err("INVALID_RESEARCH_REQUEST".into()),
         };
         Ok(command)
     }

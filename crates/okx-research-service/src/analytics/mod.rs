@@ -186,7 +186,12 @@ impl AnalyticsService {
         })
     }
     pub async fn research(&self, request: ResearchRequest) -> Result<Value, String> {
-        if !request.valid() {
+        // Graph structural failure must retain its typed path before any
+        // job/source I/O. Other Research operations keep their established
+        // request admission and error contract.
+        if matches!(&request, ResearchRequest::GraphBacktest { .. }) {
+            request.validate_graph_backtest()?;
+        } else if !request.valid() {
             return Err("INVALID_RESEARCH_REQUEST".into());
         }
         match request {
