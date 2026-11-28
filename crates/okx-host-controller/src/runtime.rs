@@ -491,13 +491,18 @@ async fn process_control_batch(
                     ProcessTransition::None,
                 ),
                 HostControlOperation::HandoffControllerUpdate => (
-                    autostart::ensure_run_allowed()
+                    executor
+                        .ensure_quiescent_controller_handoff()
+                        .and_then(|_| autostart::ensure_run_allowed())
                         .and_then(|_| controller_update::prepare_handoff(&request.request_id)),
                     ProcessTransition::Handoff,
                 ),
-                HostControlOperation::HandoffToAutostart => {
-                    (autostart::run_now(), ProcessTransition::Handoff)
-                }
+                HostControlOperation::HandoffToAutostart => (
+                    executor
+                        .ensure_quiescent_controller_handoff()
+                        .and_then(|_| autostart::run_now()),
+                    ProcessTransition::Handoff,
+                ),
                 HostControlOperation::AcceptanceCrashController => (
                     autostart::ensure_policy_valid().map(|()| {
                         serde_json::json!({
