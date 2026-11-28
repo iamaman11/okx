@@ -129,3 +129,66 @@ fn ema_missing_value_resets_warmup_without_forward_fill() {
     assert_eq!(warmup_cause["ema"].origin_index, 3);
     assert!(plan.evaluate_at(&prices, 6)["ema"].0.is_some());
 }
+
+/// Optional throughput evidence for the two new streaming primitives. It
+/// measures the real checked graph path, without an exchange or a second runner.
+/// Timing is deliberately informational: shared CI machine speed is not a
+/// stable correctness oracle. The exact operation count remains an assertion.
+#[test]
+#[ignore = "run explicitly for EMA/scale median ns/bar throughput evidence"]
+fn ema_scale_microbenchmark_reports_median_ns_per_bar() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    fn bench_graph(steps: serde_json::Value, results: &[&str]) -> CheckedComposition {
+        let request: CompositionRequest = serde_json::from_value(json!({
+            "version": COMPOSITION_VERSION,
+            "steps": steps,
+            "result_steps": results,
+        }))
+        .unwrap();
+        CheckedComposition::compile(request, 100_000).unwrap()
+    }
+
+    fn measure(plan: &CheckedComposition, result_step: &str, bars: usize) -> u128 {
+        let mut samples = [0_u128; 5];
+        for sample in &mut samples {
+            let mut runner = CausalGraphStream::new(plan).unwrap();
+            let mut checksum = 0.0;
+            let started = Instant::now();
+            for index in 0..bars {
+                let close = black_box(100.0 + (index % 101) as f64 * 0.01);
+                let values = runner
+                    .on_closed_bar(ClosedBar {
+                        timestamp_ms: index as i64 * 60_000,
+                        close: Some(close),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                checksum += black_box(values[result_step].0.unwrap_or(0.0));
+            }
+            *sample = started.elapsed().as_nanos() / bars as u128;
+            assert_eq!(runner.operation_count(), bars as u64 * plan.steps().len() as u64);
+            assert!(black_box(checksum).is_finite());
+        }
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    let ema = bench_graph(
+        json!([{"id":"ema","op":"ema_series","input":"close","period":21}]),
+        &["ema"],
+    );
+    let ema_scaled = bench_graph(
+        json!([
+            {"id":"ema","op":"ema_series","input":"close","period":21},
+            {"id":"scaled","op":"scale_series","input":"ema","factor":1.5}
+        ]),
+        &["scaled"],
+    );
+    for bars in [10_000, 100_000] {
+        let ema_ns = measure(&ema, "ema", bars);
+        let ema_scale_ns = measure(&ema_scaled, "scaled", bars);
+        println!("bars={bars} ema_ns/bar={ema_ns} ema+scale_ns/bar={ema_scale_ns} median_of=5");
+    }
+}
