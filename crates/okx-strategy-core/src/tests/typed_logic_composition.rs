@@ -49,7 +49,7 @@ fn with_volume(
 }
 
 #[test]
-fn not_and_if_else_have_strict_unknowns_without_touching_inactive_arm() {
+fn not_and_if_else_have_strict_unknowns_without_propagating_inactive_arm_null() {
     let plan = checked(
         json!([
             {"id":"positive","op":"greater_than","input":"close","threshold":100.0},
@@ -79,7 +79,7 @@ fn not_and_if_else_have_strict_unknowns_without_touching_inactive_arm() {
             assert_eq!(values["previous"].0, None);
             assert!(
                 !causes.contains_key("choice"),
-                "unselected missing branch was evaluated"
+                "unselected missing branch must not poison the selected result"
             );
         }
         if index == 3 {
@@ -175,8 +175,8 @@ fn boolean_rolling_min_is_exact_consecutive_confirmation_without_another_operato
 fn missing_event_resets_cooldown_without_synthesizing_observations() {
     let plan = checked(
         json!([
-            {"id":"high","op":"greater_than","input":"close","threshold":100.0},
-            {"id":"event","op":"rising_edge","input":"high"},
+            {"id":"above_100","op":"greater_than","input":"close","threshold":100.0},
+            {"id":"event","op":"rising_edge","input":"above_100"},
             {"id":"bounded","op":"cooldown","input":"event","period":10}
         ]),
         &["bounded"],
@@ -197,6 +197,17 @@ fn missing_event_resets_cooldown_without_synthesizing_observations() {
         assert_eq!(batch, live);
         assert_eq!(batch["bounded"].0, expected[index]);
     }
+    let (_, causes) = plan
+        .evaluate_at_with_candle_sources_diagnostics(
+            &close,
+            CandlePriceInputs::default(),
+            None,
+            None,
+            3,
+        )
+        .unwrap();
+    assert_eq!(causes["bounded"].origin_step, "close");
+    assert_eq!(causes["bounded"].origin_index, 3);
 }
 
 #[test]
@@ -273,7 +284,10 @@ fn typed_logic_rejects_incompatible_branches_outcomes_and_uncausal_conditions() 
         "other:UNIT_MISMATCH",
     );
     refusal(
-        json!([{"id":"bad","op":"if_else","input":"close","other":"close","when":"close"}]),
+        json!([
+            {"id":"lagged","op":"lag","input":"close","period":1},
+            {"id":"bad","op":"if_else","input":"close","other":"close","when":"lagged"}
+        ]),
         "when:UNIT_MISMATCH:expected=boolean",
     );
     refusal(
