@@ -30,39 +30,127 @@ const COLUMNS: &str = "substr(id,1,129),state,progress,
         'CONTRACT_MULTIPLIER_MISSING','EMPTY_VARIANTS','RANGE_NOT_CLOSED',
         'RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED','RESEARCH_BATCH_SOURCE_RETRYABLE') THEN error
       WHEN error='process restarted before completion' THEN 'RESEARCH_INTERRUPTED'
-      WHEN error LIKE 'LIMIT_EXCEEDED:%' THEN 'LIMIT_EXCEEDED'
-      WHEN error LIKE 'LIMIT_TOTAL_BARS:%' THEN 'LIMIT_TOTAL_BARS'
-      WHEN error LIKE 'LIMIT_BARS:%' THEN 'LIMIT_BARS'
-      WHEN error LIKE 'RESOURCE_BUSY:%' THEN 'RESOURCE_BUSY'
-      WHEN error LIKE 'OKX rate/backpressure defer:%'
-        OR error LIKE 'public OKX market API error: OKX rate/backpressure defer:%' THEN 'MARKET_SOURCE_RETRYABLE'
+      WHEN error GLOB 'LIMIT_EXCEEDED:*' THEN 'LIMIT_EXCEEDED'
+      WHEN error GLOB 'LIMIT_TOTAL_BARS:*' THEN 'LIMIT_TOTAL_BARS'
+      WHEN error GLOB 'LIMIT_BARS:*' THEN 'LIMIT_BARS'
+      WHEN error GLOB 'RESOURCE_BUSY:*' THEN 'RESOURCE_BUSY'
+      WHEN error GLOB 'OKX rate/backpressure defer:*'
+        OR error GLOB 'public OKX market API error: OKX rate/backpressure defer:*' THEN 'MARKET_SOURCE_RETRYABLE'
       ELSE 'UNCLASSIFIED_RESEARCH_ERROR' END,pinned,
     CASE WHEN length(candidate_progress)<=512 THEN candidate_progress ELSE NULL END,
     CASE WHEN length(origin_invocation)<=256 THEN origin_invocation ELSE NULL END,
     CASE WHEN length(producer)<=512 THEN producer ELSE NULL END";
 
-// Safe bounded event labels only; never emit raw source or request errors.
+/// Safe bounded event labels only; never emit raw source or request errors.
+///
+/// This classifier also feeds live Research/Market terminal observations. Keep
+/// it in exact parity with the SQL projection above: one failed operation must
+/// not acquire a different public reason merely because its job was restored
+/// after restart or inspected through another read-only entry point.
 pub(in crate::analytics) fn safe_reason(error: &str) -> &'static str {
     match error {
-        "CANCELLED" | "JOB_CANCELLED" => "CANCELLED",
+        "RESULT_EXPIRED_BY_7_DAY_RETENTION" => "RESULT_EXPIRED_BY_7_DAY_RETENTION",
+        "JOB_CANCELLED" => "JOB_CANCELLED",
+        "CANCELLED" => "CANCELLED",
         "SOURCE_INVALID" => "SOURCE_INVALID",
+        "NONFINITE_SOURCE" => "NONFINITE_SOURCE",
         "CANDLE_RANGE_UNAVAILABLE" => "CANDLE_RANGE_UNAVAILABLE",
         "CANDLE_RANGE_INCOMPLETE" => "CANDLE_RANGE_INCOMPLETE",
         "CANDLE_INTERIOR_GAP" => "CANDLE_INTERIOR_GAP",
+        "INVALID_FUNDING" => "INVALID_FUNDING",
         "FUNDING_RANGE_UNAVAILABLE" => "FUNDING_RANGE_UNAVAILABLE",
         "FUNDING_RANGE_INCOMPLETE" => "FUNDING_RANGE_INCOMPLETE",
+        "GLOBAL_RANK_SOURCE_INCOMPLETE" => "GLOBAL_RANK_SOURCE_INCOMPLETE",
         "RESEARCH_MEMORY_LIMIT" => "RESEARCH_MEMORY_LIMIT",
         "CPU_QUEUE_FULL" => "CPU_QUEUE_FULL",
         "LIVE_SOURCE_DEADLINE" => "LIVE_SOURCE_DEADLINE",
         "RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED" => "RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED",
         "RESEARCH_BATCH_SOURCE_RETRYABLE" => "RESEARCH_BATCH_SOURCE_RETRYABLE",
         "UNSUPPORTED_STRATEGY" => "UNSUPPORTED_STRATEGY",
-        _ if okx_research_protocol::research_ipc::is_retryable_source_defer(error) => {
+        "UNSUPPORTED_INVERSE_CONTRACT" => "UNSUPPORTED_INVERSE_CONTRACT",
+        "UNSUPPORTED_INSTRUMENT_TYPE" => "UNSUPPORTED_INSTRUMENT_TYPE",
+        "CONTRACT_MULTIPLIER_MISSING" => "CONTRACT_MULTIPLIER_MISSING",
+        "EMPTY_VARIANTS" => "EMPTY_VARIANTS",
+        "RANGE_NOT_CLOSED" => "RANGE_NOT_CLOSED",
+        "process restarted before completion" => "RESEARCH_INTERRUPTED",
+        _ if error.starts_with("OKX rate/backpressure defer:")
+            || error.starts_with("public OKX market API error: OKX rate/backpressure defer:") =>
+        {
             "MARKET_SOURCE_RETRYABLE"
         }
         _ if error.starts_with("RESOURCE_BUSY:") => "RESOURCE_BUSY",
-        _ if error.starts_with("LIMIT_") => "LIMIT_EXCEEDED",
+        _ if error.starts_with("LIMIT_TOTAL_BARS:") => "LIMIT_TOTAL_BARS",
+        _ if error.starts_with("LIMIT_BARS:") => "LIMIT_BARS",
+        _ if error.starts_with("LIMIT_EXCEEDED:") => "LIMIT_EXCEEDED",
         _ => "UNCLASSIFIED_RESEARCH_ERROR",
+    }
+}
+
+/// A bounded, non-authoritative explanation of an already sanitized reason.
+/// Never infer a source, financial effect, or retry permission from an error
+/// payload. These values describe only the observed Research job snapshot.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureClass {
+    Source,
+    Resource,
+    Contract,
+    Batch,
+    Lifecycle,
+    Unclassified,
+}
+
+fn failure_class(code: &str) -> FailureClass {
+    match code {
+        "SOURCE_INVALID"
+        | "NONFINITE_SOURCE"
+        | "CANDLE_RANGE_UNAVAILABLE"
+        | "CANDLE_RANGE_INCOMPLETE"
+        | "CANDLE_INTERIOR_GAP"
+        | "INVALID_FUNDING"
+        | "FUNDING_RANGE_UNAVAILABLE"
+        | "FUNDING_RANGE_INCOMPLETE"
+        | "GLOBAL_RANK_SOURCE_INCOMPLETE"
+        | "LIVE_SOURCE_DEADLINE"
+        | "MARKET_SOURCE_RETRYABLE" => FailureClass::Source,
+        "RESEARCH_MEMORY_LIMIT"
+        | "CPU_QUEUE_FULL"
+        | "LIMIT_EXCEEDED"
+        | "LIMIT_TOTAL_BARS"
+        | "LIMIT_BARS"
+        | "RESOURCE_BUSY" => FailureClass::Resource,
+        "UNSUPPORTED_STRATEGY"
+        | "UNSUPPORTED_INVERSE_CONTRACT"
+        | "UNSUPPORTED_INSTRUMENT_TYPE"
+        | "CONTRACT_MULTIPLIER_MISSING"
+        | "EMPTY_VARIANTS"
+        | "RANGE_NOT_CLOSED" => FailureClass::Contract,
+        "RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED" | "RESEARCH_BATCH_SOURCE_RETRYABLE" => {
+            FailureClass::Batch
+        }
+        "RESULT_EXPIRED_BY_7_DAY_RETENTION"
+        | "JOB_CANCELLED"
+        | "CANCELLED"
+        | "RESEARCH_INTERRUPTED" => FailureClass::Lifecycle,
+        _ => FailureClass::Unclassified,
+    }
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ObservedStage {
+    Admission,
+    Execution,
+    Terminal,
+    Unknown,
+}
+
+fn observed_stage(state: &str) -> ObservedStage {
+    match state {
+        "queued" => ObservedStage::Admission,
+        "running" => ObservedStage::Execution,
+        "completed" | "failed" | "cancelled" | "interrupted" => ObservedStage::Terminal,
+        _ => ObservedStage::Unknown,
     }
 }
 
@@ -70,6 +158,7 @@ pub(in crate::analytics) fn safe_reason(error: &str) -> &'static str {
 struct Snapshot {
     id: String,
     state: String,
+    observed_stage: ObservedStage,
     progress: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_progress: Option<super::super::candidate_progress::CandidateProgress>,
@@ -81,6 +170,8 @@ struct Snapshot {
     producer: Option<crate::producer::Producer>,
     result_ref: Option<String>,
     error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_class: Option<FailureClass>,
     pinned: bool,
     observed_at_ms: i64,
     generation: u64,
@@ -108,9 +199,11 @@ fn valid_result_reference(value: &str) -> bool {
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
     let error: Option<String> = row.get(4)?;
     let artifact: Option<String> = row.get(3)?;
+    let state: String = row.get(1)?;
     Ok(Snapshot {
         id: row.get(0)?,
-        state: row.get(1)?,
+        observed_stage: observed_stage(&state),
+        state,
         progress: row.get(2)?,
         candidate_progress: row
             .get::<_, Option<String>>(6)?
@@ -135,6 +228,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
             .and_then(|v| serde_json::from_str(&v).ok()),
         result_ref: artifact.filter(|v| valid_result_reference(v)),
         // SQL emits only the fixed whitelist above, never raw failure payloads.
+        failure_class: error.as_deref().map(failure_class),
         error_code: error,
         pinned: row.get(5)?,
         observed_at_ms: 0,

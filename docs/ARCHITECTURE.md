@@ -3,6 +3,10 @@
 For canonical package, executable and CI terminology (including compatibility
 names), see [component and CI names](COMPONENT_AND_CI_NAMES.md).
 
+For the shared type/operation vocabulary, the existing composition admission
+path and the extension acceptance rule, see
+[typed operation architecture](TYPED_OPERATION_ARCHITECTURE.md).
+
 See [the implemented clean Engine contract](ARCHITECTURE_CONTRACT_V1.md), [#398](https://github.com/iamaman11/okx/issues/398) and [the operational runbook](PRODUCT_ACCEPTANCE.md).
 
 [The earlier architecture document](history/ARCHITECTURE-before-398.md) is historical evidence only.
