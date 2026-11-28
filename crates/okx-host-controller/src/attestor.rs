@@ -425,7 +425,7 @@ mod tests {
         // A cold executable hash can outlast the former 850 ms owner budget.
         // The synthetic owner is deliberately delayed; no disk, network,
         // Research process or production bearer is accessed by this test.
-        let (requests, mut receiver) = mpsc::channel(1);
+        let (requests, mut receiver) = mpsc::channel::<ObservationRequest>(1);
         let owner = tokio::spawn(async move {
             let request = receiver.recv().await.expect("owner request");
             sleep(Duration::from_millis(950)).await;
@@ -459,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_timeout_and_missing_proof_remain_fail_closed() {
-        let (requests, mut receiver) = mpsc::channel(1);
+        let (requests, mut receiver) = mpsc::channel::<ObservationRequest>(1);
         assert_eq!(
             request_owner_observation(&requests, Duration::from_millis(15)).await,
             Err("ATTESTOR_OWNER_TIMEOUT")
