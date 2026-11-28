@@ -36,7 +36,11 @@ const ATTESTOR_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/attesto
 const MAX_FRAME_BYTES: usize = 8192;
 const MAX_CHALLENGES_PER_SESSION: usize = 128;
 const MAX_CHALLENGE_FUTURE_MS: u64 = 3000;
-const STATUS_TIMEOUT: Duration = Duration::from_millis(850);
+// Research's fresh installed-image proof hashes the executable on every
+// observation. Allow a slow disk read within Edge's 2.5-second challenge,
+// leaving 700 ms for socket delivery and independent Edge validation.
+const STATUS_TIMEOUT: Duration = Duration::from_millis(1800);
+const SLOW_OWNER_OBSERVATION: Duration = Duration::from_millis(400);
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_RETRY_SECONDS: u64 = 2;
 const MAX_RETRY_SECONDS: u64 = 60;
@@ -44,17 +48,48 @@ const STABLE_SESSION_BACKOFF_RESET: Duration = Duration::from_secs(30);
 
 pub struct ObservationRequest {
     reply: oneshot::Sender<Option<ResearchRuntimeStatus>>,
+    enqueued_at: Instant,
 }
 
 /// Runs on CONTROL's existing owner loop. This readback may observe a child
 /// exiting, but it does not mutate desired state or trigger lifecycle work.
 pub fn answer_observation(executor: &mut HostExecutor, request: ObservationRequest) {
+    let queue_wait = request.enqueued_at.elapsed();
+    let started = Instant::now();
     let observed = executor
         .observe_research_read_only()
         .ok()
         .and_then(|value| serde_json::from_value::<ResearchRuntimeStatus>(value).ok())
         .filter(|status| status.validate().is_ok());
+    let readback = started.elapsed();
+    if queue_wait >= SLOW_OWNER_OBSERVATION || readback >= SLOW_OWNER_OBSERVATION {
+        // Timing only: no bearer, process path, identity or challenge nonce.
+        // Distinguishes a busy CONTROL owner from slow fresh file hashing.
+        eprintln!(
+            "CONTROL attestor slow observation: queue_wait_ms={} readback_ms={}",
+            queue_wait.as_millis(),
+            readback.as_millis()
+        );
+    }
     let _ = request.reply.send(observed);
+}
+
+async fn request_owner_observation(
+    requests: &mpsc::Sender<ObservationRequest>,
+    deadline: Duration,
+) -> Result<ResearchRuntimeStatus, &'static str> {
+    let (reply, result) = oneshot::channel();
+    requests
+        .try_send(ObservationRequest {
+            reply,
+            enqueued_at: Instant::now(),
+        })
+        .map_err(|_| "ATTESTOR_OWNER_QUEUE_UNAVAILABLE")?;
+    timeout(deadline, result)
+        .await
+        .map_err(|_| "ATTESTOR_OWNER_TIMEOUT")?
+        .map_err(|_| "ATTESTOR_OWNER_CLOSED")?
+        .ok_or("ATTESTOR_STATUS_UNAVAILABLE")
 }
 
 #[derive(Debug, Serialize)]
@@ -290,14 +325,7 @@ async fn run_session(
                     || !nonces.insert(challenge.nonce.clone()) {
                     return Err("ATTESTOR_REPLAY_OR_LIMIT");
                 }
-                let (reply, result) = oneshot::channel();
-                requests.try_send(ObservationRequest { reply })
-                    .map_err(|_| "ATTESTOR_OWNER_QUEUE_UNAVAILABLE")?;
-                let status = timeout(STATUS_TIMEOUT, result)
-                    .await
-                    .map_err(|_| "ATTESTOR_OWNER_TIMEOUT")?
-                    .map_err(|_| "ATTESTOR_OWNER_CLOSED")?
-                    .ok_or("ATTESTOR_STATUS_UNAVAILABLE")?;
+                let status = request_owner_observation(requests, STATUS_TIMEOUT).await?;
                 let observed_at_ms = unix_millis()?;
                 if observed_at_ms >= challenge.deadline_ms {
                     return Err("ATTESTOR_CHALLENGE_EXPIRED");
@@ -388,6 +416,68 @@ pub async fn run(token: Zeroizing<String>, requests: mpsc::Sender<ObservationReq
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okx_host_protocol::{
+        HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1, ResearchCatalogMode, ResearchRuntimePhase,
+    };
+
+    #[tokio::test]
+    async fn slow_fresh_owner_observation_can_complete_inside_edge_challenge() {
+        // A cold executable hash can outlast the former 850 ms owner budget.
+        // The synthetic owner is deliberately delayed; no disk, network,
+        // Research process or production bearer is accessed by this test.
+        let (requests, mut receiver) = mpsc::channel::<ObservationRequest>(1);
+        let owner = tokio::spawn(async move {
+            let request = receiver.recv().await.expect("owner request");
+            sleep(Duration::from_millis(950)).await;
+            let status = ResearchRuntimeStatus {
+                schema: HOST_RESEARCH_RUNTIME_STATUS_SCHEMA_V1.to_owned(),
+                desired_running: true,
+                process_generation: 1,
+                pid: Some(1234),
+                active_worker_sha256: Some("a".repeat(64)),
+                installed_worker_sha256: Some("a".repeat(64)),
+                phase: ResearchRuntimePhase::RunningUnverified,
+                catalog_mode: ResearchCatalogMode::HostIndependent,
+                retry_in_ms: None,
+                last_error: None,
+            };
+            assert!(status.validate().is_ok());
+            request
+                .reply
+                .send(Some(status))
+                .expect("attestor still waiting");
+        });
+        assert!(STATUS_TIMEOUT > Duration::from_millis(950));
+        assert!(STATUS_TIMEOUT + Duration::from_millis(500) < Duration::from_millis(2500));
+        assert!(
+            request_owner_observation(&requests, STATUS_TIMEOUT)
+                .await
+                .is_ok()
+        );
+        owner.await.expect("owner finished");
+    }
+
+    #[tokio::test]
+    async fn owner_timeout_and_missing_proof_remain_fail_closed() {
+        let (requests, mut receiver) = mpsc::channel::<ObservationRequest>(1);
+        assert_eq!(
+            request_owner_observation(&requests, Duration::from_millis(15)).await,
+            Err("ATTESTOR_OWNER_TIMEOUT")
+        );
+        let abandoned = receiver.recv().await.expect("timed-out owner request");
+        assert!(abandoned.reply.is_closed());
+
+        let answering = tokio::spawn(async move {
+            let request = receiver.recv().await.expect("second owner request");
+            let _ = request.reply.send(None);
+        });
+        assert_eq!(
+            request_owner_observation(&requests, Duration::from_millis(100)).await,
+            Err("ATTESTOR_STATUS_UNAVAILABLE")
+        );
+        answering.await.expect("owner finished");
+        drop(requests);
+    }
 
     #[test]
     fn attestor_credential_rotation_is_fail_closed_and_never_echoes_secrets() {
