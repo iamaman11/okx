@@ -875,13 +875,19 @@ mod tests {
 
         owner.desired.desired_running = true;
         assert_eq!(
-            owner.ensure_stopped_for_controller_handoff().unwrap_err().code(),
+            owner
+                .ensure_stopped_for_controller_handoff()
+                .unwrap_err()
+                .code(),
             "CONTROLLER_HANDOFF_NOT_QUIESCENT"
         );
         owner.desired.desired_running = false;
         owner.state_error = Some("RESEARCH_STATE_CORRUPT".into());
         assert_eq!(
-            owner.ensure_stopped_for_controller_handoff().unwrap_err().code(),
+            owner
+                .ensure_stopped_for_controller_handoff()
+                .unwrap_err()
+                .code(),
             "CONTROLLER_HANDOFF_NOT_QUIESCENT"
         );
         owner.state_error = None;
@@ -892,7 +898,10 @@ mod tests {
             // even if the child handle was lost before a status readback.
             owner.job = Some(AgentJob::new().unwrap());
             assert_eq!(
-                owner.ensure_stopped_for_controller_handoff().unwrap_err().code(),
+                owner
+                    .ensure_stopped_for_controller_handoff()
+                    .unwrap_err()
+                    .code(),
                 "CONTROLLER_HANDOFF_NOT_QUIESCENT"
             );
             owner.job = None;

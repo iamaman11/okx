@@ -2402,7 +2402,10 @@ mod tests {
 
         owner.desired_agent = AgentDesired::Running;
         assert_eq!(
-            owner.ensure_quiescent_controller_handoff().unwrap_err().code(),
+            owner
+                .ensure_quiescent_controller_handoff()
+                .unwrap_err()
+                .code(),
             "CONTROLLER_HANDOFF_NOT_QUIESCENT"
         );
         owner.desired_agent = AgentDesired::Stopped;
@@ -2420,7 +2423,10 @@ mod tests {
         owner.agent_job.assign(&mut child).unwrap();
         assert!(!owner.agent_job.is_empty().unwrap());
         assert_eq!(
-            owner.ensure_quiescent_controller_handoff().unwrap_err().code(),
+            owner
+                .ensure_quiescent_controller_handoff()
+                .unwrap_err()
+                .code(),
             "CONTROLLER_HANDOFF_NOT_QUIESCENT"
         );
         assert!(
