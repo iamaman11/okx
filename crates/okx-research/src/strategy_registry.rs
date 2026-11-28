@@ -1090,10 +1090,10 @@ mod tests {
     fn graph_replay_rejects_unavailable_sources_and_future_labels() {
         let series = bars();
         let mut graph = graph_spec();
-        graph.graph.graph.steps[0].input = "volume".into();
+        graph.graph.graph.steps[0].input = "open_interest".into();
         assert_eq!(
             replay_graph(&series, &graph, 3, series.len(), &|| false).unwrap_err(),
-            "composition.stream:SOURCE_NOT_SUPPORTED:volume"
+            "composition.stream:SOURCE_NOT_SUPPORTED:open_interest"
         );
         graph.graph.graph.steps[0].input = "close".into();
         graph.graph.graph.steps[0].op = okx_analysis::query_plan::SeriesOp::RollingStddev;

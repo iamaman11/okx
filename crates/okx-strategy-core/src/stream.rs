@@ -185,9 +185,7 @@ impl CausalGraphStream {
         for (index, node) in self.nodes.iter_mut().enumerate() {
             let step = &self.plan.steps()[index].step;
             let input = node.input.value(bar, &columns);
-            let other = node
-                .other
-                .and_then(|binding| binding.value(bar, &columns));
+            let other = node.other.and_then(|binding| binding.value(bar, &columns));
             columns[index] = match &mut node.memory {
                 Memory::Mean(window) => window.push(input),
                 Memory::Dispersion(window) => window.push(input),

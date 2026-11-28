@@ -1184,7 +1184,7 @@ mod tests {
             "graph_signal.graph.steps[1].input:INVALID_REFERENCE:private\nsecret",
             "graph_signal.graph.steps[1].input:SECRET",
             "research.graph_backtest.costs.key/value:OUT_OF_RANGE",
-            "composition.stream:SOURCE_NOT_SUPPORTED:volume",
+            "composition.stream:SOURCE_NOT_SUPPORTED:open_interest",
         ] {
             let failure = rejected("research_request_0123456789", raw)
                 .failure
