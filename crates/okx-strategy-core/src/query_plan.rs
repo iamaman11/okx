@@ -1671,6 +1671,7 @@ impl RollingPearsonWindow {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn buffered(&self) -> usize {
         self.history.len()
     }
@@ -1761,6 +1762,7 @@ impl RollingDispersionWindow {
         projected.is_finite().then_some(projected)
     }
 
+    #[cfg(test)]
     pub(crate) fn buffered(&self) -> usize {
         self.history.len()
     }
