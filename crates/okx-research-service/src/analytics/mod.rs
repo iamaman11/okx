@@ -675,7 +675,7 @@ fn research_capabilities() -> Value {
             "observation_in_flight":okx_research_protocol::research_ipc::OBSERVATION_IN_FLIGHT,
             "work_in_flight":okx_research_protocol::research_ipc::MAX_IN_FLIGHT,
             "critical_commands":["cancel","drain","shutdown"],
-            "observation_commands":["explain","capabilities","status"],
+            "observation_commands":["explain","capabilities","status","list"],
             "read_only_observation":"no_venue_trade_or_finance_authority",
             "worker_ipc_under_saturated_work":"covered_by_real_child_process_test",
             "engine_and_finance_slo_under_load":"not_evaluated"},

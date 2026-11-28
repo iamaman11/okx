@@ -25,6 +25,10 @@ fn t10_capabilities_separate_memory_permit_from_observed_rss_and_full_slo() {
     assert_eq!(caps["ipc_isolation"]["observation_in_flight"], 4);
     assert_eq!(caps["ipc_isolation"]["work_in_flight"], 32);
     assert_eq!(
+        caps["ipc_isolation"]["observation_commands"],
+        json!(["explain", "capabilities", "status", "list"])
+    );
+    assert_eq!(
         caps["ipc_isolation"]["engine_and_finance_slo_under_load"],
         "not_evaluated"
     );
