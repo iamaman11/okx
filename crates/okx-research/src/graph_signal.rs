@@ -330,7 +330,11 @@ mod tests {
 
     #[test]
     fn preflight_accepts_each_existing_causal_statistical_operator() {
-        for operator in [SeriesOp::RollingPearson, SeriesOp::RollingStddev, SeriesOp::RollingZscore] {
+        for operator in [
+            SeriesOp::RollingPearson,
+            SeriesOp::RollingStddev,
+            SeriesOp::RollingZscore,
+        ] {
             let mut graph = spec();
             // Pearson requires two ratio inputs and period >=30; the same
             // valid causal shape also exercises stddev and zscore.

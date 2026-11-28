@@ -572,8 +572,7 @@ mod tests {
             };
             let observed = stream.on_closed_bar(bar).unwrap();
             if index < 50
-                || [100, 128, 160, 161, 2000, 2029, 4095, 4096, 4097, 4299]
-                    .contains(&index)
+                || [100, 128, 160, 161, 2000, 2029, 4095, 4096, 4097, 4299].contains(&index)
             {
                 assert_eq!(observed, plan.evaluate_at(&closes, index), "bar={index}");
             }
