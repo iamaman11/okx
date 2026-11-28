@@ -1236,7 +1236,10 @@ fn publish_composition_source_evidence(
             store,
             request,
             &row.instrument,
-            ("funding_rate", "okx.market.funding-realized-event-source-capture/v1"),
+            (
+                "funding_rate",
+                "okx.market.funding-realized-event-source-capture/v1",
+            ),
             &capture_source_ports(plan, &row.instrument, Source::Funding)?,
             events,
             cancel,
