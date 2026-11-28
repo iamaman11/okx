@@ -5,6 +5,7 @@
 //! observations once, **without** replaying previously emitted orders.
 use crate::query_plan::{
     CheckedComposition, CompositionValues, RollingDispersionWindow, RollingPearsonWindow, SeriesOp,
+    SeriesSource,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -229,15 +230,19 @@ impl CausalGraphStream {
 }
 
 fn resolve_input(bindings: &BTreeMap<&str, usize>, name: &str) -> Result<Input, String> {
-    if name == "close" {
-        Ok(Input::Close)
-    } else {
-        bindings
-            .get(name)
-            .copied()
-            .map(Input::Step)
-            .ok_or_else(|| format!("composition.stream:SOURCE_NOT_SUPPORTED:{name}"))
+    if let Some(source) = SeriesSource::parse(name) {
+        // Only Close has a physical input port in this incremental evaluator.
+        // Adding a catalog entry never silently enables an unimplemented port.
+        return match source {
+            SeriesSource::Close => Ok(Input::Close),
+            _ => Err(format!("composition.stream:SOURCE_NOT_SUPPORTED:{name}")),
+        };
     }
+    bindings
+        .get(name)
+        .copied()
+        .map(Input::Step)
+        .ok_or_else(|| format!("composition.stream:SOURCE_NOT_SUPPORTED:{name}"))
 }
 
 /// One pointwise oracle shared by the batch and streaming interpreters.
@@ -630,11 +635,22 @@ mod tests {
             }))
             .unwrap()
         };
-        let external = CheckedComposition::compile(request("rolling_mean", "volume"), 10).unwrap();
-        assert_eq!(
-            CausalGraphStream::new(&external).unwrap_err(),
-            "composition.stream:SOURCE_NOT_SUPPORTED:volume"
-        );
+        for source in crate::query_plan::SERIES_SOURCES {
+            let name = source.as_str();
+            let compiled = CheckedComposition::compile(request("rolling_mean", name), 10).unwrap();
+            let supported = CausalGraphStream::new(&compiled).is_ok();
+            assert_eq!(
+                supported,
+                source.contract().graph_backtest_supported,
+                "catalog/physical stream source drift: {name}"
+            );
+            if !supported {
+                assert_eq!(
+                    CausalGraphStream::new(&compiled).unwrap_err(),
+                    format!("composition.stream:SOURCE_NOT_SUPPORTED:{name}")
+                );
+            }
+        }
         let incremental =
             CheckedComposition::compile(request("rolling_stddev", "close"), 10).unwrap();
         assert!(CausalGraphStream::new(&incremental).is_ok());

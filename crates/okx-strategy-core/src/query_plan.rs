@@ -1,5 +1,5 @@
 //! Typed K7 analysis plan, independent of storage, transport and venue.
-pub use crate::operation_contract::{OperationEffect, OperationShape, TimeBasis};
+pub use crate::operation_contract::{DataAvailability, OperationEffect, OperationShape, TimeBasis};
 use crate::operators::{Operator, registry};
 use crate::stream::{MonotoneWindow, RollingMean, scalar_value};
 use crate::time_series::ClosedRange;
@@ -949,19 +949,13 @@ impl CheckedComposition {
             {
                 return Err(format!("{path}.id:INVALID"));
             }
-            if matches!(
-                step.id.as_str(),
-                "open" | "high" | "low" | "close" | "volume" | "open_interest" | "funding_rate"
-            ) || known.contains_key(&step.id)
+            if SeriesSource::parse(&step.id).is_some() || known.contains_key(&step.id)
             {
                 return Err(format!("{path}.id:DUPLICATE"));
             }
-            let (input_unit, parent_depth) = match step.input.as_str() {
-                "open" | "high" | "low" | "close" => (Unit::Price, 0),
-                "volume" => (Unit::NativeVolume, 0),
-                "open_interest" => (Unit::Contracts, 0),
-                "funding_rate" => (Unit::Ratio, 0),
-                _ => known.get(&step.input).copied().ok_or_else(|| {
+            let (input_unit, parent_depth) = match SeriesSource::parse(&step.input) {
+                Some(source) => (source.contract().unit, 0),
+                None => known.get(&step.input).copied().ok_or_else(|| {
                     format!("{path}.input:UNKNOWN_OR_FORWARD_STEP:{}", step.input)
                 })?,
             };
@@ -998,12 +992,9 @@ impl CheckedComposition {
                     .other
                     .as_deref()
                     .ok_or_else(|| format!("{path}.other:REQUIRED"))?;
-                Some(match name {
-                    "open" | "high" | "low" | "close" => (Unit::Price, 0),
-                    "volume" => (Unit::NativeVolume, 0),
-                    "open_interest" => (Unit::Contracts, 0),
-                    "funding_rate" => (Unit::Ratio, 0),
-                    _ => known
+                Some(match SeriesSource::parse(name) {
+                    Some(source) => (source.contract().unit, 0),
+                    None => known
                         .get(name)
                         .copied()
                         .ok_or_else(|| format!("{path}.other:UNKNOWN_OR_FORWARD_STEP:{name}"))?,
@@ -1892,16 +1883,15 @@ impl CheckedComposition {
     }
 
     pub fn result_sources(&self) -> BTreeMap<String, BTreeSet<Source>> {
-        let mut known = BTreeMap::<String, BTreeSet<Source>>::new();
-        known.insert("close".into(), BTreeSet::from([Source::Candles]));
-        for source in ["open", "high", "low", "volume"] {
-            known.insert(source.into(), BTreeSet::from([Source::Candles]));
-        }
-        known.insert(
-            "open_interest".into(),
-            BTreeSet::from([Source::OpenInterest]),
-        );
-        known.insert("funding_rate".into(), BTreeSet::from([Source::Funding]));
+        let mut known = SERIES_SOURCES
+            .into_iter()
+            .map(|source| {
+                (
+                    source.as_str().to_string(),
+                    BTreeSet::from([source.contract().source]),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         for checked in &self.steps {
             let mut sources = known[&checked.step.input].clone();
             if let Some(condition) = &checked.step.when {
@@ -1929,12 +1919,12 @@ fn source_buffer_count(steps: &[CheckedSeriesStep]) -> u64 {
             checked.step.input == name || checked.step.other.as_deref() == Some(name)
         })
     };
-    1 + u64::from(uses("open"))
-        + u64::from(uses("high"))
-        + u64::from(uses("low"))
-        + u64::from(uses("volume"))
-        + u64::from(uses("open_interest"))
-        + u64::from(uses("funding_rate"))
+    // Close has one unconditional buffer in the existing evaluator. Other
+    // sources add storage only if referenced by a compiled step.
+    1 + SERIES_SOURCES
+        .into_iter()
+        .filter(|source| *source != SeriesSource::Close && uses(source.as_str()))
+        .count() as u64
 }
 
 fn series_cost_per_bar(op: SeriesOp) -> u64 {
@@ -2419,6 +2409,256 @@ pub enum Unit {
     Quantity,
     QuoteCurrency,
 }
+/// The complete finite set of v1 Market composition input ports. These are
+/// source contracts, not additional executable operators or source adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesSource {
+    Open,
+    High,
+    Low,
+    Close,
+    Volume,
+    OpenInterest,
+    FundingRate,
+}
+
+/// Preserve v1 wire/discovery order while sharing admission semantics.
+pub const SERIES_SOURCES: [SeriesSource; 7] = [
+    SeriesSource::Open,
+    SeriesSource::High,
+    SeriesSource::Low,
+    SeriesSource::Close,
+    SeriesSource::Volume,
+    SeriesSource::OpenInterest,
+    SeriesSource::FundingRate,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesSourceAlignment {
+    ClosedCandleGridNoForwardFill,
+    ExactClosedBarTimestampNoForwardFill,
+    SparseRealizedSettlementExactTimestampNoForwardFill,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesSourceScope {
+    SameInstrument,
+    SwapOnlySameInstrument,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesSourceAccess {
+    ReadOnlyMarketData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SeriesSourceOwner {
+    #[serde(rename = "okx-research-service::analytics::market")]
+    ResearchServiceMarket,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesSourceVerification {
+    RequestAlignmentAndBoundedArtifactIntegrity,
+}
+
+/// Declarative input-port properties. `availability` is an obligation for
+/// source admission, not proof that data was historically observable. A
+/// single Market query binds one instrument/closed grid; this descriptor does
+/// not grant cross-instrument or cross-currency algebra.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SeriesSourceContract {
+    pub id: SeriesSource,
+    pub version: u16,
+    pub source: Source,
+    pub unit: Unit,
+    pub output_shape: OperationShape,
+    pub time_basis: TimeBasis,
+    pub availability: DataAvailability,
+    pub alignment: SeriesSourceAlignment,
+    pub scope: SeriesSourceScope,
+    pub access: SeriesSourceAccess,
+    pub owner: SeriesSourceOwner,
+    pub verification: SeriesSourceVerification,
+    pub publication_time_verified: bool,
+    pub graph_backtest_supported: bool,
+}
+
+impl SeriesSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::High => "high",
+            Self::Low => "low",
+            Self::Close => "close",
+            Self::Volume => "volume",
+            Self::OpenInterest => "open_interest",
+            Self::FundingRate => "funding_rate",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        SERIES_SOURCES
+            .into_iter()
+            .find(|source| source.as_str() == name)
+    }
+
+    pub const fn contract(self) -> SeriesSourceContract {
+        let (source, unit, time_basis, availability, alignment, scope) = match self {
+            Self::Open | Self::High | Self::Low | Self::Close => (
+                Source::Candles,
+                Unit::Price,
+                TimeBasis::ClosedBar,
+                DataAvailability::CheckedPerRequest,
+                SeriesSourceAlignment::ClosedCandleGridNoForwardFill,
+                SeriesSourceScope::SameInstrument,
+            ),
+            Self::Volume => (
+                Source::Candles,
+                Unit::NativeVolume,
+                TimeBasis::ClosedBar,
+                DataAvailability::CheckedPerRequest,
+                SeriesSourceAlignment::ClosedCandleGridNoForwardFill,
+                SeriesSourceScope::SameInstrument,
+            ),
+            Self::OpenInterest => (
+                Source::OpenInterest,
+                Unit::Contracts,
+                TimeBasis::OpenInterestEventTimeNotPublicationTime,
+                DataAvailability::HistoricalPublicationTimeUnverified,
+                SeriesSourceAlignment::ExactClosedBarTimestampNoForwardFill,
+                SeriesSourceScope::SwapOnlySameInstrument,
+            ),
+            Self::FundingRate => (
+                Source::Funding,
+                Unit::Ratio,
+                TimeBasis::RealizedFundingEventTimeNotPublicationTime,
+                DataAvailability::HistoricalPublicationTimeUnverified,
+                SeriesSourceAlignment::SparseRealizedSettlementExactTimestampNoForwardFill,
+                SeriesSourceScope::SwapOnlySameInstrument,
+            ),
+        };
+        SeriesSourceContract {
+            id: self,
+            version: 1,
+            source,
+            unit,
+            output_shape: OperationShape::Series,
+            time_basis,
+            availability,
+            alignment,
+            scope,
+            access: SeriesSourceAccess::ReadOnlyMarketData,
+            owner: SeriesSourceOwner::ResearchServiceMarket,
+            verification: SeriesSourceVerification::RequestAlignmentAndBoundedArtifactIntegrity,
+            // Closed bars are finalised observations, but this metadata does
+            // not assert provider publication evidence for any input series.
+            publication_time_verified: false,
+            // The actual incremental Research interpreter consumes close only.
+            graph_backtest_supported: matches!(self, Self::Close),
+        }
+    }
+}
+
+pub fn series_source_contracts() -> Vec<SeriesSourceContract> {
+    SERIES_SOURCES.into_iter().map(SeriesSource::contract).collect()
+}
+
+#[cfg(test)]
+mod series_source_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn finite_source_contracts_are_unique_typed_and_share_scalar_input_mapping() {
+        let contracts = series_source_contracts();
+        assert_eq!(contracts.len(), 7);
+        assert_eq!(
+            contracts.iter().map(|contract| contract.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                "open", "high", "low", "close", "volume", "open_interest", "funding_rate"
+            ]
+        );
+        let ids = contracts
+            .iter()
+            .map(|contract| contract.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), contracts.len());
+        for contract in &contracts {
+            assert_eq!(SeriesSource::parse(contract.id.as_str()), Some(contract.id));
+            assert_eq!(contract.version, 1);
+            assert_eq!(contract.output_shape, OperationShape::Series);
+            assert_eq!(contract.access, SeriesSourceAccess::ReadOnlyMarketData);
+            assert_eq!(contract.owner, SeriesSourceOwner::ResearchServiceMarket);
+            assert_eq!(input(contract.id.as_str()).unwrap().unit, contract.unit);
+            assert_eq!(input(contract.id.as_str()).unwrap().source, contract.source);
+            assert!(!contract.publication_time_verified);
+        }
+        assert_eq!(SeriesSource::parse("peer_close"), None);
+        assert_eq!(SeriesSource::Volume.contract().unit, Unit::NativeVolume);
+        assert_eq!(SeriesSource::OpenInterest.contract().unit, Unit::Contracts);
+        assert_eq!(SeriesSource::FundingRate.contract().unit, Unit::Ratio);
+    }
+
+    #[test]
+    fn market_source_type_does_not_grant_unverified_graph_or_cross_product_access() {
+        let eligible = series_source_contracts()
+            .into_iter()
+            .filter(|source| source.graph_backtest_supported)
+            .map(|source| source.id)
+            .collect::<Vec<_>>();
+        assert_eq!(eligible, vec![SeriesSource::Close]);
+        for id in [SeriesSource::OpenInterest, SeriesSource::FundingRate] {
+            let source = id.contract();
+            assert_eq!(source.availability, DataAvailability::HistoricalPublicationTimeUnverified);
+            assert_eq!(source.scope, SeriesSourceScope::SwapOnlySameInstrument);
+            assert!(!source.graph_backtest_supported);
+        }
+        assert_eq!(
+            SeriesSource::OpenInterest.contract().alignment,
+            SeriesSourceAlignment::ExactClosedBarTimestampNoForwardFill
+        );
+        assert_eq!(
+            SeriesSource::FundingRate.contract().alignment,
+            SeriesSourceAlignment::SparseRealizedSettlementExactTimestampNoForwardFill
+        );
+        let encoded = serde_json::to_value(SeriesSource::FundingRate.contract()).unwrap();
+        assert_eq!(encoded["id"], "funding_rate");
+        assert_eq!(encoded["time_basis"], "realized_funding_event_time_not_publication_time");
+    }
+
+    #[test]
+    fn compiler_reserves_every_typed_source_and_resolves_its_owner_before_io() {
+        for source in SERIES_SOURCES {
+            let name = source.as_str();
+            let duplicate: CompositionRequest = serde_json::from_value(json!({
+                "version": COMPOSITION_VERSION,
+                "steps": [{"id": name, "op": "rolling_mean", "input": "close", "period": 2}],
+                "result_steps": [name]
+            }))
+            .unwrap();
+            assert_eq!(
+                CheckedComposition::compile(duplicate, 10).unwrap_err(),
+                "composition.steps[0].id:DUPLICATE"
+            );
+            let request: CompositionRequest = serde_json::from_value(json!({
+                "version": COMPOSITION_VERSION,
+                "steps": [{"id": "mean", "op": "rolling_mean", "input": name, "period": 2}],
+                "result_steps": ["mean"]
+            }))
+            .unwrap();
+            let graph = CheckedComposition::compile(request, 10).unwrap();
+            assert_eq!(graph.steps()[0].unit, source.contract().unit);
+            assert_eq!(graph.sources(), BTreeSet::from([source.contract().source]));
+        }
+    }
+}
+
 fn composition_unit_name(unit: Unit) -> &'static str {
     match unit {
         Unit::Price => "price",
@@ -2554,12 +2794,18 @@ impl TryFrom<StoredQueryPlan> for QueryPlan {
 }
 /// One source/type mapping for plan compilation and public capability discovery.
 pub fn input(name: &str) -> Result<Input, String> {
+    if let Some(series_source) = SeriesSource::parse(name) {
+        let contract = series_source.contract();
+        return Ok(Input {
+            name: name.into(),
+            source: contract.source,
+            unit: contract.unit,
+        });
+    }
     let (source, unit) = match name {
-        "close" | "high" | "low" | "peer_close" => (Source::Candles, Unit::Price),
-        "volume" => (Source::Candles, Unit::NativeVolume),
+        "peer_close" => (Source::Candles, Unit::Price),
         "bid" | "ask" => (Source::Ticker, Unit::Price),
-        "funding" | "funding_rate" => (Source::Funding, Unit::Ratio),
-        "open_interest" => (Source::OpenInterest, Unit::Contracts),
+        "funding" => (Source::Funding, Unit::Ratio),
         "budget" | "notional" => (Source::Request, Unit::QuoteCurrency),
         "price" => (Source::Request, Unit::Price),
         "stop_distance" => (Source::Request, Unit::Ratio),
