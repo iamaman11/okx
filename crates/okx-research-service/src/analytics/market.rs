@@ -500,32 +500,9 @@ impl AnalyticsService {
                     "typed_inputs":typed_inputs})
             })
             .collect::<Vec<_>>();
-        // Keep the primitive catalog separate from the enclosing capability
-        // object: a single giant json! expansion hits Rust's macro recursion
-        // limit as the finite typed operator set grows.
-        let composition_operations = json!([
-            {"op":"returns_series","input_unit":"price_or_contracts_or_native_volume","output_unit":"ratio"},
-            {"op":"rolling_mean","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"compute_cost":"linear_in_series_length"},
-            {"op":"rolling_max","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
-            {"op":"rolling_min","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":1,"period_max":1000,"null_policy":"propagate_missing"},
-            okx_analysis::query_plan::ROLLING_RANGE_DESCRIPTOR,
-            {"op":"rolling_pearson","input_unit":"ratio","other_unit":"ratio","output_unit":"coefficient","period_min":30,"period_max":1000,"null_policy":"strict_exact_pairs","compute_cost":"linear_in_series_length","minimum_pairs":30},
-            {"op":"rolling_zscore","version":1,"input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"coefficient","period_min":2,"period_max":1000,"variance":"population_inclusive_window","null_policy":"strict_window_or_zero_variance","compute_cost":"linear_in_series_length","causal":true},
-            {"op":"rolling_stddev","version":1,"input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","output_unit":"same_as_input","period_min":2,"period_max":1000,"variance":"population_inclusive_window","null_policy":"strict_window_zero_for_constant","compute_cost":"linear_in_series_length","causal":true},
-            {"op":"add_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing"},
-            {"op":"subtract_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing","numeric_policy":"finite_only"},
-            {"op":"divide_series","input_unit":"ratio","other_unit":"ratio","output_unit":"ratio","null_policy":"propagate_missing_or_zero_denominator","numeric_policy":"finite_only"},
-            {"op":"and","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
-            {"op":"or","input_unit":"boolean","other_unit":"boolean","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
-            {"op":"lag","input_unit":"causal_series","output_unit":"same_as_input","period_min":1,"period_max":1000},
-            {"op":"greater_than","input_unit":"price_or_ratio_or_native_volume_or_coefficient","output_unit":"boolean","requires":"finite_threshold"},
-            {"op":"greater_than_series","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","other_unit":"same_as_input","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
-            {"op":"less_than","input_unit":"price_or_ratio_or_native_volume_or_coefficient","output_unit":"boolean","requires":"finite_threshold"},
-            {"op":"less_than_series","input_unit":"price_or_ratio_or_contracts_or_native_volume_or_coefficient","other_unit":"same_as_input","output_unit":"boolean","null_policy":"propagate_unknown","causal":true},
-            {"op":"rising_edge","input_unit":"boolean","output_unit":"event","trigger":"false_to_true"},
-            {"op":"falling_edge","input_unit":"boolean","output_unit":"event","trigger":"true_to_false"},
-            {"op":"forward_return_label","input_unit":"price","output_unit":"outcome_ratio","requires":"prior_event_step_in_when","period_min":1,"period_max":1000,"causal_feature":false}
-        ]);
+        // The pure Rust owner publishes this one finite, typed catalog. No
+        // manually maintained worker JSON list may drift from the compiler.
+        let composition_operations = okx_analysis::query_plan::series_operation_contracts();
         let mut capabilities = json!({"schema":"okx.market.capabilities/v1",
             "route_owner":"okx-research-service","compute_owner":"okx-strategy-core",
             "portfolio_scenario":true,

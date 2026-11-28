@@ -203,6 +203,35 @@ pub enum SeriesOp {
     ForwardReturnLabel,
 }
 
+impl SeriesOp {
+    /// The finite protocol catalog. Both Research capabilities and the
+    /// compiled operator contracts enumerate this list; there is no worker-
+    /// maintained second inventory of spellings or supported operations.
+    pub const ALL: [Self; 21] = [
+        Self::ReturnsSeries,
+        Self::RollingMean,
+        Self::RollingMax,
+        Self::RollingMin,
+        Self::RollingRange,
+        Self::RollingPearson,
+        Self::RollingZscore,
+        Self::RollingStddev,
+        Self::AddSeries,
+        Self::SubtractSeries,
+        Self::DivideSeries,
+        Self::And,
+        Self::Or,
+        Self::Lag,
+        Self::GreaterThan,
+        Self::GreaterThanSeries,
+        Self::LessThan,
+        Self::LessThanSeries,
+        Self::RisingEdge,
+        Self::FallingEdge,
+        Self::ForwardReturnLabel,
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -286,44 +286,294 @@ mod t07_t10_projected_prefix_evaluation {
     }
 }
 
-/// One self-contained pure extension contract. The worker serializes this
-/// descriptor directly into market capabilities instead of maintaining a
-/// second, manually copied definition. Availability of the input source is
-/// checked separately for each market request.
+/// Unit constraints are finite Rust variants, not caller-supplied strings.
+/// The compiler resolves each constraint against the actual `Unit` of every
+/// parent. Serialized names are discovery data, never admission authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesUnitRule {
+    Price,
+    Ratio,
+    Boolean,
+    PriceOrContractsOrNativeVolume,
+    PriceOrRatioOrContractsOrNativeVolumeOrCoefficient,
+    PriceOrRatioOrNativeVolumeOrCoefficient,
+    CausalSeries,
+    SameAsInput,
+    Coefficient,
+    Event,
+    OutcomeRatio,
+}
+
+impl SeriesUnitRule {
+    /// The same finite unit predicate is used by admission and published in
+    /// the operation contract. `SameAsInput` applies only to another input or
+    /// to the output of an operation with a previously checked input.
+    fn accepts(self, actual: Unit, input: Option<Unit>) -> bool {
+        match self {
+            Self::Price => actual == Unit::Price,
+            Self::Ratio => actual == Unit::Ratio,
+            Self::Boolean => actual == Unit::Boolean,
+            Self::PriceOrContractsOrNativeVolume => {
+                matches!(actual, Unit::Price | Unit::Contracts | Unit::NativeVolume)
+            }
+            Self::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient => matches!(
+                actual,
+                Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient
+            ),
+            Self::PriceOrRatioOrNativeVolumeOrCoefficient => matches!(
+                actual,
+                Unit::Price | Unit::Ratio | Unit::NativeVolume | Unit::Coefficient
+            ),
+            Self::CausalSeries => matches!(
+                actual,
+                Unit::Price
+                    | Unit::Ratio
+                    | Unit::Contracts
+                    | Unit::NativeVolume
+                    | Unit::Coefficient
+                    | Unit::Boolean
+                    | Unit::Event
+            ),
+            Self::SameAsInput => input == Some(actual),
+            Self::Coefficient => actual == Unit::Coefficient,
+            Self::Event => actual == Unit::Event,
+            Self::OutcomeRatio => actual == Unit::OutcomeRatio,
+        }
+    }
+}
+
+/// One complete, immutable contract for every elemental series operation.
+/// The pure compiler owns version, type/units and cost; Market and Research
+/// serialize these descriptors directly instead of copying JSON catalogs.
 #[derive(Debug, Clone, Copy, Serialize)]
-pub struct RollingRangeDescriptor {
-    pub op: &'static str,
+pub struct SeriesOperationContract {
+    pub op: SeriesOp,
     pub version: u16,
-    pub input_unit: &'static str,
-    pub output_unit: &'static str,
+    pub input_unit: SeriesUnitRule,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_unit: Option<SeriesUnitRule>,
+    pub output_unit: SeriesUnitRule,
     pub output_shape: &'static str,
-    pub period_min: u16,
-    pub period_max: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_min: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_max: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires: Option<&'static str>,
     pub warmup: &'static str,
     pub null_policy: &'static str,
     pub compute_cost: &'static str,
+    pub cost_per_bar: u64,
     pub causal: bool,
+    pub graph_backtest_supported: bool,
     pub time_basis: &'static str,
+    pub source_requirement: &'static str,
     pub effects: &'static str,
     pub owner: &'static str,
+    pub verification: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variance: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum_pairs: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numeric_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<&'static str>,
 }
 
-pub const ROLLING_RANGE_DESCRIPTOR: RollingRangeDescriptor = RollingRangeDescriptor {
-    op: "rolling_range",
-    version: 1,
-    input_unit: "price_or_ratio_or_contracts_or_native_volume_or_coefficient",
-    output_unit: "same_as_input",
-    output_shape: "series",
-    period_min: 2,
-    period_max: 1000,
-    warmup: "period_closed_bars",
-    null_policy: "strict_complete_window_no_synthetic_zero",
-    compute_cost: "linear_in_series_length",
-    causal: true,
-    time_basis: "closed_bar",
-    effects: "pure_no_io",
-    owner: "okx-strategy-core::query_plan::rolling_range",
-};
+pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
+    use SeriesOp::*;
+    use SeriesUnitRule as U;
+    let input_unit = match op {
+        ReturnsSeries => U::PriceOrContractsOrNativeVolume,
+        RollingMean | RollingMax | RollingMin | RollingRange | RollingZscore | RollingStddev
+        | GreaterThanSeries | LessThanSeries => {
+            U::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient
+        }
+        RollingPearson | AddSeries | SubtractSeries | DivideSeries => U::Ratio,
+        And | Or | RisingEdge | FallingEdge => U::Boolean,
+        Lag => U::CausalSeries,
+        GreaterThan | LessThan => U::PriceOrRatioOrNativeVolumeOrCoefficient,
+        ForwardReturnLabel => U::Price,
+    };
+    let other_unit = match op {
+        RollingPearson | AddSeries | SubtractSeries | DivideSeries => Some(U::Ratio),
+        And | Or => Some(U::Boolean),
+        GreaterThanSeries | LessThanSeries => Some(U::SameAsInput),
+        _ => None,
+    };
+    let output_unit = match op {
+        ReturnsSeries | AddSeries | SubtractSeries | DivideSeries => U::Ratio,
+        RollingMean | RollingMax | RollingMin | RollingRange | RollingStddev | Lag => {
+            U::SameAsInput
+        }
+        RollingPearson | RollingZscore => U::Coefficient,
+        And | Or | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries => U::Boolean,
+        RisingEdge | FallingEdge => U::Event,
+        ForwardReturnLabel => U::OutcomeRatio,
+    };
+    let period = match op {
+        RollingMean | RollingMax | RollingMin | Lag | ForwardReturnLabel => Some((1, 1000)),
+        RollingRange | RollingStddev | RollingZscore => Some((2, 1000)),
+        RollingPearson => Some((30, 1000)),
+        _ => None,
+    };
+    let null_policy = match op {
+        ReturnsSeries => "propagate_missing_or_nonpositive_price",
+        RollingMean | RollingMax | RollingMin => "strict_complete_window_no_forward_fill",
+        RollingRange => "strict_complete_window_no_synthetic_zero",
+        RollingPearson => "strict_exact_pairs",
+        RollingZscore => "strict_window_or_zero_variance",
+        RollingStddev => "strict_window_zero_for_constant",
+        DivideSeries => "propagate_missing_or_zero_denominator",
+        And | Or | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries
+        | RisingEdge | FallingEdge => "propagate_unknown",
+        ForwardReturnLabel => "unconfirmed_without_future_bars",
+        AddSeries | SubtractSeries | Lag => "propagate_missing",
+    };
+    let cost_per_bar = match op {
+        RollingMean => 3,
+        RollingZscore | RollingStddev => 6,
+        RollingRange => 4,
+        RollingPearson => 8,
+        AddSeries | SubtractSeries | DivideSeries | GreaterThanSeries | LessThanSeries
+        | And | Or => 2,
+        _ => 1,
+    };
+    let causal = op != ForwardReturnLabel;
+    SeriesOperationContract {
+        op,
+        version: 1,
+        input_unit,
+        other_unit,
+        output_unit,
+        output_shape: "series",
+        period_min: period.map(|(min, _)| min),
+        period_max: period.map(|(_, max)| max),
+        requires: match op {
+            GreaterThan | LessThan => Some("finite_threshold"),
+            ForwardReturnLabel => Some("prior_event_step_in_when"),
+            _ => None,
+        },
+        warmup: if period.is_some() {
+            "period_closed_bars"
+        } else if matches!(op, ReturnsSeries | RisingEdge | FallingEdge) {
+            "one_prior_closed_bar"
+        } else {
+            "none"
+        },
+        null_policy,
+        compute_cost: "linear_in_series_length",
+        cost_per_bar,
+        causal,
+        graph_backtest_supported: causal,
+        time_basis: if causal { "closed_bar" } else { "outcome_future_horizon" },
+        source_requirement: "declared_exact_event_time_no_forward_fill",
+        effects: "pure_no_io",
+        owner: "okx-strategy-core::query_plan",
+        verification: "checked_composition_unit_and_replay_tests",
+        variance: matches!(op, RollingZscore | RollingStddev)
+            .then_some("population_inclusive_window"),
+        minimum_pairs: (op == RollingPearson).then_some(30),
+        numeric_policy: matches!(op, SubtractSeries | DivideSeries).then_some("finite_only"),
+        trigger: match op {
+            RisingEdge => Some("false_to_true"),
+            FallingEdge => Some("true_to_false"),
+            _ => None,
+        },
+    }
+}
+
+pub fn series_operation_contracts() -> Vec<SeriesOperationContract> {
+    SeriesOp::ALL.into_iter().map(series_operation_contract).collect()
+}
+
+#[cfg(test)]
+mod typed_operation_catalog_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn all_protocol_operations_have_unique_versioned_pure_contracts() {
+        let contracts = series_operation_contracts();
+        assert_eq!(contracts.len(), 21);
+        assert_eq!(contracts.len(), SeriesOp::ALL.len());
+        let mut ids = BTreeSet::new();
+        for contract in contracts {
+            let id = serde_json::to_string(&contract.op).unwrap();
+            assert!(ids.insert(id), "duplicate operation id");
+            assert_eq!(contract.version, 1);
+            assert_eq!(contract.effects, "pure_no_io");
+            assert_eq!(contract.output_shape, "series");
+            assert!(contract.cost_per_bar > 0);
+            assert_eq!(contract.period_min.is_some(), contract.period_max.is_some());
+            assert_eq!(contract.graph_backtest_supported, contract.causal);
+            assert_eq!(contract.source_requirement, "declared_exact_event_time_no_forward_fill");
+            if let (Some(min), Some(max)) = (contract.period_min, contract.period_max) {
+                assert!((1..=max).contains(&min));
+                assert!(max <= 1000);
+            }
+        }
+        assert_eq!(ids.len(), 21);
+    }
+
+    #[test]
+    fn compiler_admits_exactly_the_input_units_declared_by_every_contract() {
+        let sources = [
+            ("close", Unit::Price),
+            ("open_interest", Unit::Contracts),
+            ("volume", Unit::NativeVolume),
+            ("funding_rate", Unit::Ratio),
+            ("condition", Unit::Boolean),
+            ("event", Unit::Event),
+            ("coefficient", Unit::Coefficient),
+            ("outcome", Unit::OutcomeRatio),
+        ];
+        for op in SeriesOp::ALL {
+            let contract = series_operation_contract(op);
+            for (source, unit) in sources {
+                let other = contract.other_unit.map(|rule| match rule {
+                    SeriesUnitRule::Boolean => "condition",
+                    SeriesUnitRule::SameAsInput => source,
+                    _ => "returns",
+                });
+                let mut probe = json!({"id":"probe","op":op,"input":source});
+                if let Some(other) = other {
+                    probe["other"] = json!(other);
+                }
+                if let Some(period) = contract.period_min {
+                    probe["period"] = json!(period);
+                }
+                if matches!(op, SeriesOp::GreaterThan | SeriesOp::LessThan) {
+                    probe["threshold"] = json!(0.0);
+                }
+                if op == SeriesOp::ForwardReturnLabel {
+                    probe["when"] = json!("event");
+                }
+                let request = serde_json::from_value(json!({
+                    "version":COMPOSITION_VERSION,
+                    "steps":[
+                        {"id":"returns","op":"returns_series","input":"close"},
+                        {"id":"condition","op":"greater_than","input":"close","threshold":0},
+                        {"id":"event","op":"rising_edge","input":"condition"},
+                        {"id":"coefficient","op":"rolling_zscore","input":"close","period":2},
+                        {"id":"outcome","op":"forward_return_label","input":"close","when":"event","period":1},
+                        probe
+                    ],
+                    "result_steps":["probe"]
+                }))
+                .unwrap();
+                let outcome = CheckedComposition::compile(request, 80);
+                assert_eq!(
+                    outcome.is_ok(),
+                    contract.input_unit.accepts(unit, None),
+                    "operation={op:?}, input={source}, compile={outcome:?}"
+                );
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -617,30 +867,21 @@ impl CheckedComposition {
             if depth > 8 {
                 return Err(format!("{path}:DEPTH_LIMIT"));
             }
+            let contract = series_operation_contract(step.op);
+            let valid_period = step.period.is_some_and(|period| {
+                contract
+                    .period_min
+                    .zip(contract.period_max)
+                    .is_some_and(|(min, max)| (min..=max).contains(&period))
+            });
             let output_unit = match step.op {
                 SeriesOp::RollingZscore | SeriesOp::RollingStddev | SeriesOp::RollingRange => {
-                    if !matches!(
-                        input_unit,
-                        Unit::Price
-                            | Unit::Ratio
-                            | Unit::Contracts
-                            | Unit::NativeVolume
-                            | Unit::Coefficient
-                    ) {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
                             composition_unit_name(input_unit)
                         ));
                     }
-                    let valid_period = if step.op == SeriesOp::RollingRange {
-                        step.period.is_some_and(|period| {
-                            (ROLLING_RANGE_DESCRIPTOR.period_min
-                                ..=ROLLING_RANGE_DESCRIPTOR.period_max)
-                                .contains(&period)
-                        })
-                    } else {
-                        matches!(step.period, Some(2..=1000))
-                    };
                     if !valid_period {
                         return Err(format!("{path}.period:INVALID:2..1000"));
                     }
@@ -654,20 +895,24 @@ impl CheckedComposition {
                     }
                 }
                 SeriesOp::RollingPearson => {
-                    if input_unit != Unit::Ratio {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=ratio:actual={}",
                             composition_unit_name(input_unit)
                         ));
                     }
                     let unit = other.expect("validated second input").0;
-                    if unit != Unit::Ratio {
+                    if !contract
+                        .other_unit
+                        .expect("typed second input")
+                        .accepts(unit, Some(input_unit))
+                    {
                         return Err(format!(
                             "{path}.other:UNIT_MISMATCH:expected=ratio:actual={}",
                             composition_unit_name(unit)
                         ));
                     }
-                    if !matches!(step.period, Some(30..=1000)) {
+                    if !valid_period {
                         return Err(format!("{path}.period:INVALID:30..1000"));
                     }
                     if step.threshold.is_some() {
@@ -676,14 +921,18 @@ impl CheckedComposition {
                     Unit::Coefficient
                 }
                 SeriesOp::AddSeries | SeriesOp::SubtractSeries | SeriesOp::DivideSeries => {
-                    if input_unit != Unit::Ratio {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=ratio:actual={}",
                             composition_unit_name(input_unit)
                         ));
                     }
                     let unit = other.expect("validated second input").0;
-                    if unit != Unit::Ratio {
+                    if !contract
+                        .other_unit
+                        .expect("typed second input")
+                        .accepts(unit, Some(input_unit))
+                    {
                         return Err(format!(
                             "{path}.other:UNIT_MISMATCH:expected=ratio:actual={}",
                             composition_unit_name(unit)
@@ -698,14 +947,18 @@ impl CheckedComposition {
                     Unit::Ratio
                 }
                 SeriesOp::And | SeriesOp::Or => {
-                    if input_unit != Unit::Boolean {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=boolean:actual={}",
                             composition_unit_name(input_unit)
                         ));
                     }
                     let unit = other.expect("validated second condition").0;
-                    if unit != Unit::Boolean {
+                    if !contract
+                        .other_unit
+                        .expect("typed second input")
+                        .accepts(unit, Some(input_unit))
+                    {
                         return Err(format!(
                             "{path}.other:UNIT_MISMATCH:expected=boolean:actual={}",
                             composition_unit_name(unit)
@@ -720,10 +973,7 @@ impl CheckedComposition {
                     Unit::Boolean
                 }
                 SeriesOp::ReturnsSeries => {
-                    if !matches!(
-                        input_unit,
-                        Unit::Price | Unit::Contracts | Unit::NativeVolume
-                    ) {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=price:actual={}",
                             composition_unit_name(input_unit)
@@ -741,23 +991,13 @@ impl CheckedComposition {
                 | SeriesOp::RollingMax
                 | SeriesOp::RollingMin
                 | SeriesOp::Lag => {
-                    let numeric = matches!(
-                        input_unit,
-                        Unit::Price
-                            | Unit::Ratio
-                            | Unit::Contracts
-                            | Unit::NativeVolume
-                            | Unit::Coefficient
-                    );
-                    let lagged_discrete = step.op == SeriesOp::Lag
-                        && matches!(input_unit, Unit::Boolean | Unit::Event);
-                    if !(numeric || lagged_discrete) {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=causal_series:actual={}",
                             composition_unit_name(input_unit)
                         ));
                     }
-                    if !matches!(step.period, Some(1..=1000)) {
+                    if !valid_period {
                         return Err(format!("{path}.period:INVALID"));
                     }
                     if step.threshold.is_some() {
@@ -766,10 +1006,7 @@ impl CheckedComposition {
                     input_unit
                 }
                 SeriesOp::GreaterThan | SeriesOp::LessThan => {
-                    if !matches!(
-                        input_unit,
-                        Unit::Price | Unit::Ratio | Unit::NativeVolume | Unit::Coefficient
-                    ) {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
                             composition_unit_name(input_unit)
@@ -784,21 +1021,18 @@ impl CheckedComposition {
                     Unit::Boolean
                 }
                 SeriesOp::GreaterThanSeries | SeriesOp::LessThanSeries => {
-                    if !matches!(
-                        input_unit,
-                        Unit::Price
-                            | Unit::Ratio
-                            | Unit::Contracts
-                            | Unit::NativeVolume
-                            | Unit::Coefficient
-                    ) {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
                             composition_unit_name(input_unit)
                         ));
                     }
                     let other_unit = other.expect("validated second series").0;
-                    if other_unit != input_unit {
+                    if !contract
+                        .other_unit
+                        .expect("typed second input")
+                        .accepts(other_unit, Some(input_unit))
+                    {
                         return Err(format!(
                             "{path}.other:UNIT_MISMATCH:expected={}:actual={}",
                             composition_unit_name(input_unit),
@@ -814,7 +1048,7 @@ impl CheckedComposition {
                     Unit::Boolean
                 }
                 SeriesOp::RisingEdge | SeriesOp::FallingEdge => {
-                    if input_unit != Unit::Boolean {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=boolean:actual={}",
                             composition_unit_name(input_unit)
@@ -829,13 +1063,13 @@ impl CheckedComposition {
                     Unit::Event
                 }
                 SeriesOp::ForwardReturnLabel => {
-                    if input_unit != Unit::Price {
+                    if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected=price:actual={}",
                             composition_unit_name(input_unit)
                         ));
                     }
-                    if !matches!(step.period, Some(1..=1000)) {
+                    if !valid_period {
                         return Err(format!("{path}.period:INVALID"));
                     }
                     if step.threshold.is_some() {
@@ -849,6 +1083,7 @@ impl CheckedComposition {
                     Unit::OutcomeRatio
                 }
             };
+            debug_assert!(contract.output_unit.accepts(output_unit, Some(input_unit)));
             // Rolling mean is a true sliding window: the cost does not grow
             // with period. Count add/remove/emit, not O(window) rescans.
             let cost_per_bar = series_cost_per_bar(step.op);
@@ -1537,21 +1772,7 @@ fn source_buffer_count(steps: &[CheckedSeriesStep]) -> u64 {
 }
 
 fn series_cost_per_bar(op: SeriesOp) -> u64 {
-    match op {
-        SeriesOp::RollingMean => 3,
-        SeriesOp::RollingZscore => 6,
-        SeriesOp::RollingStddev => 6,
-        SeriesOp::RollingRange => 4,
-        SeriesOp::RollingPearson => 8,
-        SeriesOp::AddSeries
-        | SeriesOp::SubtractSeries
-        | SeriesOp::DivideSeries
-        | SeriesOp::GreaterThanSeries
-        | SeriesOp::LessThanSeries
-        | SeriesOp::And
-        | SeriesOp::Or => 2,
-        _ => 1,
-    }
+    series_operation_contract(op).cost_per_bar
 }
 
 /// Online centered covariance with O(1) insertion and removal. This avoids
@@ -1851,12 +2072,13 @@ mod t15_extension_contract {
             serde_json::to_value(SeriesOp::RollingRange).unwrap(),
             "rolling_range"
         );
-        assert_eq!(ROLLING_RANGE_DESCRIPTOR.op, "rolling_range");
-        assert_eq!(ROLLING_RANGE_DESCRIPTOR.version, 1);
-        assert_eq!(ROLLING_RANGE_DESCRIPTOR.effects, "pure_no_io");
-        assert_eq!(ROLLING_RANGE_DESCRIPTOR.output_unit, "same_as_input");
-        assert_eq!(ROLLING_RANGE_DESCRIPTOR.period_min, 2);
-        assert_eq!(ROLLING_RANGE_DESCRIPTOR.period_max, 1000);
+        let descriptor = series_operation_contract(SeriesOp::RollingRange);
+        assert_eq!(serde_json::to_value(descriptor.op).unwrap(), "rolling_range");
+        assert_eq!(descriptor.version, 1);
+        assert_eq!(descriptor.effects, "pure_no_io");
+        assert_eq!(descriptor.output_unit, SeriesUnitRule::SameAsInput);
+        assert_eq!(descriptor.period_min, Some(2));
+        assert_eq!(descriptor.period_max, Some(1000));
         assert_eq!(
             rolling_range(&[Some(10.), Some(14.), Some(13.), Some(18.), Some(18.)], 3),
             vec![None, None, Some(4.), Some(5.), Some(5.)]

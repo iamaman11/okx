@@ -90,20 +90,34 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     let operations = capabilities["composition"]["operations"]
         .as_array()
         .unwrap();
+    assert_eq!(
+        capabilities["composition"]["operations"],
+        serde_json::to_value(okx_analysis::query_plan::series_operation_contracts()).unwrap()
+    );
+    assert_eq!(operations.len(), 21);
+    assert_eq!(
+        operations
+            .iter()
+            .map(|operation| operation["op"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        operations.len()
+    );
     let extension = operations
         .iter()
         .find(|item| item["op"] == "rolling_range")
         .unwrap();
     assert_eq!(
         extension,
-        &serde_json::to_value(okx_analysis::query_plan::ROLLING_RANGE_DESCRIPTOR).unwrap()
+        &serde_json::to_value(okx_analysis::query_plan::series_operation_contract(
+            okx_research_protocol::strategy_contract::SeriesOp::RollingRange,
+        ))
+        .unwrap()
     );
-    assert_eq!(
-        extension["owner"],
-        "okx-strategy-core::query_plan::rolling_range"
-    );
+    assert_eq!(extension["owner"], "okx-strategy-core::query_plan");
     assert_eq!(extension["effects"], "pure_no_io");
     assert_eq!(extension["version"], 1);
+    assert_eq!(extension["cost_per_bar"], 4);
     let stddev = operations
         .iter()
         .find(|item| item["op"] == "rolling_stddev")

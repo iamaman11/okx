@@ -628,6 +628,17 @@ fn research_capabilities() -> Value {
     // Report only what the current public product can actually execute.
     // HistoricalObserved remains unavailable until authenticated historical
     // venue mechanics + fees are captured, not merely a validation enum.
+    let contracts = okx_analysis::query_plan::series_operation_contracts();
+    let supported_operators = contracts
+        .iter()
+        .filter(|contract| contract.graph_backtest_supported)
+        .map(|contract| contract.op)
+        .collect::<Vec<_>>();
+    let unavailable_operators = contracts
+        .iter()
+        .filter(|contract| !contract.graph_backtest_supported)
+        .map(|contract| contract.op)
+        .collect::<Vec<_>>();
     json!({
         "schema":"okx.research.capabilities/v1",
         "quality":"fresh",
@@ -636,8 +647,8 @@ fn research_capabilities() -> Value {
             "action":"graph_backtest","version":"okx.graph-signal/v1",
             "input":"okx.market.composition/v1","sources":["close"],
             "execution":"same_next_open_costs_funding_and_decimal_ledger_as_registered_backtest",
-            "supported_operators":["returns_series","rolling_mean","rolling_max","rolling_min","rolling_range","rolling_pearson","rolling_stddev","rolling_zscore","add_series","subtract_series","divide_series","and","or","lag","greater_than","greater_than_series","less_than","less_than_series","rising_edge","falling_edge"],
-            "unavailable_operators":["forward_return_label"],
+            "supported_operators":supported_operators,
+            "unavailable_operators":unavailable_operators,
             "max_steps":32,"max_result_steps":14,"signal_unit":"boolean_or_event",
             "missing_policies":["hold","flat"],"historical_observed":false,
             "grid_selection":"not_available_for_graph_backtest","trading_authority":false,
