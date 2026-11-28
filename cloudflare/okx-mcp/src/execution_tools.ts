@@ -50,7 +50,7 @@ const knownMarketOperator=(value:unknown):boolean=>
  typeof value==='string'&&MARKET_OPERATOR_SET.has(value);
 const marketParameters=object({ema_period:integer(1,1000),atr_period:integer(1,1000),rsi_period:integer(1,1000),budget:number(0.000000001),price:number(0.000000001),stop_distance:number(0.000000001,0.999999999),notional:number(),fee_bps:number(0,10000),slippage_bps:number(0,10000)},[]);
 const stepId={type:'string',pattern:'^[a-z0-9_]{1,32}$'};
-const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean','rolling_max','rolling_min','rolling_range','rolling_pearson','rolling_zscore','rolling_stddev','add_series','subtract_series','divide_series','and','or','lag','greater_than','greater_than_series','less_than','less_than_series','rising_edge','falling_edge','forward_return_label'),input:stepId,other:stepId,period:integer(1,1000),threshold:{type:'number'},when:stepId},['id','op','input']);
+const compositionStep=object({id:stepId,op:choice('returns_series','rolling_mean','rolling_max','rolling_min','rolling_range','rolling_pearson','rolling_zscore','rolling_stddev','ema_series','scale_series','add_series','subtract_series','divide_series','and','or','lag','greater_than','greater_than_series','less_than','less_than_series','rising_edge','falling_edge','forward_return_label'),input:stepId,other:stepId,period:integer(1,1000),threshold:{type:'number'},factor:{type:'number'},when:stepId},['id','op','input']);
 const composition=object({version:choice('okx.market.composition/v1'),steps:{type:'array',items:compositionStep,minItems:1,maxItems:32},result_steps:{type:'array',items:stepId,minItems:1,maxItems:14}});
 // The same checked causal graph as market.screen, interpreted as a Research
 // target position. It never becomes a live strategy or a financial command.
@@ -283,13 +283,16 @@ function validCompositionStep(s:unknown):boolean {
  if(['add_series','subtract_series','divide_series','rolling_pearson','greater_than_series','less_than_series','and','or'].includes(String(s.op))){
   if(typeof s.other!=='string')return false;
  }else if('other'in s)return false;
- const hasPeriod=['rolling_mean','rolling_max','rolling_min','rolling_range','rolling_pearson','rolling_zscore','rolling_stddev','lag','forward_return_label'].includes(String(s.op));
+ const hasPeriod=['rolling_mean','rolling_max','rolling_min','rolling_range','rolling_pearson','rolling_zscore','rolling_stddev','ema_series','lag','forward_return_label'].includes(String(s.op));
  if(hasPeriod?!Number.isInteger(s.period)||Number(s.period)<1||Number(s.period)>1000:'period'in s)return false;
  if(s.op==='rolling_pearson'&&Number(s.period)<30)return false;
  if(['rolling_zscore','rolling_stddev','rolling_range'].includes(String(s.op))&&Number(s.period)<2)return false;
  if(['greater_than','less_than'].includes(String(s.op))){
   if(typeof s.threshold!=='number'||!Number.isFinite(s.threshold))return false;
  }else if('threshold'in s)return false;
+ if(s.op==='scale_series'){
+  if(typeof s.factor!=='number'||!Number.isFinite(s.factor))return false;
+ }else if('factor'in s)return false;
  if(s.op==='forward_return_label'){
   if(typeof s.when!=='string')return false;
  }else if('when'in s)return false;

@@ -237,6 +237,9 @@ pub struct SeriesStep {
     pub period: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<f64>,
+    /// Finite, dimensionless multiplier for `scale_series` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factor: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,6 +257,8 @@ pub enum SeriesOp {
     RollingPearson,
     RollingZscore,
     RollingStddev,
+    EmaSeries,
+    ScaleSeries,
     AddSeries,
     SubtractSeries,
     DivideSeries,
@@ -273,7 +278,7 @@ impl SeriesOp {
     /// The finite protocol catalog. Both Research capabilities and the
     /// compiled operator contracts enumerate this list; there is no worker-
     /// maintained second inventory of spellings or supported operations.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 23] = [
         Self::ReturnsSeries,
         Self::RollingMean,
         Self::RollingMax,
@@ -282,6 +287,8 @@ impl SeriesOp {
         Self::RollingPearson,
         Self::RollingZscore,
         Self::RollingStddev,
+        Self::EmaSeries,
+        Self::ScaleSeries,
         Self::AddSeries,
         Self::SubtractSeries,
         Self::DivideSeries,

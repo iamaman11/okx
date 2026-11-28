@@ -22,7 +22,7 @@ fn graph_backtest_capabilities_follow_the_same_typed_catalog_as_market_and_compi
         capabilities["graph_backtest"]["unavailable_operators"],
         json!(unavailable)
     );
-    assert_eq!(supported.len(), 20);
+    assert_eq!(supported.len(), 22);
     let graph_sources = okx_analysis::query_plan::series_source_contracts()
         .into_iter()
         .filter(|contract| contract.graph_backtest_supported)

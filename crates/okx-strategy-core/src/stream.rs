@@ -56,6 +56,7 @@ enum Memory {
     Stateless,
     Previous(Option<f64>),
     Mean(RollingMean),
+    Ema(RollingEma),
     Extremum(MonotoneWindow),
     Range(MonotoneWindow, MonotoneWindow),
     Dispersion(RollingDispersionWindow),
@@ -113,6 +114,9 @@ impl CausalGraphStream {
                 }
                 SeriesOp::RollingMean => Memory::Mean(RollingMean::new(
                     step.period.expect("checked period") as usize,
+                )),
+                SeriesOp::EmaSeries => Memory::Ema(RollingEma::new(
+                    step.period.expect("checked EMA period") as usize,
                 )),
                 SeriesOp::RollingMax | SeriesOp::RollingMin => {
                     Memory::Extremum(MonotoneWindow::new(
@@ -188,6 +192,7 @@ impl CausalGraphStream {
             let other = node.other.and_then(|binding| binding.value(bar, &columns));
             columns[index] = match &mut node.memory {
                 Memory::Mean(window) => window.push(input),
+                Memory::Ema(window) => window.push(input),
                 Memory::Dispersion(window) => window.push(input),
                 Memory::Pearson(window) => window.push(input, other),
                 Memory::Extremum(window) => window.push(input),
@@ -212,6 +217,9 @@ impl CausalGraphStream {
                     let result = scalar_value(step.op, input, other, *previous, step.threshold);
                     *previous = input;
                     result
+                }
+                Memory::Stateless if step.op == SeriesOp::ScaleSeries => {
+                    scale_value(input, step.factor.expect("checked scale factor"))
                 }
                 Memory::Stateless => scalar_value(step.op, input, other, None, step.threshold),
             };
@@ -271,6 +279,46 @@ fn resolve_input(bindings: &BTreeMap<&str, usize>, name: &str) -> Result<Input, 
         .copied()
         .map(Input::Step)
         .ok_or_else(|| format!("composition.stream:SOURCE_NOT_SUPPORTED:{name}"))
+}
+
+/// Multiplication by a dimensionless constant preserves the input unit.
+pub(crate) fn scale_value(value: Option<f64>, factor: f64) -> Option<f64> {
+    value.and_then(|number| {
+        let product = number * factor;
+        product.is_finite().then_some(product)
+    })
+}
+
+/// The registered strategy's first-value EMA seed, with strict graph warmup.
+/// A missing observation resets state instead of bridging an unobserved gap.
+#[derive(Debug)]
+pub(crate) struct RollingEma {
+    period: usize,
+    consecutive: usize,
+    previous: Option<f64>,
+}
+
+impl RollingEma {
+    pub(crate) fn new(period: usize) -> Self {
+        Self { period, consecutive: 0, previous: None }
+    }
+
+    pub(crate) fn push(&mut self, value: Option<f64>) -> Option<f64> {
+        let Some(value) = value.filter(|value| value.is_finite()) else {
+            self.consecutive = 0;
+            self.previous = None;
+            return None;
+        };
+        let next = crate::operators::ema_update(self.previous, value, self.period);
+        if !next.is_finite() {
+            self.consecutive = 0;
+            self.previous = None;
+            return None;
+        }
+        self.previous = Some(next);
+        self.consecutive = (self.consecutive + 1).min(self.period);
+        (self.consecutive == self.period).then_some(next)
+    }
 }
 
 /// One pointwise oracle shared by the batch and streaming interpreters.

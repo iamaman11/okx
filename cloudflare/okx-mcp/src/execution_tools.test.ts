@@ -91,6 +91,19 @@ const composed={version:'okx.market.composition/v1',steps:[
  {id:'w1',op:'rolling_mean',input:'r1',period:2},
 ],result_steps:['w1']};
 fail(validTool('market',{...marketScreen,composition:composed}), 'versioned market composition accepted');
+const bollinger={version:'okx.market.composition/v1',steps:[
+ {id:'mean',op:'rolling_mean',input:'close',period:20},
+ {id:'stddev',op:'rolling_stddev',input:'close',period:20},
+ {id:'twice',op:'scale_series',input:'stddev',factor:2},
+ {id:'upper',op:'add_series',input:'mean',other:'twice'},
+ {id:'fast',op:'ema_series',input:'close',period:9},
+ {id:'slow',op:'ema_series',input:'close',period:21},
+ {id:'cross',op:'greater_than_series',input:'fast',other:'slow'},
+],result_steps:['upper','cross']};
+fail(validTool('market',{...marketScreen,composition:bollinger}),'typed series algebra can be submitted through existing market schema');
+fail(!validTool('market',{...marketScreen,composition:{...bollinger,steps:bollinger.steps.map(s=>s.id==='twice'?{id:s.id,op:s.op,input:s.input}:s)}}),'scale requires an explicit multiplier');
+fail(!validTool('market',{...marketScreen,composition:{...bollinger,steps:bollinger.steps.map(s=>s.id==='twice'?{...s,factor:'2'}:s)}}),'scale rejects a non-numeric multiplier');
+fail(!validTool('market',{...marketScreen,composition:{...bollinger,steps:bollinger.steps.map(s=>s.id==='mean'?{...s,factor:2}:s)}}),'other operations reject unexpected multiplier');
 fail(!validTool('market',{...marketScreen,action:'compare',composition:composed}), 'composition limited to screen');
 fail(!validTool('market',{...marketScreen,composition:{...composed,version:'unknown'}}), 'composition version rejected');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'rolling_mean',input:'close'}]}}), 'window must specify period');

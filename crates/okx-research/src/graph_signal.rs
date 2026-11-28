@@ -81,7 +81,8 @@ fn required_score_start(graph: &CheckedComposition, signal_step: &str) -> Result
             | SeriesOp::RollingRange
             | SeriesOp::RollingPearson
             | SeriesOp::RollingStddev
-            | SeriesOp::RollingZscore => {
+            | SeriesOp::RollingZscore
+            | SeriesOp::EmaSeries => {
                 usize::from(step.period.expect("checked rolling period")) - 1
             }
             _ => 0,

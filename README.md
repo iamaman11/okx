@@ -3,9 +3,10 @@
 Windows uses one product root, `C:\okx`, with separate `control` and `runtime`
 directories. See [installation, migration and verified GitHub updates](docs/windows-installation.md).
 
-**Normative specification:** [#448](https://github.com/iamaman11/okx/issues/448) (P0 → P1 → P2; M/T/A; K1–K12; C01–C20).
-**Single implementation cursor:** [#449](https://github.com/iamaman11/okx/issues/449).
-Issue #398 records historical **read-only** acceptance; it is not a competing roadmap or proof of Real execution.
+**Current normative specification:** [#537](https://github.com/iamaman11/okx/issues/537).
+**Research capability detail:** [#684](https://github.com/iamaman11/okx/issues/684).
+Component separation: [#580](https://github.com/iamaman11/okx/issues/580); CI: [#599](https://github.com/iamaman11/okx/issues/599).
+Issues #448/#449 and #398 are historical checkpoints, not competing implementation plans.
 
 The product has one **`okx-trading-engine` financial Engine** for accounts and trading.
 Research runs in an on-demand **`okx-research-service`**, with its own jobs and
@@ -16,12 +17,14 @@ installation and lifecycle. Research cannot place orders or write financial stat
 
 Historical #512 acceptance and promotion evidence belongs to [#512](https://github.com/iamaman11/okx/issues/512);
 do not infer current installed or physical status from its earlier commits.
-The current canonical `main` and [#449](https://github.com/iamaman11/okx/issues/449)
+The current canonical `main` and [#537](https://github.com/iamaman11/okx/issues/537)
 are the source for release and installation acceptance.
 Current evidence: [testing](docs/testing.md). Research ownership and direct
-commands: [source map](docs/research-boundaries.md); supported operation owners and direct tests: [F01–F12 map](docs/acceptance/512/operation-map.md). The boundaries and acceptance
-criteria are in [#512](https://github.com/iamaman11/okx/issues/512). This refactoring
+commands: [source map](docs/research-boundaries.md); historical operation evidence: [F01–F12 map](docs/acceptance/512/operation-map.md). Current boundaries and acceptance
+criteria are in [#537](https://github.com/iamaman11/okx/issues/537). This refactoring
 does not claim that the complete acceptance campaign finishes in seconds.
+
+To add a Research graph operation, use the [single-contract developer guide](docs/research-operation-contract.md).
 
 ## Modules and responsibility
 

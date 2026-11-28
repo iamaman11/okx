@@ -986,6 +986,7 @@ fn t05_composition_reuses_closed_candles_and_projects_a_distinct_ratio() {
         version: okx_analysis::query_plan::COMPOSITION_VERSION.into(),
         steps: vec![
             okx_analysis::query_plan::SeriesStep {
+                factor: None,
                 id: "r1".into(),
                 op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
                 input: "close".into(),
@@ -995,6 +996,7 @@ fn t05_composition_reuses_closed_candles_and_projects_a_distinct_ratio() {
                 other: None,
             },
             okx_analysis::query_plan::SeriesStep {
+                factor: None,
                 id: "w1".into(),
                 op: okx_analysis::query_plan::SeriesOp::RollingMean,
                 input: "r1".into(),

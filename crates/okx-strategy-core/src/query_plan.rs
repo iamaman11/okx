@@ -1,7 +1,7 @@
 //! Typed K7 analysis plan, independent of storage, transport and venue.
 pub use crate::operation_contract::{DataAvailability, OperationEffect, OperationShape, TimeBasis};
 use crate::operators::{Operator, registry};
-use crate::stream::{MonotoneWindow, RollingMean, scalar_value};
+use crate::stream::{MonotoneWindow, RollingEma, RollingMean, scalar_value, scale_value};
 use crate::time_series::ClosedRange;
 pub use okx_research_protocol::strategy_contract::{
     CompositionRequest, GRAPH_SIGNAL_VERSION, GraphSignalSpec, MissingSignalPolicy, SeriesOp,
@@ -372,6 +372,7 @@ pub enum NullPolicy {
     PropagateUnknown,
     UnconfirmedWithoutFutureBars,
     PropagateMissing,
+    ExponentialWarmupResetOnMissing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -390,6 +391,7 @@ pub enum SourceRequirement {
 #[serde(rename_all = "snake_case")]
 pub enum ParameterRequirement {
     FiniteThreshold,
+    FiniteScaleFactor,
     PriorEventStepInWhen,
 }
 
@@ -469,24 +471,28 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
     let input_unit = match op {
         ReturnsSeries => U::PriceOrContractsOrNativeVolume,
         RollingMean | RollingMax | RollingMin | RollingRange | RollingZscore | RollingStddev
+        | EmaSeries | ScaleSeries
         | GreaterThanSeries | LessThanSeries => {
             U::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient
         }
-        RollingPearson | AddSeries | SubtractSeries | DivideSeries => U::Ratio,
+        AddSeries => U::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient,
+        RollingPearson | SubtractSeries | DivideSeries => U::Ratio,
         And | Or | RisingEdge | FallingEdge => U::Boolean,
         Lag => U::CausalSeries,
         GreaterThan | LessThan => U::PriceOrRatioOrNativeVolumeOrCoefficient,
         ForwardReturnLabel => U::Price,
     };
     let other_unit = match op {
-        RollingPearson | AddSeries | SubtractSeries | DivideSeries => Some(U::Ratio),
+        AddSeries => Some(U::SameAsInput),
+        RollingPearson | SubtractSeries | DivideSeries => Some(U::Ratio),
         And | Or => Some(U::Boolean),
         GreaterThanSeries | LessThanSeries => Some(U::SameAsInput),
         _ => None,
     };
     let output_unit = match op {
-        ReturnsSeries | AddSeries | SubtractSeries | DivideSeries => U::Ratio,
-        RollingMean | RollingMax | RollingMin | RollingRange | RollingStddev | Lag => {
+        ReturnsSeries | SubtractSeries | DivideSeries => U::Ratio,
+        RollingMean | RollingMax | RollingMin | RollingRange | RollingStddev
+        | EmaSeries | ScaleSeries | AddSeries | Lag => {
             U::SameAsInput
         }
         RollingPearson | RollingZscore => U::Coefficient,
@@ -495,7 +501,7 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         ForwardReturnLabel => U::OutcomeRatio,
     };
     let period = match op {
-        RollingMean | RollingMax | RollingMin | Lag | ForwardReturnLabel => Some((1, 1000)),
+        RollingMean | RollingMax | RollingMin | EmaSeries | Lag | ForwardReturnLabel => Some((1, 1000)),
         RollingRange | RollingStddev | RollingZscore => Some((2, 1000)),
         RollingPearson => Some((30, 1000)),
         _ => None,
@@ -507,6 +513,8 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         RollingPearson => NullPolicy::StrictExactPairs,
         RollingZscore => NullPolicy::StrictWindowOrZeroVariance,
         RollingStddev => NullPolicy::StrictWindowZeroForConstant,
+        EmaSeries => NullPolicy::ExponentialWarmupResetOnMissing,
+        ScaleSeries => NullPolicy::PropagateMissing,
         DivideSeries => NullPolicy::PropagateMissingOrZeroDenominator,
         And | Or | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries | RisingEdge
         | FallingEdge => NullPolicy::PropagateUnknown,
@@ -518,14 +526,16 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         RollingZscore | RollingStddev => 6,
         RollingRange => 4,
         RollingPearson => 8,
-        AddSeries | SubtractSeries | DivideSeries | GreaterThanSeries | LessThanSeries | And
+        EmaSeries | AddSeries | SubtractSeries | DivideSeries | GreaterThanSeries | LessThanSeries | And
         | Or => 2,
         _ => 1,
     };
     let causal = op != ForwardReturnLabel;
     SeriesOperationContract {
         op,
-        version: 1,
+        // AddSeries/v2 admits equal price/volume/etc. dimensions while
+        // preserving all previously valid ratio+ratio graphs byte-for-byte.
+        version: if op == AddSeries { 2 } else { 1 },
         input_unit,
         other_unit,
         output_unit,
@@ -534,6 +544,7 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         period_max: period.map(|(_, max)| max),
         requires: match op {
             GreaterThan | LessThan => Some(ParameterRequirement::FiniteThreshold),
+            ScaleSeries => Some(ParameterRequirement::FiniteScaleFactor),
             ForwardReturnLabel => Some(ParameterRequirement::PriorEventStepInWhen),
             _ => None,
         },
@@ -586,13 +597,13 @@ mod typed_operation_catalog_tests {
     #[test]
     fn all_protocol_operations_have_unique_versioned_pure_contracts() {
         let contracts = series_operation_contracts();
-        assert_eq!(contracts.len(), 21);
+        assert_eq!(contracts.len(), 23);
         assert_eq!(contracts.len(), SeriesOp::ALL.len());
         let mut ids = BTreeSet::new();
         for contract in contracts {
             let id = serde_json::to_string(&contract.op).unwrap();
             assert!(ids.insert(id), "duplicate operation id");
-            assert_eq!(contract.version, 1);
+            assert_eq!(contract.version, if contract.op == SeriesOp::AddSeries { 2 } else { 1 });
             assert_eq!(contract.effects, OperationEffect::PureNoIo);
             assert_eq!(contract.output_shape, OperationShape::Series);
             assert!(contract.cost_per_bar > 0);
@@ -607,7 +618,7 @@ mod typed_operation_catalog_tests {
                 assert!(max <= 1000);
             }
         }
-        assert_eq!(ids.len(), 21);
+        assert_eq!(ids.len(), 23);
     }
 
     #[test]
@@ -621,6 +632,8 @@ mod typed_operation_catalog_tests {
             ("rolling_pearson", "strict_exact_pairs"),
             ("rolling_zscore", "strict_window_or_zero_variance"),
             ("rolling_stddev", "strict_window_zero_for_constant"),
+            ("ema_series", "exponential_warmup_reset_on_missing"),
+            ("scale_series", "propagate_missing"),
             ("add_series", "propagate_missing"),
             ("subtract_series", "propagate_missing"),
             ("divide_series", "propagate_missing_or_zero_denominator"),
@@ -713,6 +726,9 @@ mod typed_operation_catalog_tests {
                 }
                 if matches!(op, SeriesOp::GreaterThan | SeriesOp::LessThan) {
                     probe["threshold"] = json!(0.0);
+                }
+                if op == SeriesOp::ScaleSeries {
+                    probe["factor"] = json!(2.0);
                 }
                 if op == SeriesOp::ForwardReturnLabel {
                     probe["when"] = json!("event");
@@ -961,6 +977,13 @@ impl CheckedComposition {
             if step.when.is_some() && step.op != SeriesOp::ForwardReturnLabel {
                 return Err(format!("{path}.when:UNEXPECTED"));
             }
+            if step.op == SeriesOp::ScaleSeries {
+                if !step.factor.is_some_and(f64::is_finite) {
+                    return Err(format!("{path}.factor:FINITE_REQUIRED"));
+                }
+            } else if step.factor.is_some() {
+                return Err(format!("{path}.factor:UNEXPECTED"));
+            }
             if step.other.is_some()
                 && !matches!(
                     step.op,
@@ -1079,7 +1102,8 @@ impl CheckedComposition {
                 SeriesOp::AddSeries | SeriesOp::SubtractSeries | SeriesOp::DivideSeries => {
                     if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
-                            "{path}.input:UNIT_MISMATCH:expected=ratio:actual={}",
+                            "{path}.input:UNIT_MISMATCH:expected={}:actual={}",
+                            if step.op == SeriesOp::AddSeries { "numeric_series" } else { "ratio" },
                             composition_unit_name(input_unit)
                         ));
                     }
@@ -1090,7 +1114,8 @@ impl CheckedComposition {
                         .accepts(unit, Some(input_unit))
                     {
                         return Err(format!(
-                            "{path}.other:UNIT_MISMATCH:expected=ratio:actual={}",
+                            "{path}.other:UNIT_MISMATCH:expected={}:actual={}",
+                            if step.op == SeriesOp::AddSeries { composition_unit_name(input_unit) } else { "ratio" },
                             composition_unit_name(unit)
                         ));
                     }
@@ -1100,7 +1125,22 @@ impl CheckedComposition {
                     if step.threshold.is_some() {
                         return Err(format!("{path}.threshold:UNEXPECTED"));
                     }
-                    Unit::Ratio
+                    if step.op == SeriesOp::AddSeries { input_unit } else { Unit::Ratio }
+                }
+                SeriesOp::ScaleSeries => {
+                    if !contract.input_unit.accepts(input_unit, None) {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=numeric_series:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    if step.period.is_some() {
+                        return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    input_unit
                 }
                 SeriesOp::And | SeriesOp::Or => {
                     if !contract.input_unit.accepts(input_unit, None) {
@@ -1146,6 +1186,7 @@ impl CheckedComposition {
                 SeriesOp::RollingMean
                 | SeriesOp::RollingMax
                 | SeriesOp::RollingMin
+                | SeriesOp::EmaSeries
                 | SeriesOp::Lag => {
                     if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
@@ -1578,6 +1619,17 @@ impl CheckedComposition {
                     input,
                     checked.step.period.expect("validated stddev period") as usize,
                 ),
+                SeriesOp::EmaSeries => {
+                    let mut ema = RollingEma::new(
+                        checked.step.period.expect("validated EMA period") as usize,
+                    );
+                    input.iter().copied().map(|value| ema.push(value)).collect()
+                }
+                SeriesOp::ScaleSeries => input
+                    .iter()
+                    .copied()
+                    .map(|value| scale_value(value, checked.step.factor.expect("validated factor")))
+                    .collect(),
                 SeriesOp::RollingRange => rolling_range(
                     input,
                     checked.step.period.expect("validated range period") as usize,
@@ -1745,6 +1797,19 @@ impl CheckedComposition {
                 .then(|| self.null_cause_at(values, name, index))
         };
         match step.op {
+            SeriesOp::ScaleSeries => trace(&step.input, at).unwrap_or_else(|| cause("NON_FINITE_RESULT")),
+            SeriesOp::EmaSeries => {
+                let period = step.period.expect("validated EMA period") as usize;
+                if at + 1 < period {
+                    return cause("WARMUP");
+                }
+                for index in (at + 1 - period)..=at {
+                    if let Some(upstream) = trace(&step.input, index) {
+                        return upstream;
+                    }
+                }
+                cause("NON_FINITE_RESULT")
+            }
             SeriesOp::RollingZscore | SeriesOp::RollingStddev => {
                 let period = step.period.expect("validated dispersion window") as usize;
                 if at + 1 < period {
@@ -1929,6 +1994,10 @@ fn source_buffer_count(steps: &[CheckedSeriesStep]) -> u64 {
 fn series_cost_per_bar(op: SeriesOp) -> u64 {
     series_operation_contract(op).cost_per_bar
 }
+
+#[cfg(test)]
+#[path = "tests/typed_series_algebra.rs"]
+mod typed_series_algebra_tests;
 
 /// Online centered covariance with O(1) insertion and removal. This avoids
 /// catastrophic cancellation of raw sums of squares for near-constant data.
@@ -3686,6 +3755,7 @@ mod tests {
         wrong_units.steps.insert(
             0,
             SeriesStep {
+                factor: None,
                 id: "r".into(),
                 op: SeriesOp::ReturnsSeries,
                 input: "close".into(),
@@ -3724,6 +3794,7 @@ mod tests {
             version: COMPOSITION_VERSION.into(),
             steps: vec![
                 SeriesStep {
+                    factor: None,
                     id: "r1".into(),
                     op: SeriesOp::ReturnsSeries,
                     input: "close".into(),
@@ -3733,6 +3804,7 @@ mod tests {
                     other: None,
                 },
                 SeriesStep {
+                    factor: None,
                     id: "w1".into(),
                     op: SeriesOp::RollingMean,
                     input: "r1".into(),
@@ -3780,6 +3852,7 @@ mod tests {
         // public data reads nor change the scalar value or its diagnostics.
         request.steps.extend([
             SeriesStep {
+                factor: None,
                 id: "dead_oi".into(),
                 op: SeriesOp::ReturnsSeries,
                 input: "open_interest".into(),
@@ -3789,6 +3862,7 @@ mod tests {
                 other: None,
             },
             SeriesStep {
+                factor: None,
                 id: "dead_funding".into(),
                 op: SeriesOp::RollingMean,
                 input: "funding_rate".into(),
@@ -3798,6 +3872,7 @@ mod tests {
                 other: None,
             },
             SeriesStep {
+                factor: None,
                 id: "dead_joint".into(),
                 op: SeriesOp::And,
                 input: "dead_oi".into(),
@@ -3883,6 +3958,7 @@ mod tests {
     fn t03_checked_composition_allows_branching_and_repeated_ops_but_rejects_bad_refs() {
         let mut spec = two_step_composition();
         spec.steps.push(SeriesStep {
+            factor: None,
             id: "w2".into(),
             op: SeriesOp::RollingMean,
             input: "r1".into(),
@@ -4001,6 +4077,7 @@ mod tests {
         );
         let mut future = graph;
         future.steps.push(SeriesStep {
+            factor: None,
             id: "outcome".into(),
             op: SeriesOp::ForwardReturnLabel,
             input: "close".into(),
@@ -4010,6 +4087,7 @@ mod tests {
             other: None,
         });
         future.steps.push(SeriesStep {
+            factor: None,
             id: "leak".into(),
             op: SeriesOp::Or,
             input: "positive".into(),
@@ -4029,6 +4107,7 @@ mod tests {
             version: COMPOSITION_VERSION.into(),
             steps: (0..count)
                 .map(|i| SeriesStep {
+                    factor: None,
                     id: format!("w{i}"),
                     op: SeriesOp::RollingMean,
                     input: "close".into(),
@@ -4087,6 +4166,7 @@ mod tests {
 
     fn causal_event_graph() -> CompositionRequest {
         let step = |id: &str, op, input: &str, period, threshold, when: Option<&str>| SeriesStep {
+            factor: None,
             id: id.into(),
             op,
             input: input.into(),
@@ -4195,6 +4275,7 @@ mod tests {
         let spec = causal_event_graph();
         let mut leakage = spec.clone();
         leakage.steps.push(SeriesStep {
+            factor: None,
             id: "leak".into(),
             op: SeriesOp::GreaterThan,
             input: "outcome".into(),
@@ -4778,6 +4859,7 @@ mod t02_t06_multisource_regression {
         );
         let mut bad = spec.clone();
         bad.steps.push(SeriesStep {
+            factor: None,
             id: "miscast".into(),
             op: SeriesOp::RollingZscore,
             input: "above".into(),
