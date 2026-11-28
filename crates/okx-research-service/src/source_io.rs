@@ -64,7 +64,7 @@ impl JobSourceObservation {
                     .proxy_replies
                     .saturating_add(count.proxy_errors)
                     .saturating_add(count.proxy_requests_aborted)
-                        <= count.proxy_requests_started
+                    <= count.proxy_requests_started
                     && count
                         .host_transport_receipts
                         .saturating_add(count.host_transport_receipts_missing)

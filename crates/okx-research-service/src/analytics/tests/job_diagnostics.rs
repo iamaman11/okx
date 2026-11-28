@@ -17,9 +17,10 @@ async fn source_and_queue_observations_survive_failed_job_and_restart() {
     let (jobs, path) = jobs("source-queue");
     let id = "a".repeat(64);
     jobs.enqueue("source-key".into(), id.clone()).unwrap();
-    assert!(jobs
-        .update_with_observation(&id, JobState::Running, None, None, Some(27), None)
-        .unwrap());
+    assert!(
+        jobs.update_with_observation(&id, JobState::Running, None, None, Some(27), None)
+            .unwrap()
+    );
     let meter = std::sync::Arc::new(crate::source_io::SourceIoMeter::default());
     crate::source_io::observe(meter.clone(), async {
         let attempt = crate::source_io::request_started(&PublicSourceRequest::Candles {
@@ -33,14 +34,17 @@ async fn source_and_queue_observations_survive_failed_job_and_restart() {
         attempt.finished(&Err("RESEARCH_PUBLIC_HTTP_FAILED".into()));
     })
     .await;
-    assert!(jobs.update_with_observation(
-        &id,
-        JobState::Failed,
-        None,
-        Some("RESEARCH_PUBLIC_HTTP_FAILED".into()),
-        None,
-        Some(meter.job_observation().unwrap()),
-    ).unwrap());
+    assert!(
+        jobs.update_with_observation(
+            &id,
+            JobState::Failed,
+            None,
+            Some("RESEARCH_PUBLIC_HTTP_FAILED".into()),
+            None,
+            Some(meter.job_observation().unwrap()),
+        )
+        .unwrap()
+    );
     let before = jobs.diagnostic_readback(&id);
     assert_eq!(before["job"]["error_code"], "RESEARCH_PUBLIC_HTTP_FAILED");
     assert_eq!(before["job"]["failure_class"], "source");
@@ -96,16 +100,18 @@ fn terminal_job_rejects_late_evidence_and_corrupt_evidence_is_never_echoed() {
     jobs.enqueue("cancelled-source".into(), id.clone()).unwrap();
     jobs.update(&id, JobState::Cancelled, None, Some("CANCELLED".into()))
         .unwrap();
-    assert!(!jobs
-        .update_with_observation(
-            &id,
-            JobState::Failed,
-            None,
-            Some("RESEARCH_PUBLIC_HTTP_FAILED".into()),
-            Some(100),
-            None,
-        )
-        .unwrap());
+    assert!(
+        !jobs
+            .update_with_observation(
+                &id,
+                JobState::Failed,
+                None,
+                Some("RESEARCH_PUBLIC_HTTP_FAILED".into()),
+                Some(100),
+                None,
+            )
+            .unwrap()
+    );
     assert!(jobs.diagnostic_readback(&id)["job"]["diagnostic_evidence"].is_null());
     let db = jobs.db.lock().unwrap();
     db.execute(
@@ -122,7 +128,8 @@ fn terminal_job_rejects_late_evidence_and_corrupt_evidence_is_never_echoed() {
     // Corrupt optional telemetry is not permitted to fail an authoritative
     // terminal transition. It remains absent in the read-only projection.
     let active = "d".repeat(64);
-    jobs.enqueue("failed-source".into(), active.clone()).unwrap();
+    jobs.enqueue("failed-source".into(), active.clone())
+        .unwrap();
     let db = jobs.db.lock().unwrap();
     db.execute(
         "UPDATE research_jobs SET diagnostic_evidence=?2 WHERE id=?1",
@@ -130,8 +137,8 @@ fn terminal_job_rejects_late_evidence_and_corrupt_evidence_is_never_echoed() {
     )
     .unwrap();
     drop(db);
-    assert!(jobs
-        .update_with_observation(
+    assert!(
+        jobs.update_with_observation(
             &active,
             JobState::Failed,
             None,
@@ -139,7 +146,8 @@ fn terminal_job_rejects_late_evidence_and_corrupt_evidence_is_never_echoed() {
             Some(99),
             None,
         )
-        .unwrap());
+        .unwrap()
+    );
     let clean = jobs.diagnostic_readback(&active);
     assert_eq!(clean["job"]["state"], "failed");
     assert!(clean["job"]["diagnostic_evidence"].is_null());
