@@ -3,7 +3,7 @@
 use okx_research_protocol::research_ipc::{
     PublicSourceHttpDelivery, PublicSourceReply, PublicSourceRequest,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -15,8 +15,9 @@ tokio::task_local! {
     static ACTIVE: Arc<SourceIoMeter>;
 }
 
-#[derive(Default, Serialize)]
-struct SourceCounts {
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct SourceCounts {
     proxy_requests_started: u64,
     proxy_replies: u64,
     proxy_errors: u64,
@@ -33,6 +34,52 @@ struct SourceCounts {
     host_transport_response_body_bytes: Option<u64>,
 }
 
+/// Only bounded, aggregate counters. This is safe to persist with a Research
+/// job: it contains no URL, parameters, credential, body or raw failure text.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JobSourceObservation {
+    scope: String,
+    source_calls: BTreeMap<String, SourceCounts>,
+    candle_cache_hits: u64,
+    /// Wire HTTP cannot be proven from Worker source invocation counters.
+    venue_http_requests: Option<u64>,
+}
+
+impl JobSourceObservation {
+    pub(crate) fn valid(&self) -> bool {
+        self.scope == "research_job_execution"
+            && self.venue_http_requests.is_none()
+            && self.source_calls.len() <= 6
+            && self.source_calls.iter().all(|(name, count)| {
+                matches!(
+                    name.as_str(),
+                    "catalog_page"
+                        | "candles"
+                        | "funding"
+                        | "reference"
+                        | "ticker"
+                        | "open_interest"
+                ) && count
+                    .proxy_replies
+                    .saturating_add(count.proxy_errors)
+                    .saturating_add(count.proxy_requests_aborted)
+                    <= count.proxy_requests_started
+                    && count
+                        .host_transport_receipts
+                        .saturating_add(count.host_transport_receipts_missing)
+                        <= count.proxy_replies
+                    && count.replies_without_raw_body <= count.proxy_replies
+                    && (count.host_transport_send_invocations.is_some()
+                        == count.host_transport_response_body_bytes.is_some())
+                    && (count.host_transport_receipts_missing == 0
+                        && count.proxy_errors == 0
+                        && count.proxy_requests_aborted == 0
+                        || count.host_transport_send_invocations.is_none())
+            })
+    }
+}
+
 #[derive(Default)]
 struct State {
     by_source: BTreeMap<&'static str, SourceCounts>,
@@ -43,6 +90,22 @@ struct State {
 pub(crate) struct SourceIoMeter(Mutex<State>);
 
 impl SourceIoMeter {
+    pub(crate) fn job_observation(&self) -> Option<JobSourceObservation> {
+        // Telemetry failure must never panic the job or forge a clean source
+        // history. A poisoned meter remains unobserved.
+        let state = self.0.lock().ok()?;
+        Some(JobSourceObservation {
+            scope: "research_job_execution".into(),
+            source_calls: state
+                .by_source
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect(),
+            candle_cache_hits: state.candle_cache_hits,
+            venue_http_requests: None,
+        })
+    }
+
     pub(crate) fn snapshot(&self) -> Value {
         let state = self.0.lock().unwrap();
         json!({

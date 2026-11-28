@@ -1,6 +1,6 @@
 //! Bounded observations of the existing catalog owner, never a second job store.
 use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -28,7 +28,11 @@ const COLUMNS: &str = "substr(id,1,129),state,progress,
         'GLOBAL_RANK_SOURCE_INCOMPLETE','RESEARCH_MEMORY_LIMIT','CPU_QUEUE_FULL','LIVE_SOURCE_DEADLINE',
         'UNSUPPORTED_STRATEGY','UNSUPPORTED_INVERSE_CONTRACT','UNSUPPORTED_INSTRUMENT_TYPE',
         'CONTRACT_MULTIPLIER_MISSING','EMPTY_VARIANTS','RANGE_NOT_CLOSED',
-        'RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED','RESEARCH_BATCH_SOURCE_RETRYABLE') THEN error
+        'RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED','RESEARCH_BATCH_SOURCE_RETRYABLE',
+        'RESEARCH_PUBLIC_TRANSPORT_FAILED','RESEARCH_PUBLIC_HTTP_FAILED',
+        'RESEARCH_PUBLIC_BODY_TOO_LARGE','FUNDING_REALIZED_RATE_UNAVAILABLE',
+        'FUNDING_REALIZED_RATE_INVALID','FUNDING_CONFLICTING_EVENT_TIMESTAMP',
+        'CACHE_MEMORY_LIMIT') THEN error
       WHEN error='process restarted before completion' THEN 'RESEARCH_INTERRUPTED'
       WHEN error GLOB 'LIMIT_EXCEEDED:*' THEN 'LIMIT_EXCEEDED'
       WHEN error GLOB 'LIMIT_TOTAL_BARS:*' THEN 'LIMIT_TOTAL_BARS'
@@ -39,7 +43,26 @@ const COLUMNS: &str = "substr(id,1,129),state,progress,
       ELSE 'UNCLASSIFIED_RESEARCH_ERROR' END,pinned,
     CASE WHEN length(candidate_progress)<=512 THEN candidate_progress ELSE NULL END,
     CASE WHEN length(origin_invocation)<=256 THEN origin_invocation ELSE NULL END,
-    CASE WHEN length(producer)<=512 THEN producer ELSE NULL END";
+    CASE WHEN length(producer)<=512 THEN producer ELSE NULL END,
+    CASE WHEN length(diagnostic_evidence) BETWEEN 2 AND 4096
+      THEN diagnostic_evidence ELSE NULL END";
+
+/// Bounded measurements on the existing Research job, never another store.
+/// An absent field is unknown, not an observed zero.
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct Evidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) queue_wait_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) source: Option<crate::source_io::JobSourceObservation>,
+}
+
+impl Evidence {
+    pub(super) fn valid(&self) -> bool {
+        self.source.as_ref().is_none_or(|source| source.valid())
+    }
+}
 
 /// Safe bounded event labels only; never emit raw source or request errors.
 ///
@@ -66,6 +89,13 @@ pub(in crate::analytics) fn safe_reason(error: &str) -> &'static str {
         "LIVE_SOURCE_DEADLINE" => "LIVE_SOURCE_DEADLINE",
         "RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED" => "RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED",
         "RESEARCH_BATCH_SOURCE_RETRYABLE" => "RESEARCH_BATCH_SOURCE_RETRYABLE",
+        "RESEARCH_PUBLIC_TRANSPORT_FAILED" => "RESEARCH_PUBLIC_TRANSPORT_FAILED",
+        "RESEARCH_PUBLIC_HTTP_FAILED" => "RESEARCH_PUBLIC_HTTP_FAILED",
+        "RESEARCH_PUBLIC_BODY_TOO_LARGE" => "RESEARCH_PUBLIC_BODY_TOO_LARGE",
+        "FUNDING_REALIZED_RATE_UNAVAILABLE" => "FUNDING_REALIZED_RATE_UNAVAILABLE",
+        "FUNDING_REALIZED_RATE_INVALID" => "FUNDING_REALIZED_RATE_INVALID",
+        "FUNDING_CONFLICTING_EVENT_TIMESTAMP" => "FUNDING_CONFLICTING_EVENT_TIMESTAMP",
+        "CACHE_MEMORY_LIMIT" => "CACHE_MEMORY_LIMIT",
         "UNSUPPORTED_STRATEGY" => "UNSUPPORTED_STRATEGY",
         "UNSUPPORTED_INVERSE_CONTRACT" => "UNSUPPORTED_INVERSE_CONTRACT",
         "UNSUPPORTED_INSTRUMENT_TYPE" => "UNSUPPORTED_INSTRUMENT_TYPE",
@@ -113,12 +143,19 @@ fn failure_class(code: &str) -> FailureClass {
         | "GLOBAL_RANK_SOURCE_INCOMPLETE"
         | "LIVE_SOURCE_DEADLINE"
         | "MARKET_SOURCE_RETRYABLE" => FailureClass::Source,
+        "RESEARCH_PUBLIC_TRANSPORT_FAILED"
+        | "RESEARCH_PUBLIC_HTTP_FAILED"
+        | "RESEARCH_PUBLIC_BODY_TOO_LARGE"
+        | "FUNDING_REALIZED_RATE_UNAVAILABLE"
+        | "FUNDING_REALIZED_RATE_INVALID"
+        | "FUNDING_CONFLICTING_EVENT_TIMESTAMP" => FailureClass::Source,
         "RESEARCH_MEMORY_LIMIT"
         | "CPU_QUEUE_FULL"
         | "LIMIT_EXCEEDED"
         | "LIMIT_TOTAL_BARS"
         | "LIMIT_BARS"
-        | "RESOURCE_BUSY" => FailureClass::Resource,
+        | "RESOURCE_BUSY"
+        | "CACHE_MEMORY_LIMIT" => FailureClass::Resource,
         "UNSUPPORTED_STRATEGY"
         | "UNSUPPORTED_INVERSE_CONTRACT"
         | "UNSUPPORTED_INSTRUMENT_TYPE"
@@ -168,6 +205,8 @@ struct Snapshot {
     #[serde(skip)]
     retry_invocations: Vec<okx_research_protocol::research_ipc::InvocationId>,
     producer: Option<crate::producer::Producer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_evidence: Option<Evidence>,
     result_ref: Option<String>,
     error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -226,6 +265,10 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
         producer: row
             .get::<_, Option<String>>(8)?
             .and_then(|v| serde_json::from_str(&v).ok()),
+        diagnostic_evidence: row
+            .get::<_, Option<String>>(9)?
+            .and_then(|value| serde_json::from_str::<Evidence>(&value).ok())
+            .filter(Evidence::valid),
         result_ref: artifact.filter(|v| valid_result_reference(v)),
         // SQL emits only the fixed whitelist above, never raw failure payloads.
         failure_class: error.as_deref().map(failure_class),

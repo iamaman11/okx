@@ -10,6 +10,150 @@ fn jobs(label: &str) -> (Jobs, std::path::PathBuf) {
         .join("catalog.sqlite");
     (Jobs::open(path.clone()).unwrap(), path)
 }
+
+#[tokio::test]
+async fn source_and_queue_observations_survive_failed_job_and_restart() {
+    use okx_research_protocol::research_ipc::PublicSourceRequest;
+    let (jobs, path) = jobs("source-queue");
+    let id = "a".repeat(64);
+    jobs.enqueue("source-key".into(), id.clone()).unwrap();
+    assert!(
+        jobs.update_with_observation(&id, JobState::Running, None, None, Some(27), None)
+            .unwrap()
+    );
+    let meter = std::sync::Arc::new(crate::source_io::SourceIoMeter::default());
+    crate::source_io::observe(meter.clone(), async {
+        let attempt = crate::source_io::request_started(&PublicSourceRequest::Candles {
+            instrument: "BTC-USDT-SWAP".into(),
+            bar: "1m".into(),
+            after: None,
+            before: None,
+            limit: 100,
+            queued: false,
+        });
+        attempt.finished(&Err("RESEARCH_PUBLIC_HTTP_FAILED".into()));
+    })
+    .await;
+    assert!(
+        jobs.update_with_observation(
+            &id,
+            JobState::Failed,
+            None,
+            Some("RESEARCH_PUBLIC_HTTP_FAILED".into()),
+            None,
+            Some(meter.job_observation().unwrap()),
+        )
+        .unwrap()
+    );
+    let before = jobs.diagnostic_readback(&id);
+    assert_eq!(before["job"]["error_code"], "RESEARCH_PUBLIC_HTTP_FAILED");
+    assert_eq!(before["job"]["failure_class"], "source");
+    let evidence = &before["job"]["diagnostic_evidence"];
+    let source = &evidence["source"];
+    let candles = &source["source_calls"]["candles"];
+    assert_eq!(evidence["queue_wait_ms"], 27);
+    assert_eq!(source["scope"], "research_job_execution");
+    assert_eq!(candles["proxy_errors"], 1);
+    assert!(candles["host_transport_send_invocations"].is_null());
+    assert!(source["venue_http_requests"].is_null());
+    assert!(before["job"]["result_ref"].is_null());
+    drop(jobs);
+    let restored = Jobs::open(path).unwrap().diagnostic_readback(&id);
+    assert_eq!(restored["job"]["diagnostic_evidence"], *evidence);
+    assert_eq!(restored["job"]["origin"], "durable_startup_subset");
+}
+
+#[test]
+fn source_and_cache_errors_retain_exact_safe_code_on_live_and_restart_readback() {
+    let (jobs, path) = jobs("source-reasons");
+    let codes = [
+        "RESEARCH_PUBLIC_TRANSPORT_FAILED",
+        "RESEARCH_PUBLIC_HTTP_FAILED",
+        "RESEARCH_PUBLIC_BODY_TOO_LARGE",
+        "FUNDING_REALIZED_RATE_UNAVAILABLE",
+        "FUNDING_REALIZED_RATE_INVALID",
+        "FUNDING_CONFLICTING_EVENT_TIMESTAMP",
+        "CACHE_MEMORY_LIMIT",
+    ];
+    for (index, code) in codes.iter().enumerate() {
+        let id = format!("{index:064x}");
+        jobs.enqueue(format!("key-{index}"), id.clone()).unwrap();
+        jobs.update(&id, JobState::Failed, None, Some((*code).into()))
+            .unwrap();
+        assert_eq!(safe_reason(code), *code);
+        assert_eq!(jobs.diagnostic_readback(&id)["job"]["error_code"], *code);
+    }
+    drop(jobs);
+    let reopened = Jobs::open(path).unwrap();
+    for (index, code) in codes.iter().enumerate() {
+        assert_eq!(
+            reopened.diagnostic_readback(&format!("{index:064x}"))["job"]["error_code"],
+            *code
+        );
+    }
+}
+
+#[test]
+fn terminal_job_rejects_late_evidence_and_corrupt_evidence_is_never_echoed() {
+    let (jobs, _) = jobs("source-fence");
+    let id = "c".repeat(64);
+    jobs.enqueue("cancelled-source".into(), id.clone()).unwrap();
+    jobs.update(&id, JobState::Cancelled, None, Some("CANCELLED".into()))
+        .unwrap();
+    assert!(
+        !jobs
+            .update_with_observation(
+                &id,
+                JobState::Failed,
+                None,
+                Some("RESEARCH_PUBLIC_HTTP_FAILED".into()),
+                Some(100),
+                None,
+            )
+            .unwrap()
+    );
+    assert!(jobs.diagnostic_readback(&id)["job"]["diagnostic_evidence"].is_null());
+    let db = jobs.db.lock().unwrap();
+    db.execute(
+        "UPDATE research_jobs SET diagnostic_evidence=?2 WHERE id=?1",
+        rusqlite::params![id, "{\"secret\":\"DO_NOT_LEAK\"}"],
+    )
+    .unwrap();
+    jobs.diagnostic.publish_id(&db, &id);
+    drop(db);
+    let snapshot = jobs.diagnostic_readback(&id);
+    assert!(snapshot["job"]["diagnostic_evidence"].is_null());
+    assert!(!snapshot.to_string().contains("DO_NOT_LEAK"));
+
+    // Corrupt optional telemetry is not permitted to fail an authoritative
+    // terminal transition. It remains absent in the read-only projection.
+    let active = "d".repeat(64);
+    jobs.enqueue("failed-source".into(), active.clone())
+        .unwrap();
+    let db = jobs.db.lock().unwrap();
+    db.execute(
+        "UPDATE research_jobs SET diagnostic_evidence=?2 WHERE id=?1",
+        rusqlite::params![active, "{\"secret\":\"DO_NOT_LEAK\"}"],
+    )
+    .unwrap();
+    drop(db);
+    assert!(
+        jobs.update_with_observation(
+            &active,
+            JobState::Failed,
+            None,
+            Some("RESEARCH_PUBLIC_HTTP_FAILED".into()),
+            Some(99),
+            None,
+        )
+        .unwrap()
+    );
+    let clean = jobs.diagnostic_readback(&active);
+    assert_eq!(clean["job"]["state"], "failed");
+    assert!(clean["job"]["diagnostic_evidence"].is_null());
+    assert!(!clean.to_string().contains("DO_NOT_LEAK"));
+}
+
 #[test]
 fn job_diagnostic_is_local_while_catalog_owner_is_busy() {
     let (jobs, _) = jobs("busy");
@@ -570,6 +714,7 @@ fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
         origin_invocation: Some(origin),
         retry_invocations: aliases,
         producer: None,
+        diagnostic_evidence: None,
         result_ref: None,
         error_code: Some("CANDLE_RANGE_UNAVAILABLE".into()),
         failure_class: Some(FailureClass::Source),
