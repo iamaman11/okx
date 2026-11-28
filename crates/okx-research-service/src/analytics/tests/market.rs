@@ -172,11 +172,15 @@ fn t02_funding_composition_rejects_non_swap_before_source_reads() {
     let range = okx_analysis::time_series::ClosedRange::strict(0, 180_000, 60_000).unwrap();
     use okx_analysis::query_plan::SeriesSource;
     assert_eq!(
-        SeriesSource::FundingRate.bind(&spot[1], range, 1).unwrap_err(),
+        SeriesSource::FundingRate
+            .bind(&spot[1], range, 1)
+            .unwrap_err(),
         "composition.sources.funding_rate:UNSUPPORTED_PRODUCT"
     );
     assert_eq!(
-        SeriesSource::OpenInterest.bind(&spot[1], range, 1).unwrap_err(),
+        SeriesSource::OpenInterest
+            .bind(&spot[1], range, 1)
+            .unwrap_err(),
         "composition.sources.open_interest:UNSUPPORTED_PRODUCT"
     );
     assert!(SeriesSource::FundingRate.bind(&spot[0], range, 0).is_ok());
