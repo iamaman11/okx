@@ -114,7 +114,7 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         capabilities["composition"]["operations"],
         serde_json::to_value(okx_analysis::query_plan::series_operation_contracts()).unwrap()
     );
-    assert_eq!(operations.len(), 23);
+    assert_eq!(operations.len(), 26);
     assert_eq!(
         operations
             .iter()
