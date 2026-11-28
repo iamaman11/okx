@@ -200,7 +200,7 @@ fn t13_composition_evidence_uses_a_new_namespace_without_invalidating_legacy_res
     let oi_composed = market_request_schema(&fields, true, true, false);
     let oi_correlated = market_request_schema(&oi_fields, true, true, false);
     let funding_composed = market_request_schema(&fields, true, false, true);
-    assert_eq!(composed, "market/518.11.source-io-composition-v1");
+    assert_eq!(composed, "market/518.12.typed-source-ports-composition-v1");
     assert_eq!(oi_composed, composed);
     assert_ne!(composed, "market/518.2.composition-quality-v1");
     assert_ne!(oi_composed, "market/518.2.oi-composition-quality-v1");
@@ -209,7 +209,7 @@ fn t13_composition_evidence_uses_a_new_namespace_without_invalidating_legacy_res
         market_request_schema(&fields, false, false, false)
     );
     assert_eq!(oi_correlated, oi_composed);
-    assert_eq!(funding_composed, "market/518.11.source-io-composition-v1");
+    assert_eq!(funding_composed, "market/518.12.typed-source-ports-composition-v1");
     assert_eq!(
         funding_composed,
         market_request_schema(&fields, true, true, true)

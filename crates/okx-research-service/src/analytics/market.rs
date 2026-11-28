@@ -60,7 +60,7 @@ fn market_request_schema(
     funding_composition: bool,
 ) -> &'static str {
     if has_composition || oi_composition || funding_composition {
-        "market/518.11.source-io-composition-v1"
+        "market/518.12.typed-source-ports-composition-v1"
     } else {
         market_job_schema(fields)
     }
@@ -499,9 +499,10 @@ impl AnalyticsService {
                     "first_empty_grid_ms":"not_a_funding_coverage_gap_sparse_events_are_expected",
                     "publication_time_verified":false},
                 "source_evidence":{"location":"source_captures.<source>.evidence_artifact",
-                    "schema":"okx.market.normalized-source/v1",
+                    "schema":"okx.market.normalized-source/v2",
                     "chunk_size":4096,"storage":"immutable_content_addressed",
                     "capture_hash":"canonical_source_tuple_sha256",
+                    "source_ports":"verified_against_request_bound_rust_contracts",
                     "integrity_location":"source_integrity",
                     "integrity_schema":"okx.market.composition-source-integrity/v1",
                     "verification":"bounded_streaming_reconstructed_canonical_capture_hash",
@@ -868,12 +869,43 @@ impl Write for SourceHashWriter {
     }
 }
 
+/// A persisted capture is a physical source group, not a new graph operator.
+/// Candles carry all five distinct OHLCV typed ports; OI and funding carry one
+/// each. Re-derive them from the checked QueryPlan at write *and* replay time.
+fn capture_source_ports(
+    plan: &okx_analysis::query_plan::QueryPlan,
+    instrument: &str,
+    kind: okx_analysis::query_plan::Source,
+) -> Result<Value, String> {
+    use okx_analysis::query_plan::SERIES_SOURCES;
+    let index = plan
+        .universe
+        .iter()
+        .position(|id| id == instrument)
+        .ok_or("COMPOSITION_SOURCE_INSTRUMENT_UNBOUND")?;
+    // The shared finite catalog owns the source-to-port relationship. Do not
+    // hand-maintain a second OHLCV/OI/funding list in the artifact subsystem.
+    let sources = SERIES_SOURCES
+        .into_iter()
+        .filter(|source| source.contract().source == kind)
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return Err("COMPOSITION_SOURCE_PORT_UNSUPPORTED".into());
+    }
+    let ports = sources
+        .into_iter()
+        .map(|source| source.bind(instrument, plan.range, index))
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_value(ports).map_err(|_| "COMPOSITION_SOURCE_PORT_ENCODING_FAILED".into())
+}
+
 fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
     store: &ResearchArtifactStore,
     request: &MarketRequest,
     instrument: &str,
     capture: &Value,
     source_spec: (&str, &str, &str),
+    expected_ports: &Value,
     cancel: &super::cpu_executor::Cancel,
 ) -> Result<Value, String> {
     let (source, hash_domain, time_basis) = source_spec;
@@ -882,8 +914,19 @@ fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
     let manifest_bytes = store.read_evidence(manifest_id).map_err(|_| invalid())?;
     let manifest: Value = serde_json::from_slice(&manifest_bytes).map_err(|_| invalid())?;
     let expected = manifest["observed_points"].as_u64().ok_or_else(invalid)?;
+    // v1 pages are still readable and hash-verifiable, but they cannot be
+    // promoted to the new bound-port proof by merely copying the old hashes.
+    let typed_ports_verified = match manifest["schema"].as_str() {
+        Some("okx.market.normalized-source/v2") => {
+            manifest["source_ports"] == *expected_ports
+        }
+        Some("okx.market.normalized-source/v1") => {
+            manifest.get("source_ports").is_none()
+        }
+        _ => false,
+    };
     if expected > 1_000_000
-        || manifest["schema"] != "okx.market.normalized-source/v1"
+        || !typed_ports_verified
         || manifest["source"] != source
         || manifest["instrument"] != instrument
         || manifest["requested_start_ms"] != request.start_ms
@@ -963,6 +1006,7 @@ fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
     Ok(
         json!({"source":source,"quality":"verified_normalized_capture",
         "pages":ids.len(),"observed_points":expected,"capture_hash":reconstructed_hash,
+        "source_port_bindings_verified":manifest["schema"] == "okx.market.normalized-source/v2",
         "publication_time_verified":false,
         "verified_storage_io":{
             "scope":"source_hash_reconstruction_only",
@@ -1021,6 +1065,7 @@ fn verify_composition_source_pages(
             unavailable.push(name);
             continue;
         }
+        let expected_ports = capture_source_ports(plan, instrument, kind)?;
         verified.push(match kind {
             Source::Candles => verify_one_source_pages::<Bar>(
                 store,
@@ -1028,6 +1073,7 @@ fn verify_composition_source_pages(
                 instrument,
                 capture,
                 (name, domain, time_basis),
+                &expected_ports,
                 cancel,
             )?,
             _ => verify_one_source_pages::<(u64, f64)>(
@@ -1036,14 +1082,21 @@ fn verify_composition_source_pages(
                 instrument,
                 capture,
                 (name, domain, time_basis),
+                &expected_ports,
                 cancel,
             )?,
         });
     }
+    let typed_ports_verified = verified
+        .iter()
+        .all(|source: &Value| source["source_port_bindings_verified"] == true);
     Ok(
         json!({"schema":"okx.market.composition-source-integrity/v1",
-        "quality":if unavailable.is_empty(){"verified_normalized_sources"}else{"partial_source_unavailable"},
+        "quality":if !unavailable.is_empty(){"partial_source_unavailable"}
+            else if !typed_ports_verified{"partial_legacy_source_bindings"}
+            else{"verified_normalized_sources"},
         "verified_sources":verified,"unavailable_sources":unavailable,
+        "source_port_bindings_verified":typed_ports_verified,
         "replay_metric_reexecution_verified":false,
         "historical_publication_time_verified":false,
         "proof":"bounded_chunk_read_identity_and_reconstructed_canonical_capture_hash"}),
@@ -1072,6 +1125,7 @@ fn publish_normalized_source<T: Serialize>(
     instrument: &str,
     source: &'static str,
     hash_domain: &'static str,
+    source_ports: &Value,
     observations: &[T],
     cancel: &super::cpu_executor::Cancel,
 ) -> Result<PublishedMarketSource, String> {
@@ -1096,7 +1150,7 @@ fn publish_normalized_source<T: Serialize>(
     }
     let manifest = store
         .publish_evidence(&json!({
-            "schema":"okx.market.normalized-source/v1",
+            "schema":"okx.market.normalized-source/v2",
             "source":source,
             "instrument":instrument,
             "requested_start_ms":request.start_ms,
@@ -1104,6 +1158,7 @@ fn publish_normalized_source<T: Serialize>(
             "timeframe_ms":request.timeframe_ms,
             "capture_hash":capture_hash,
             "hash_domain":hash_domain,
+            "source_ports":source_ports,
             "observed_points":observations.len(),
             "chunk_size":MARKET_SOURCE_EVIDENCE_CHUNK,
             "chunks":chunks,
@@ -1147,6 +1202,7 @@ fn publish_composition_source_evidence(
             &row.instrument,
             "candles",
             "okx.market.candle-source-capture/v1",
+            &capture_source_ports(plan, &row.instrument, Source::Candles)?,
             bars,
             cancel,
         )?);
@@ -1160,6 +1216,7 @@ fn publish_composition_source_evidence(
             &row.instrument,
             "open_interest",
             "okx.market.oi-source-capture/v1",
+            &capture_source_ports(plan, &row.instrument, Source::OpenInterest)?,
             points,
             cancel,
         )?);
@@ -1173,6 +1230,7 @@ fn publish_composition_source_evidence(
             &row.instrument,
             "funding_rate",
             "okx.market.funding-realized-event-source-capture/v1",
+            &capture_source_ports(plan, &row.instrument, Source::Funding)?,
             events,
             cancel,
         )?);

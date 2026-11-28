@@ -68,12 +68,14 @@ fn t06_t13_all_three_sources_are_immutable_chunked_and_reconstructable() {
     assert_eq!(integrity["quality"], "verified_normalized_sources");
     assert_eq!(integrity["verified_sources"].as_array().unwrap().len(), 3);
     assert_eq!(integrity["unavailable_sources"], json!([]));
+    assert_eq!(integrity["source_port_bindings_verified"], true);
     assert_eq!(integrity["replay_metric_reexecution_verified"], false);
     assert_eq!(integrity["historical_publication_time_verified"], false);
     for source in integrity["verified_sources"].as_array().unwrap() {
         assert_eq!(source["quality"], "verified_normalized_capture");
         assert!(source["capture_hash"].is_string());
         assert_eq!(source["publication_time_verified"], false);
+        assert_eq!(source["source_port_bindings_verified"], true);
         assert_eq!(
             source["verified_storage_io"]["scope"],
             "source_hash_reconstruction_only"
@@ -146,11 +148,32 @@ fn t06_t13_all_three_sources_are_immutable_chunked_and_reconstructable() {
         );
         assert_eq!(linked["source_captures"][source]["capture_hash"], *hash);
         let manifest: Value = service.artifacts.read_evidence_json(artifact).unwrap();
-        assert_eq!(manifest["schema"], "okx.market.normalized-source/v1");
+        assert_eq!(manifest["schema"], "okx.market.normalized-source/v2");
         assert_eq!(manifest["instrument"], "BTC-USDT-SWAP");
         assert_eq!(manifest["source"], *source);
         assert_eq!(manifest["capture_hash"], *hash);
         assert_eq!(manifest["publication_time_verified"], false);
+        let kind = match *source {
+            "candles" => okx_analysis::query_plan::Source::Candles,
+            "open_interest" => okx_analysis::query_plan::Source::OpenInterest,
+            "funding_rate" => okx_analysis::query_plan::Source::Funding,
+            _ => panic!("unexpected captured source"),
+        };
+        assert_eq!(
+            manifest["source_ports"],
+            capture_source_ports(&plan, "BTC-USDT-SWAP", kind).unwrap()
+        );
+        let expected_port_count = if *source == "candles" { 5 } else { 1 };
+        assert_eq!(
+            manifest["source_ports"].as_array().unwrap().len(),
+            expected_port_count
+        );
+        for port in manifest["source_ports"].as_array().unwrap() {
+            assert_eq!(port["instrument"]["quote_currency"], "USDT");
+            assert_eq!(port["instrument"]["product"], "swap");
+            assert_eq!(port["version"], 1);
+            assert_eq!(port["publication_time_verified"], false);
+        }
         let chunks = manifest["chunks"].as_array().unwrap();
         let count_expected = if *source == "funding_rate" { 3 } else { count };
         assert_eq!(manifest["observed_points"], count_expected);
@@ -248,6 +271,108 @@ fn t06_t13_all_three_sources_are_immutable_chunked_and_reconstructable() {
 }
 
 #[test]
+fn t06_t13_capture_ports_are_bound_independently_per_instrument_and_quote_currency() {
+    let (root, service) = super::super::artifact_job_fixtures::service();
+    let mut query = composed_request(8);
+    query.instruments = vec!["BTC-USDT-SWAP".into(), "ETH-USDC-SWAP".into()];
+    let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+    let cancellation = super::super::cpu_executor::Cancel::default();
+    let mut eth = composed_row(8);
+    eth.instrument = "ETH-USDC-SWAP".into();
+    let evidence = publish_composition_source_evidence(
+        &service.artifacts,
+        &eth,
+        &query,
+        &plan,
+        &cancellation,
+    )
+    .unwrap();
+    let result = compute_row_planned(eth, &query, None, &plan, true).unwrap();
+    let linked = attach_composition_source_evidence(result, evidence).unwrap();
+    let integrity = verify_composition_source_pages(
+        &service.artifacts,
+        &linked,
+        &query,
+        &plan,
+        &cancellation,
+    )
+    .unwrap();
+    assert_eq!(integrity["quality"], "verified_normalized_sources");
+    let id = linked["source_captures"]["open_interest"]["evidence_artifact"]
+        .as_str()
+        .unwrap();
+    let manifest: Value = service.artifacts.read_evidence_json(id).unwrap();
+    assert_eq!(manifest["source_ports"][0]["instrument"]["base_asset"], "ETH");
+    assert_eq!(
+        manifest["source_ports"][0]["instrument"]["quote_currency"],
+        "USDC"
+    );
+    assert_eq!(
+        capture_source_ports(
+            &plan,
+            "X-USDT-SWAP",
+            okx_analysis::query_plan::Source::OpenInterest
+        )
+        .unwrap_err(),
+        "COMPOSITION_SOURCE_INSTRUMENT_UNBOUND"
+    );
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn t13_legacy_source_pages_remain_readable_but_cannot_claim_typed_port_replay() {
+    let (root, service) = super::super::artifact_job_fixtures::service();
+    let query = composed_request(8);
+    let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+    let cancellation = super::super::cpu_executor::Cancel::default();
+    let row = composed_row(8);
+    let result = compute_row_planned(row.clone(), &query, None, &plan, true).unwrap();
+    let evidence = publish_composition_source_evidence(
+        &service.artifacts,
+        &row,
+        &query,
+        &plan,
+        &cancellation,
+    )
+    .unwrap();
+    let mut linked = attach_composition_source_evidence(result, evidence).unwrap();
+    let id = linked["source_captures"]["candles"]["evidence_artifact"]
+        .as_str()
+        .unwrap();
+    let mut legacy: Value = service.artifacts.read_evidence_json(id).unwrap();
+    legacy["schema"] = json!("okx.market.normalized-source/v1");
+    legacy.as_object_mut().unwrap().remove("source_ports");
+    let legacy_id = service.artifacts.publish_evidence(&legacy).unwrap().0;
+    linked["source_captures"]["candles"]["evidence_artifact"] = json!(legacy_id);
+    let integrity = verify_composition_source_pages(
+        &service.artifacts,
+        &linked,
+        &query,
+        &plan,
+        &cancellation,
+    )
+    .unwrap();
+    assert_eq!(integrity["quality"], "partial_legacy_source_bindings");
+    assert_eq!(integrity["source_port_bindings_verified"], false);
+    assert_eq!(integrity["verified_sources"].as_array().unwrap().len(), 3);
+    linked["source_integrity"] = integrity;
+    let proof = replay_proof::verify_persisted_market_metrics(
+        &service.artifacts,
+        &linked,
+        &query,
+        &plan,
+        true,
+        &cancellation,
+    )
+    .unwrap();
+    assert_eq!(proof["quality"], "not_verified");
+    assert_eq!(proof["reason"], "LEGACY_SOURCE_PORT_BINDING_UNVERIFIED");
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn t13_market_source_integrity_rejects_rehashed_forged_metadata_or_reordered_pages() {
     let (root, service) = super::super::artifact_job_fixtures::service();
     let count = MARKET_SOURCE_EVIDENCE_CHUNK + 1;
@@ -278,6 +403,31 @@ fn t13_market_source_integrity_rejects_rehashed_forged_metadata_or_reordered_pag
         ("false_time_proof", {
             let mut m = original.clone();
             m["publication_time_verified"] = json!(true);
+            m
+        }),
+        ("forged_quote_currency", {
+            let mut m = original.clone();
+            m["source_ports"][0]["instrument"]["quote_currency"] = json!("USDC");
+            m
+        }),
+        ("forged_port_version", {
+            let mut m = original.clone();
+            m["source_ports"][0]["version"] = json!(999);
+            m
+        }),
+        ("forged_port_availability", {
+            let mut m = original.clone();
+            m["source_ports"][0]["availability"] = json!("historical_observed");
+            m
+        }),
+        ("forged_port_range", {
+            let mut m = original.clone();
+            m["source_ports"][0]["range"]["end_ms"] = json!(99_999_999);
+            m
+        }),
+        ("forged_port_publication", {
+            let mut m = original.clone();
+            m["source_ports"][0]["publication_time_verified"] = json!(true);
             m
         }),
         ("changed_hash_domain", {
