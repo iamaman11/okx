@@ -96,8 +96,8 @@ fn independent_replay_currency_totals(rows: &[Value]) -> Result<Value, String> {
 fn research_job_versions(request: &ResearchRequest) -> (&'static str, &'static str) {
     match request {
         ResearchRequest::GraphBacktest { .. } => (
-            "analytics/518.7.graph-signal-replay-v1",
-            "analytics/semantic/518.7.graph-signal-replay-v1",
+            "analytics/518.8.graph-single-oos-v1",
+            "analytics/semantic/518.8.graph-single-oos-v1",
         ),
         ResearchRequest::Backtest { .. } | ResearchRequest::Grid { .. } => (
             "analytics/518.6.lossless-float-replay-inputs-v1",
@@ -144,7 +144,17 @@ impl AnalyticsService {
                 .checked_sub(*start_ms)
                 .and_then(|range| range.checked_div(*timeframe_ms))
                 .ok_or("INVALID_GRAPH_RANGE")?;
-            okx_research::graph_signal::preflight_graph(graph_signal, bars)?;
+            let warmup = okx_research::graph_signal::preflight_graph(graph_signal, bars)?;
+            let policy = replay::graph_oos_policy(
+                usize::try_from(bars).map_err(|_| "graph_oos.range:RESOURCE_LIMIT")?,
+                warmup,
+            )?;
+            // Train and holdout are scored with separate ledgers. Budget the
+            // combined causal prefix work before job admission/source I/O.
+            let replay_bars = bars
+                .checked_add(policy.split_index as u64)
+                .ok_or("graph_oos.range:RESOURCE_LIMIT")?;
+            okx_research::graph_signal::preflight_graph(graph_signal, replay_bars)?;
         }
         // Estimate the complete batch before SQL admission or fetching candles.
         // Large requests are rejected before any allocation or source I/O.
@@ -570,6 +580,9 @@ impl AnalyticsService {
             .as_ref()
             .map(|signal| okx_research::graph_signal::preflight_graph(signal, bars.len() as u64))
             .transpose()?;
+        if let Some(warmup) = graph_warmup {
+            replay::graph_oos_policy(bars.len(), warmup)?;
+        }
         let variants = if let Some(strategy_id) = strategy.as_deref() {
             variants
                 .into_iter()
@@ -785,6 +798,9 @@ impl AnalyticsService {
                     } else {
                         None
                     };
+                    let graph_oos_policy = graph_warmup
+                        .map(|warmup| replay::graph_oos_policy(bars.len(), warmup))
+                        .transpose()?;
                     let mut economic_basis = economic_basis;
                     if let Some(reference_capture) = reference_capture {
                         let id = store.publish_evidence(&reference_capture).map_err(|e|e.to_string())?.0;
@@ -816,14 +832,38 @@ impl AnalyticsService {
                         experiment_inputs["graph_spec"] = json!(graph);
                         experiment_inputs["graph_warmup_bars"] =
                             json!(graph_warmup.ok_or("GRAPH_WARMUP_MISSING")?);
+                        experiment_inputs["graph_oos_policy"] = json!(graph_oos_policy);
                     }
                     let experiment = store.publish_evidence(&experiment_inputs).map_err(|e|e.to_string())?.0;
-                    let (result, grid, score_start) = if let Some(graph) = &graph_spec {
+                    let (result, grid, graph_oos, score_start) = if let Some(graph) = &graph_spec {
                         let warmup = graph_warmup.ok_or("GRAPH_WARMUP_MISSING")?;
+                        let oos = replay::graph_oos(&bars, graph, &cancelled)?;
+                        let split = oos.policy.split_index;
+                        let train_audit = okx_research::economic_audit::audit_graph_replay(
+                            &bars[..split], &execution, &oos.train,
+                            &settlement_currency, warmup, split, &cancelled,
+                        )?;
+                        let graph_oos = json!({
+                            "schema":"okx.research.graph-oos/v1",
+                            "policy":oos.policy,
+                            "train":{"summary":oos.train.summary,
+                                "result_hash":oos.train.hash,
+                                "dataset_hash":oos.train.dataset_hash,
+                                "economic_audit":train_audit},
+                            "holdout":{"summary":oos.test.summary,
+                                "result_hash":oos.test.hash,
+                                "dataset_hash":oos.test.dataset_hash},
+                            "train_range":{"start_ms":bars[warmup].time,
+                                "end_ms":bars[split].time},
+                            "holdout_range":{"start_ms":bars[split].time,"end_ms":end},
+                            "selection":"predeclared_graph_no_optimization",
+                            "historical_observed":false
+                        });
                         (
-                            replay::replay_graph(&bars, graph, warmup, bars.len(), &cancelled)?,
+                            oos.test,
                             None,
-                            warmup,
+                            Some(graph_oos),
+                            split,
                         )
                     } else {
                         let named = spec.as_ref().ok_or("REPLAY_NAMED_SPEC_MISSING")?;
@@ -843,6 +883,7 @@ impl AnalyticsService {
                             (
                                 g.test,
                                 Some(json!({"selected":g.selected,"split_index":g.split_index,"train_dataset_hash":g.train_dataset_hash,"train_range":{"start_ms":bars[g.train_score_start_index].time,"end_ms":bars[g.split_index].time},"warmup_bars":g.train_score_start_index,"seed":named.seed,"strategy_id":named.strategy_id,"test_range":{"start_ms":bars[g.split_index].time,"end_ms":end},"train":g.train,"variants":g.variants,"selection_warning":g.selection_warning})),
+                                None,
                                 split,
                             )
                         } else {
@@ -851,6 +892,7 @@ impl AnalyticsService {
                                 .warmup_for(&named.strategy_id)?;
                             (
                                 replay::replay(&bars, named, warmup, bars.len(), &cancelled)?,
+                                None,
                                 None,
                                 warmup,
                             )
@@ -861,7 +903,7 @@ impl AnalyticsService {
                         score_start, bars.len(), &cancelled,
                     )?;
                     publish_replay(&store,&result,&dataset,ReplayPublication {
-                        grid, experiment:Some(&experiment), graph_signal:graph_spec.as_ref().map(|spec| &spec.graph), economic_audit:Some(json!(audit)),
+                        grid, graph_oos, experiment:Some(&experiment), graph_signal:graph_spec.as_ref().map(|spec| &spec.graph), economic_audit:Some(json!(audit)),
                         producer:producer.as_ref(),
                     },&cancelled)
                 }).await?;

@@ -514,7 +514,7 @@ impl AnalyticsService {
             if signed.is_some() {
                 return Err("INVALID_CURSOR".into());
             }
-            return Ok(json!({
+            let mut exported = json!({
                 "view":"export","schema":"okx.research.export/448.1",
                 "job_id":job_id,"result_id":artifact,"leaf_id":leaf_artifact,
                 "expires_at_ms":j.expires_at_ms,
@@ -528,7 +528,11 @@ impl AnalyticsService {
                 "batch_summary":failed_batch_diagnostic.then(|| value.get("summary")).flatten(),
                 "read_data_via":if failed_batch_diagnostic {vec!["summary"]} else {vec!["trades","equity"]},
                 "side_effects":"none"
-            }));
+            });
+            if let Some(oos) = value.get("graph_oos").filter(|entry| !entry.is_null()) {
+                exported["graph_oos"] = oos.clone();
+            }
+            return Ok(exported);
         }
         let mut metadata = json!({
             "job_id":job_id,"artifact":artifact,
@@ -554,6 +558,9 @@ impl AnalyticsService {
         // compatible; only graph results include this immutable input.
         if let Some(signal) = value.get("graph_signal") {
             metadata["graph_signal"] = signal.clone();
+        }
+        if let Some(oos) = value.get("graph_oos").filter(|entry| !entry.is_null()) {
+            metadata["graph_oos"] = oos.clone();
         }
         // A batch summary is a compact overview, NOT a trade-page of bulky
         // per-instrument grid payloads. Drill down via an instrument cursor.

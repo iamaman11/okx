@@ -177,6 +177,81 @@ pub fn replay_graph(
     )
 }
 
+/// A single predeclared graph is never selected, fitted or optimized using
+/// holdout observations. The existing causal replay owns both score windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphOosSplit {
+    #[serde(rename = "train_70_holdout_30")]
+    Train70Holdout30,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphOosSelection {
+    FixedGraphNoModelFitting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphOosPolicy {
+    pub version: u16,
+    pub split: GraphOosSplit,
+    pub split_index: usize,
+    pub train_score_start_index: usize,
+    pub test_score_start_index: usize,
+    pub selection: GraphOosSelection,
+}
+
+pub fn graph_oos_policy(bars: usize, warmup: usize) -> Result<GraphOosPolicy, String> {
+    if bars > 1_000_000 {
+        return Err("LIMIT_BARS:1000000".into());
+    }
+    let split_index = bars * 7 / 10;
+    // At least two scored observations on either side. Reject impossible
+    // windows before jobs/source reads when the declared range is known.
+    if split_index < warmup.saturating_add(2) || bars.saturating_sub(split_index) < 2 {
+        return Err("graph_oos.range:INSUFFICIENT_TRAIN_OR_HOLDOUT".into());
+    }
+    Ok(GraphOosPolicy {
+        version: 1,
+        split: GraphOosSplit::Train70Holdout30,
+        split_index,
+        train_score_start_index: warmup,
+        test_score_start_index: split_index,
+        selection: GraphOosSelection::FixedGraphNoModelFitting,
+    })
+}
+
+pub struct GraphOosResult {
+    pub policy: GraphOosPolicy,
+    pub train: ReplayResult,
+    pub test: ReplayResult,
+}
+
+/// Two independent scoring ledgers through the *existing* Rust graph replay.
+/// The train input slice ends at the split: neither its result identity nor
+/// its dataset hash can observe any holdout bar. The test replay consumes the
+/// train prefix only as causal warmup, with a fresh test-period ledger.
+pub fn graph_oos(
+    bars: &[Bar],
+    spec: &GraphReplaySpec,
+    cancel: &impl Fn() -> bool,
+) -> Result<GraphOosResult, String> {
+    let warmup = crate::graph_signal::preflight_graph(&spec.graph, bars.len() as u64)?;
+    let policy = graph_oos_policy(bars.len(), warmup)?;
+    let split = policy.split_index;
+    let train = replay_graph(&bars[..split], spec, warmup, split, cancel)?;
+    if cancel() {
+        return Err("CANCELLED".into());
+    }
+    let test = replay_graph(bars, spec, split, bars.len(), cancel)?;
+    Ok(GraphOosResult {
+        policy,
+        train,
+        test,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn replay_core(
     bars: &[Bar],
@@ -889,6 +964,64 @@ mod tests {
             .unwrap();
         assert_eq!(checked_graph.net_exact, checked_named.net_exact);
         assert_eq!(checked_graph.fees_exact, checked_named.fees_exact);
+    }
+
+    #[test]
+    fn graph_oos_train_hash_and_score_ignore_every_holdout_mutation() {
+        let series = bars();
+        let graph = graph_spec();
+        let first = graph_oos(&series, &graph, &|| false).unwrap();
+        assert_eq!(first.policy.split_index, 70);
+        assert_eq!(first.policy.train_score_start_index, 2);
+        assert_eq!(first.policy.test_score_start_index, 70);
+        assert_eq!(
+            first.policy.selection,
+            GraphOosSelection::FixedGraphNoModelFitting
+        );
+        assert_eq!(
+            first.train.dataset_hash,
+            hash_chunks(&series[..70], &|| false).unwrap()
+        );
+        assert_eq!(
+            first.test.dataset_hash,
+            hash_chunks(&series, &|| false).unwrap()
+        );
+        assert_eq!(first.train.equity.first().unwrap().0, series[2].time);
+        assert_eq!(first.test.equity.first().unwrap().0, series[70].time);
+        let mut mutated = series.clone();
+        for bar in &mut mutated[70..] {
+            bar.open *= 1.5;
+            bar.high *= 1.5;
+            bar.low *= 1.5;
+            bar.close *= 1.5;
+        }
+        let after = graph_oos(&mutated, &graph, &|| false).unwrap();
+        assert_eq!(first.policy, after.policy);
+        assert_eq!(first.train.hash, after.train.hash);
+        assert_eq!(first.train.summary.pnl_exact, after.train.summary.pnl_exact);
+        assert_eq!(first.train.dataset_hash, after.train.dataset_hash);
+        assert_ne!(first.test.dataset_hash, after.test.dataset_hash);
+        assert_ne!(first.test.hash, after.test.hash);
+        assert_eq!(
+            first.test.summary.assumptions,
+            after.test.summary.assumptions
+        );
+    }
+
+    #[test]
+    fn graph_oos_rejects_invalid_split_and_cancellation_without_partial_publication() {
+        assert_eq!(
+            graph_oos_policy(10, 7).unwrap_err(),
+            "graph_oos.range:INSUFFICIENT_TRAIN_OR_HOLDOUT"
+        );
+        assert_eq!(
+            graph_oos_policy(6, 3).unwrap_err(),
+            "graph_oos.range:INSUFFICIENT_TRAIN_OR_HOLDOUT"
+        );
+        assert_eq!(
+            graph_oos(&bars(), &graph_spec(), &|| true).err().unwrap(),
+            "CANCELLED"
+        );
     }
 
     #[test]

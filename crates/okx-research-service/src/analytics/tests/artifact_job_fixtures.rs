@@ -1969,6 +1969,7 @@ async fn immutable_result_pages_and_restart_catalog() {
         &data,
         ReplayPublication {
             grid: None,
+            graph_oos: None,
             experiment: None,
             graph_signal: None,
             economic_audit: None,

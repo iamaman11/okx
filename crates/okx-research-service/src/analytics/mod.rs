@@ -334,6 +334,7 @@ impl AnalyticsService {
 
 struct ReplayPublication<'a> {
     grid: Option<Value>,
+    graph_oos: Option<Value>,
     experiment: Option<&'a str>,
     graph_signal: Option<&'a okx_research::graph_signal::GraphSignalSpec>,
     economic_audit: Option<Value>,
@@ -349,6 +350,7 @@ fn publish_replay(
 ) -> Result<String, String> {
     let ReplayPublication {
         grid,
+        graph_oos,
         experiment,
         graph_signal,
         economic_audit,
@@ -369,6 +371,9 @@ fn publish_replay(
         curve_pages.push(store.publish_evidence(&chunk).map_err(|e| e.to_string())?.0);
     }
     let mut manifest = json!({"summary":result.summary,"dataset_hash":result.dataset_hash,"hash":result.hash,"code_version":result.code_version,"dataset_artifact":dataset,"experiment_artifact":experiment,"economic_audit":economic_audit,"producer":producer,"grid":grid,"trade_pages":trade_pages,"equity_curve_pages":curve_pages,"total_equity_points":result.equity.len(),"total_trades":result.trades.len()});
+    if let Some(oos) = graph_oos {
+        manifest["graph_oos"] = oos;
+    }
     if let Some(signal) = graph_signal {
         manifest["graph_signal"] = json!(signal);
     }
@@ -649,6 +654,8 @@ fn research_capabilities() -> Value {
         .filter(|contract| contract.graph_backtest_supported)
         .map(|contract| contract.id.as_str())
         .collect::<Vec<_>>();
+    let graph_oos_split = replay::GraphOosSplit::Train70Holdout30;
+    let graph_oos_selection = replay::GraphOosSelection::FixedGraphNoModelFitting;
     json!({
         "schema":"okx.research.capabilities/v1",
         "quality":"fresh",
@@ -661,6 +668,9 @@ fn research_capabilities() -> Value {
             "unavailable_operators":unavailable_operators,
             "max_steps":32,"max_result_steps":14,"signal_unit":"boolean_or_event",
             "missing_policies":["hold","flat"],"historical_observed":false,
+            "oos":{"split":graph_oos_split,"selection":graph_oos_selection,
+                "train_hash_independent_of_holdout":true,"test_ledger":"fresh_on_holdout",
+                "holdout_causal_context":"closed_train_prefix_only"},
             "grid_selection":"not_available_for_graph_backtest","trading_authority":false,
             "example_graph_signal":{
                 "version":"okx.graph-signal/v1",
@@ -702,7 +712,8 @@ fn research_capabilities() -> Value {
             "engine_and_finance_slo_under_load":"not_evaluated"},
         "result_views":["summary","trades","variants","equity","export"],
         "decisions":{"statuses":["accepted","rejected","deferred"],"single_experiment_only":true,"max_revisions":256,"max_annotation_json_bytes":6144,"trading_authority":false},
-        "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true},
+        "oos":{"grid_train_test_split":true,"selected_variant_from_train_only":true,
+            "single_graph_train_holdout":true,"single_graph_optimization":false},
         "economics":{
             "replay_products":["spot","linear_swap"],
             "counterfactual_oracle":{"action":"economics","schema":"okx.research.economics/v1",

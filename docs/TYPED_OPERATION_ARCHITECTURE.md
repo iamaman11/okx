@@ -20,9 +20,13 @@ remains governed by [the Engine contract](ARCHITECTURE_CONTRACT_V1.md).
 
 Market/Research capabilities must describe the **actual executable subset**,
 not the union of visible names. A compiled Market graph is not automatically
-an admissible graph backtest. `historical_observed`, graph-wide Grid selection,
-and OOS evaluation of a single graph must not be advertised until each has
-independent accepted evidence. Existing named Grid OOS is a distinct feature.
+an admissible graph backtest. `historical_observed` and graph-wide Grid selection
+must not be advertised without independent accepted evidence. A **single
+predeclared graph** has a 70/30 train/holdout evaluation through the existing
+Rust replay owner; this is a fixed hypothesis, **not** fitted parameters or
+graph-wide Grid selection. The train dataset/hash never includes holdout bars,
+and the holdout ledger starts afresh using only earlier closed bars as context.
+Existing named Grid selection/OOS remains a distinct feature.
 
 ## Contract model
 

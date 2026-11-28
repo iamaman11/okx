@@ -69,9 +69,11 @@ pub(super) fn verify(
             .as_array()
             .map_or(u64::MAX, |steps| steps.len() as u64)
     });
+    let graph_oos = inputs.get("graph_oos_policy").filter(|v| !v.is_null());
     let work = count
         .checked_mul(candidates)
-        .and_then(|n| n.checked_mul(if is_grid { 4 } else { graph_steps }));
+        .and_then(|n| n.checked_mul(if is_grid { 4 } else { graph_steps }))
+        .and_then(|n| n.checked_mul(if graph_oos.is_some() { 2 } else { 1 }));
     if count > MAX_BARS || candidates > 64 || work.is_none_or(|n| n > MAX_REPLAY_WORK_UNITS) {
         return Ok(unverified("REEXECUTION_BUDGET_EXCEEDED"));
     }
@@ -98,9 +100,56 @@ pub(super) fn verify(
         if inputs["graph_warmup_bars"] != json!(start) {
             return Err(mismatch());
         }
-        let result = replay::replay_graph(&bars, &spec, start, bars.len(), &|| false)
+        if let Some(recorded_policy) = graph_oos {
+            let oos = replay::graph_oos(&bars, &spec, &|| false).map_err(|_| mismatch())?;
+            let split = oos.policy.split_index;
+            let stored = &manifest["graph_oos"];
+            let currency = inputs["economic_basis"]["quote_currency"]
+                .as_str()
+                .ok_or_else(mismatch)?;
+            let train_audit = audit_graph_replay(
+                &bars[..split],
+                &spec.execution,
+                &oos.train,
+                currency,
+                start,
+                split,
+                &|| false,
+            )
             .map_err(|_| mismatch())?;
-        (result, start, spec.execution)
+            if recorded_policy != &json!(oos.policy)
+                || stored["schema"] != "okx.research.graph-oos/v1"
+                || stored["policy"] != json!(oos.policy)
+                || stored["train"]["summary"] != json!(oos.train.summary)
+                || stored["train"]["result_hash"] != oos.train.hash
+                || stored["train"]["dataset_hash"] != oos.train.dataset_hash
+                || stored["train"]["economic_audit"] != json!(train_audit)
+                || stored["holdout"]["summary"] != json!(oos.test.summary)
+                || stored["holdout"]["result_hash"] != oos.test.hash
+                || stored["holdout"]["dataset_hash"] != oos.test.dataset_hash
+                || stored["train_range"]
+                    != json!({
+                        "start_ms":bars[start].time,"end_ms":bars[split].time
+                    })
+                || stored["holdout_range"]
+                    != json!({
+                        "start_ms":bars[split].time,
+                        "end_ms":inputs["requested_range"]["end_ms"]
+                    })
+                || stored["selection"] != "predeclared_graph_no_optimization"
+                || stored["historical_observed"] != false
+            {
+                return Err(mismatch());
+            }
+            (oos.test, split, spec.execution)
+        } else {
+            if manifest["graph_oos"].is_object() {
+                return Err(mismatch());
+            }
+            let result = replay::replay_graph(&bars, &spec, start, bars.len(), &|| false)
+                .map_err(|_| mismatch())?;
+            (result, start, spec.execution)
+        }
     } else {
         let spec: ReplaySpec =
             serde_json::from_value(inputs["spec"].clone()).map_err(|_| mismatch())?;

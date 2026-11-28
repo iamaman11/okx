@@ -38,6 +38,16 @@ fn graph_backtest_capabilities_follow_the_same_typed_catalog_as_market_and_compi
         vec![okx_research_protocol::strategy_contract::SeriesOp::ForwardReturnLabel]
     );
     assert_eq!(capabilities["graph_backtest"]["trading_authority"], false);
+    assert_eq!(
+        capabilities["graph_backtest"]["oos"]["split"],
+        "train_70_holdout_30"
+    );
+    assert_eq!(
+        capabilities["graph_backtest"]["oos"]["selection"],
+        "fixed_graph_no_model_fitting"
+    );
+    assert_eq!(capabilities["oos"]["single_graph_train_holdout"], true);
+    assert_eq!(capabilities["oos"]["single_graph_optimization"], false);
 }
 
 #[test]
