@@ -2642,8 +2642,12 @@ impl SeriesSource {
             // Closed bars are finalised observations, but this metadata does
             // not assert provider publication evidence for any input series.
             publication_time_verified: false,
-            // The actual incremental Research interpreter consumes close only.
-            graph_backtest_supported: matches!(self, Self::Close),
+            // Only finalised candle columns have physical ports in Research.
+            // OI/funding event times do not establish historical publication.
+            graph_backtest_supported: matches!(
+                self,
+                Self::Open | Self::High | Self::Low | Self::Close | Self::Volume
+            ),
         }
     }
 
@@ -2739,7 +2743,16 @@ mod series_source_contract_tests {
             .filter(|source| source.graph_backtest_supported)
             .map(|source| source.id)
             .collect::<Vec<_>>();
-        assert_eq!(eligible, vec![SeriesSource::Close]);
+        assert_eq!(
+            eligible,
+            vec![
+                SeriesSource::Open,
+                SeriesSource::High,
+                SeriesSource::Low,
+                SeriesSource::Close,
+                SeriesSource::Volume,
+            ]
+        );
         for id in [SeriesSource::OpenInterest, SeriesSource::FundingRate] {
             let source = id.contract();
             assert_eq!(

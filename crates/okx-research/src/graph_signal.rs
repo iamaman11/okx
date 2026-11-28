@@ -64,8 +64,8 @@ fn required_score_start(graph: &CheckedComposition, signal_step: &str) -> Result
     let mut first_known = BTreeMap::<&str, usize>::new();
     for checked in graph.steps() {
         let step = &checked.step;
-        // This bounded graph evaluator admits only `close` at preflight.
-        // Unknown external sources will be rejected by CausalGraphStream.
+        // Every admitted input is one finalised candle value. Unavailable
+        // external sources are rejected by CausalGraphStream before I/O.
         let from = first_known.get(step.input.as_str()).copied().unwrap_or(0);
         let other = step
             .other
@@ -116,12 +116,26 @@ pub(crate) fn compiled_graph(
 /// Validate the complete causal graph without reading market data or creating
 /// a research job. Returns the minimum valid score_start index.
 pub fn preflight_graph(spec: &GraphSignalSpec, total_bars: u64) -> Result<usize, String> {
-    let (checked, _) = compiled_graph(spec, total_bars)
-        .map_err(|error| fielded_unavailable_source(spec, error))?;
-    Ok(checked.warmup_bars())
+    Ok(preflight_graph_sources(spec, total_bars)?.0)
 }
 
-/// The streaming owner deliberately exposes only `close`. Convert its
+/// Return the projected physical candle ports alongside graph warmup. The
+/// same checked graph that drives execution determines source admission; no
+/// duplicated Research-only source registry or speculative venue read exists.
+pub fn preflight_graph_sources(
+    spec: &GraphSignalSpec,
+    total_bars: u64,
+) -> Result<(usize, Vec<SeriesSource>), String> {
+    let (checked, _) = compiled_graph(spec, total_bars)
+        .map_err(|error| fielded_unavailable_source(spec, error))?;
+    let sources = okx_analysis::query_plan::SERIES_SOURCES
+        .into_iter()
+        .filter(|source| checked.graph().uses_source(source.as_str()))
+        .collect();
+    Ok((checked.warmup_bars(), sources))
+}
+
+/// The streaming owner deliberately rejects non-candle sources. Convert its
 /// source-name diagnostic into a bounded field-indexed Research preflight
 /// failure, but only for a source from the single Rust contract catalog.
 /// Unknown internal errors remain opaque at the public Edge boundary.
@@ -411,5 +425,28 @@ mod tests {
             graph.graph.steps[2].input = "risk_1".into();
             assert!(preflight_graph(&graph, 100).is_ok(), "{operator:?}");
         }
+    }
+
+    #[test]
+    fn preflight_binds_only_projected_closed_candle_sources() {
+        let mut spec = spec();
+        spec.graph = serde_json::from_value(serde_json::json!({
+            "version": COMPOSITION_VERSION,
+            "steps": [
+                {"id":"wide", "op":"greater_than_series", "input":"high", "other":"low"},
+                {"id":"busy", "op":"greater_than", "input":"volume", "threshold":0.0},
+                {"id":"signal", "op":"and", "input":"wide", "other":"busy"},
+                {"id":"unused", "op":"rolling_mean", "input":"close", "period":5}
+            ],
+            "result_steps": ["signal"]
+        }))
+        .unwrap();
+        spec.signal_step = "signal".into();
+        let (warmup, sources) = preflight_graph_sources(&spec, 100).unwrap();
+        assert_eq!(warmup, 1);
+        assert_eq!(
+            sources,
+            vec![SeriesSource::High, SeriesSource::Low, SeriesSource::Volume]
+        );
     }
 }

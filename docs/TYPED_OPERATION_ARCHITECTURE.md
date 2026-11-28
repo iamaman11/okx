@@ -14,7 +14,7 @@ remains governed by [the Engine contract](ARCHITECTURE_CONTRACT_V1.md).
 | 21 `SeriesOp` variants | `okx-research-protocol/src/strategy_contract.rs` IDs; `okx-strategy-core/src/query_plan.rs` contracts and checked compiler | Finite versioned `CompositionRequest`; all 21 are representable in a Market graph |
 | 20 causal `SeriesOp` variants | `okx-strategy-core/src/stream.rs` | Bounded incremental `CausalGraphStream`; `forward_return_label` is an outcome **only**, never a signal input |
 | Seven typed series source ports | `okx-strategy-core::query_plan::SeriesSource` and `SeriesSourceContract`: `open`, `high`, `low`, `close`, `volume`, `open_interest`, `funding_rate` | One finite versioned source/unit/time/scope/alignment catalog consumed by `CheckedComposition`, `QueryPlan`, Market discovery and Research graph discovery; existence is **not** proof of venue publication time |
-| Graph research backtest | `okx-research/src/graph_signal.rs` and `strategy_registry.rs`, served by `okx-research-service` | Only `close` source and supported causal operations; next-open replay through the existing Research accounting path |
+| Graph research backtest | `okx-research/src/graph_signal.rs` and `strategy_registry.rs`, served by `okx-research-service` | Five closed-candle sources (`open/high/low/close/volume`) and supported causal operations; next-open replay through the existing Research accounting path. OI/funding remain unavailable without publication evidence |
 | 16 analytic `Operator` variants | `okx-strategy-core/src/operators.rs`, `query_plan.rs` | Separately registered Market scalar analytics. **Not** 16 additional arbitrary `SeriesStep` nodes |
 | Statistical/economic/portfolio routines | `okx-analysis`, `okx-research` | Reusable native functions and finite Research actions, not general graph opcodes |
 
@@ -61,7 +61,7 @@ ValueType = (shape, unit, instrument_scope, timeframe_and_range,
   are shared by the compiler and discovery. The Market `input_sources` and
   `source_units` v1 fields remain unchanged and derive from this catalog;
   `source_contracts` exposes its typed detail. The Research graph source list
-  derives the current `close`-only subset from the same contracts. A metadata
+  derives the closed-candle OHLCV subset from the same contracts. A metadata
   flag cannot enable a missing physical input port in the stream evaluator.
   The bound port is **derived**, not a new persisted plan or separate runtime.
   Only ports in the projected dependency closure are bound: an unreachable

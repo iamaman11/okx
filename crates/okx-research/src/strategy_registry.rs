@@ -147,8 +147,8 @@ fn replay_with_hash(
 
 /// Replay one typed causal market-composition hypothesis through the existing
 /// next-open and exact-money engine, with no dynamically loaded code.
-/// Only graphs supported by the incremental close-only evaluator are admitted;
-/// OI/funding and non-incremental operators fail closed at compile time.
+/// Only graphs supported by the incremental closed-candle evaluator are
+/// admitted; OI/funding and non-causal operators fail closed at compile time.
 pub fn replay_graph(
     bars: &[Bar],
     spec: &GraphReplaySpec,
@@ -170,7 +170,11 @@ pub fn replay_graph(
             let values = stream.on_closed_bar(ClosedBar {
                 timestamp_ms: i64::try_from(bar.time)
                     .map_err(|_| "graph_signal:TIMESTAMP_OVERFLOW")?,
+                open: Some(bar.open),
+                high: Some(bar.high),
+                low: Some(bar.low),
                 close: Some(bar.close),
+                volume: Some(bar.volume),
             })?;
             checked.target(&values)
         },
@@ -1009,6 +1013,41 @@ mod tests {
     }
 
     #[test]
+    fn graph_oos_ohlcv_signal_reuses_native_replay_and_keeps_holdout_out_of_train() {
+        let mut series = bars();
+        for (index, bar) in series.iter_mut().enumerate() {
+            bar.volume = 10.0 + ((index * 7) % 13) as f64;
+        }
+        let mut graph = graph_spec();
+        graph.graph.graph = serde_json::from_value(serde_json::json!({
+            "version": COMPOSITION_VERSION,
+            "steps": [
+                {"id":"green", "op":"greater_than_series", "input":"close", "other":"open"},
+                {"id":"valid_range", "op":"greater_than_series", "input":"high", "other":"low"},
+                {"id":"mean_volume", "op":"rolling_mean", "input":"volume", "period":3},
+                {"id":"volume_signal", "op":"greater_than_series", "input":"volume", "other":"mean_volume"},
+                {"id":"price_signal", "op":"and", "input":"green", "other":"valid_range"},
+                {"id":"signal", "op":"and", "input":"price_signal", "other":"volume_signal"}
+            ],
+            "result_steps": ["signal"]
+        }))
+        .unwrap();
+        graph.graph.signal_step = "signal".into();
+        let first = graph_oos(&series, &graph, &|| false).unwrap();
+        assert!(first.train.summary.trades > 0);
+        assert!(first.test.summary.trades > 0);
+        let mut future = series.clone();
+        for (index, bar) in future.iter_mut().enumerate().skip(70) {
+            bar.volume = 100.0 + index as f64;
+            bar.high += 3.0;
+        }
+        let second = graph_oos(&future, &graph, &|| false).unwrap();
+        assert_eq!(first.train.hash, second.train.hash);
+        assert_eq!(first.train.dataset_hash, second.train.dataset_hash);
+        assert_ne!(first.test.dataset_hash, second.test.dataset_hash);
+    }
+
+    #[test]
     fn graph_oos_rejects_invalid_split_and_cancellation_without_partial_publication() {
         assert_eq!(
             graph_oos_policy(10, 7).unwrap_err(),
@@ -1051,10 +1090,10 @@ mod tests {
     fn graph_replay_rejects_unavailable_sources_and_future_labels() {
         let series = bars();
         let mut graph = graph_spec();
-        graph.graph.graph.steps[0].input = "volume".into();
+        graph.graph.graph.steps[0].input = "open_interest".into();
         assert_eq!(
             replay_graph(&series, &graph, 3, series.len(), &|| false).unwrap_err(),
-            "composition.stream:SOURCE_NOT_SUPPORTED:volume"
+            "composition.stream:SOURCE_NOT_SUPPORTED:open_interest"
         );
         graph.graph.graph.steps[0].input = "close".into();
         graph.graph.graph.steps[0].op = okx_analysis::query_plan::SeriesOp::RollingStddev;

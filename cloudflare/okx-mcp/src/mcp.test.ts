@@ -439,15 +439,15 @@ const catalogCall=async(padding:number):Promise<any>=>{
  })}),env,ctx)).json();
  return reply.result.structuredContent;
 };
-const catalog=await catalogCall(13_000);
+const catalog=await catalogCall(25_500);
 if(catalog.status!=='completed'||catalog.data.schema!=='okx.market.capabilities/v1'||
  catalog.data.operators[0].unit!=='ratio'||catalog.data.composition.operations[0].op!=='rolling_range'||
- catalog.data.details.length!==13_000)throw Error('typed market capability descriptor lost at the public 12 KiB boundary');
-const oversizedCatalog=await catalogCall(21_000);
+ catalog.data.details.length!==25_500)throw Error('typed market capability descriptor lost at the public catalogue boundary');
+const oversizedCatalog=await catalogCall(34_000);
 if(oversizedCatalog.status!=='failed'||oversizedCatalog.reason_code!=='RESPONSE_TOO_LARGE'||
- oversizedCatalog.data.response_budget_bytes!==20_480||oversizedCatalog.data.response_bytes<=20_480)
- throw Error('catalogue exception must still terminate above its own finite 20 KiB bound');
-console.log('market_capabilities_20k_only_preserves_descriptors_and_finite_bound PASS');
+ oversizedCatalog.data.response_budget_bytes!==32_768||oversizedCatalog.data.response_bytes<=32_768)
+ throw Error('catalogue exception must still terminate above its own finite 32 KiB bound');
+console.log('market_capabilities_32k_preserves_descriptors_and_finite_bound PASS');
 
 const nativeResponse=(response:unknown):any=>({RUNTIME:{idFromName:()=>0,get:()=>({fetch:async(_url:string,init:RequestInit)=>{
  if(!init?.body)return Response.json(response);

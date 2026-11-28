@@ -1,4 +1,4 @@
-//! A bounded, incremental interpreter for a compiled, close-only causal graph.
+//! A bounded, incremental interpreter for a compiled, closed-candle causal graph.
 //!
 //! This module is pure: event-time admission, persistence, cancellation and
 //! trading authority remain with the caller. Restoring means replaying closed
@@ -11,22 +11,41 @@ use std::collections::{BTreeMap, VecDeque};
 
 /// One finalised observation. The timestamp identifies the closed candle,
 /// never the time at which a late external source happened to arrive.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct ClosedBar {
     pub timestamp_ms: i64,
+    pub open: Option<f64>,
+    pub high: Option<f64>,
+    pub low: Option<f64>,
     pub close: Option<f64>,
+    pub volume: Option<f64>,
+}
+
+impl ClosedBar {
+    fn source(self, source: SeriesSource) -> Option<f64> {
+        let value = match source {
+            SeriesSource::Open => self.open,
+            SeriesSource::High => self.high,
+            SeriesSource::Low => self.low,
+            SeriesSource::Close => self.close,
+            SeriesSource::Volume => self.volume,
+            // Sparse exchange events have no closed-candle input port.
+            SeriesSource::OpenInterest | SeriesSource::FundingRate => None,
+        };
+        value.filter(|value| value.is_finite())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Input {
-    Close,
+    Source(SeriesSource),
     Step(usize),
 }
 
 impl Input {
-    fn value(self, close: Option<f64>, columns: &[Option<f64>]) -> Option<f64> {
+    fn value(self, bar: ClosedBar, columns: &[Option<f64>]) -> Option<f64> {
         match self {
-            Self::Close => close,
+            Self::Source(source) => bar.source(source),
             Self::Step(index) => columns[index],
         }
     }
@@ -53,13 +72,14 @@ struct CompiledNode {
 
 /// A deterministic, finite state machine: O(steps) work per bar amortized,
 /// O(sum of declared window lengths) state, and no retained price history.
-/// Unsupported operators and non-close sources fail at construction.
+/// Unsupported operators and non-candle sources fail at construction.
 #[derive(Debug)]
 pub struct CausalGraphStream {
     plan: CheckedComposition,
     nodes: Vec<CompiledNode>,
     projection: Vec<usize>,
     capacity: u64,
+    requires_volume: bool,
     seen: u64,
     last_timestamp_ms: Option<i64>,
     /// A deterministic operation counter for complexity regression tests.
@@ -132,6 +152,7 @@ impl CausalGraphStream {
             nodes,
             projection,
             capacity: plan.estimated_cells() / plan.steps().len() as u64,
+            requires_volume: plan.uses_source("volume"),
             seen: 0,
             last_timestamp_ms: None,
             operations: 0,
@@ -151,14 +172,20 @@ impl CausalGraphStream {
         {
             return Err("composition.stream:CLOSED_BAR_NOT_MONOTONIC".into());
         }
-        let close = bar.close.filter(|value| value.is_finite());
+        // Market's native-volume input is non-negative, but an absent/NaN
+        // observation remains missing rather than being silently zero-filled.
+        if self.requires_volume
+            && bar
+                .volume
+                .is_some_and(|v| !v.is_nan() && (!v.is_finite() || v < 0.0))
+        {
+            return Err("composition.stream:INVALID_NON_NEGATIVE_VOLUME".into());
+        }
         let mut columns = vec![None; self.nodes.len()];
         for (index, node) in self.nodes.iter_mut().enumerate() {
             let step = &self.plan.steps()[index].step;
-            let input = node.input.value(close, &columns);
-            let other = node
-                .other
-                .and_then(|binding| binding.value(close, &columns));
+            let input = node.input.value(bar, &columns);
+            let other = node.other.and_then(|binding| binding.value(bar, &columns));
             columns[index] = match &mut node.memory {
                 Memory::Mean(window) => window.push(input),
                 Memory::Dispersion(window) => window.push(input),
@@ -231,12 +258,13 @@ impl CausalGraphStream {
 
 fn resolve_input(bindings: &BTreeMap<&str, usize>, name: &str) -> Result<Input, String> {
     if let Some(source) = SeriesSource::parse(name) {
-        // Only Close has a physical input port in this incremental evaluator.
-        // Adding a catalog entry never silently enables an unimplemented port.
-        return match source {
-            SeriesSource::Close => Ok(Input::Close),
-            _ => Err(format!("composition.stream:SOURCE_NOT_SUPPORTED:{name}")),
-        };
+        // Physical closed-candle ports follow the canonical typed contract.
+        // The presence of OI/funding in the catalog cannot enable them here.
+        return source
+            .contract()
+            .graph_backtest_supported
+            .then_some(Input::Source(source))
+            .ok_or_else(|| format!("composition.stream:SOURCE_NOT_SUPPORTED:{name}"));
     }
     bindings
         .get(name)
@@ -474,6 +502,7 @@ mod tests {
             let bar = ClosedBar {
                 timestamp_ms: 1000 + index as i64 * 60_000,
                 close: Some(price),
+                ..ClosedBar::default()
             };
             let result = runtime.on_closed_bar(bar).unwrap();
             assert_eq!(
@@ -498,6 +527,7 @@ mod tests {
                 .on_closed_bar(ClosedBar {
                     timestamp_ms: index as i64,
                     close: Some(price),
+                    ..ClosedBar::default()
                 })
                 .unwrap();
             if index < 130 {
@@ -517,6 +547,7 @@ mod tests {
                     .on_closed_bar(ClosedBar {
                         timestamp_ms: index as i64,
                         close: Some(100.0 + (index % 11) as f64),
+                        ..ClosedBar::default()
                     })
                     .unwrap();
                 for node in &runner.nodes {
@@ -574,6 +605,7 @@ mod tests {
             let bar = ClosedBar {
                 timestamp_ms: index as i64 * 60_000,
                 close: Some(close),
+                ..ClosedBar::default()
             };
             let observed = stream.on_closed_bar(bar).unwrap();
             if index < 50
@@ -602,6 +634,7 @@ mod tests {
         let first = ClosedBar {
             timestamp_ms: 10,
             close: None,
+            ..ClosedBar::default()
         };
         runner.on_closed_bar(first).unwrap();
         let duplicate = runner.on_closed_bar(first).unwrap_err();
@@ -611,18 +644,110 @@ mod tests {
             .on_closed_bar(ClosedBar {
                 timestamp_ms: 11,
                 close: Some(20.0),
+                ..ClosedBar::default()
             })
             .unwrap();
         assert_eq!(
             runner
                 .on_closed_bar(ClosedBar {
                     timestamp_ms: 12,
-                    close: Some(30.0)
+                    close: Some(30.0),
+                    ..ClosedBar::default()
                 })
                 .unwrap_err(),
             "composition.stream:COMPILED_CAPACITY_EXCEEDED"
         );
         assert_eq!(runner.processed_bars(), 2);
+    }
+
+    #[test]
+    fn closed_ohlcv_graph_matches_batch_oracle_and_rejects_invalid_volume_atomically() {
+        use crate::query_plan::CandlePriceInputs;
+
+        let request: CompositionRequest = serde_json::from_value(json!({
+            "version": COMPOSITION_VERSION,
+            "steps": [
+                {"id":"green", "op":"greater_than_series", "input":"close", "other":"open"},
+                {"id":"mean_high", "op":"rolling_mean", "input":"high", "period":3},
+                {"id":"high_breakout", "op":"greater_than_series", "input":"high", "other":"mean_high"},
+                {"id":"mean_low", "op":"rolling_mean", "input":"low", "period":3},
+                {"id":"low_breakout", "op":"less_than_series", "input":"low", "other":"mean_low"},
+                {"id":"mean_volume", "op":"rolling_mean", "input":"volume", "period":3},
+                {"id":"active", "op":"greater_than_series", "input":"volume", "other":"mean_volume"},
+                {"id":"range_signal", "op":"or", "input":"high_breakout", "other":"low_breakout"},
+                {"id":"price_signal", "op":"and", "input":"green", "other":"range_signal"},
+                {"id":"signal", "op":"and", "input":"price_signal", "other":"active"}
+            ],
+            "result_steps": ["high_breakout", "active", "signal"]
+        }))
+        .unwrap();
+        let plan = CheckedComposition::compile(request, 128).unwrap();
+        let mut runner = CausalGraphStream::new(&plan).unwrap();
+        let mut history = Vec::new();
+        let (mut opens, mut highs, mut lows, mut closes, mut volumes) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for index in 0..80 {
+            let open = 100.0 + (index % 7) as f64;
+            let close = open + if index % 2 == 0 { 1.5 } else { -0.7 };
+            let high = open.max(close) + 0.8;
+            let low = open.min(close) - 0.9;
+            let volume = if index % 13 == 0 {
+                f64::NAN
+            } else {
+                10.0 + (index % 9) as f64 * 2.0
+            };
+            opens.push(open);
+            highs.push(high);
+            lows.push(low);
+            closes.push(close);
+            volumes.push(volume);
+            let bar = ClosedBar {
+                timestamp_ms: index as i64 * 60_000,
+                open: Some(open),
+                high: Some(high),
+                low: Some(low),
+                close: Some(close),
+                volume: Some(volume),
+            };
+            let actual = runner.on_closed_bar(bar).unwrap();
+            let (expected, _) = plan
+                .evaluate_at_with_candle_sources_diagnostics(
+                    &closes,
+                    CandlePriceInputs {
+                        open: Some(&opens),
+                        high: Some(&highs),
+                        low: Some(&lows),
+                        volume: Some(&volumes),
+                    },
+                    None,
+                    None,
+                    index,
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "OHLCV bar {index}");
+            history.push(bar);
+        }
+        let restored = CausalGraphStream::restore_from_history(&plan, history).unwrap();
+        assert_eq!(restored.processed_bars(), runner.processed_bars());
+        assert_eq!(restored.operation_count(), runner.operation_count());
+
+        let invalid = ClosedBar {
+            timestamp_ms: 80 * 60_000,
+            volume: Some(-1.0),
+            ..ClosedBar::default()
+        };
+        assert_eq!(
+            runner.on_closed_bar(invalid).unwrap_err(),
+            "composition.stream:INVALID_NON_NEGATIVE_VOLUME"
+        );
+        assert_eq!(runner.processed_bars(), 80);
+        runner
+            .on_closed_bar(ClosedBar {
+                volume: Some(10.0),
+                ..invalid
+            })
+            .unwrap();
+        assert_eq!(runner.processed_bars(), 81);
     }
 
     #[test]
