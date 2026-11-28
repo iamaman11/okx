@@ -18,11 +18,13 @@ enum ExportIntegrityQuality {
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
 enum ExportEvidenceScope {
-    ResultPagesSourcesAndReplaySemantics,
-    ResultPagesAndReplaySources,
-    ResultPagesOrPartialSources,
+    #[serde(rename = "result_pages_sources_and_replay_semantics")]
+    SourcesAndReplaySemantics,
+    #[serde(rename = "result_pages_and_replay_sources")]
+    ReplaySources,
+    #[serde(rename = "result_pages_or_partial_sources")]
+    PartialSources,
 }
 
 /// Link the replay's immutable summary to its verified pages, and bind graph
@@ -60,52 +62,6 @@ fn verify_replay_manifest_links(
         return Err("EXPORT_REPLAY_COUNT_MISMATCH".into());
     }
     Ok(true)
-}
-
-#[cfg(test)]
-mod replay_link_tests {
-    use super::*;
-
-    #[test]
-    fn structural_graph_links_and_replay_counts_are_checked_without_reexecution() {
-        let inputs = json!({
-            "graph_spec":{"graph":{"version":"graph-test/v1"}},
-            "graph_oos_policy":{"version":"oos-test/v1","split_index":7}
-        });
-        let manifest = json!({
-            "trade_pages":[],"total_trades":3,"summary":{"trades":3},
-            "graph_signal":{"version":"graph-test/v1"},
-            "graph_oos":{"policy":{"version":"oos-test/v1","split_index":7}}
-        });
-        assert_eq!(
-            verify_replay_manifest_links(Some(&inputs), &manifest, true),
-            Ok(true)
-        );
-        let mut forged_graph = manifest.clone();
-        forged_graph["graph_signal"]["version"] = json!("other");
-        assert_eq!(
-            verify_replay_manifest_links(Some(&inputs), &forged_graph, true).unwrap_err(),
-            "EXPORT_REPLAY_REFERENCE_MISMATCH"
-        );
-        let mut forged_policy = manifest.clone();
-        forged_policy["graph_oos"]["policy"]["split_index"] = json!(8);
-        assert_eq!(
-            verify_replay_manifest_links(Some(&inputs), &forged_policy, true).unwrap_err(),
-            "EXPORT_REPLAY_REFERENCE_MISMATCH"
-        );
-        let mut forged_count = manifest.clone();
-        forged_count["summary"]["trades"] = json!(4);
-        assert_eq!(
-            verify_replay_manifest_links(Some(&inputs), &forged_count, true).unwrap_err(),
-            "EXPORT_REPLAY_COUNT_MISMATCH"
-        );
-        let mut legacy = manifest.clone();
-        legacy.as_object_mut().unwrap().remove("summary");
-        assert_eq!(
-            verify_replay_manifest_links(Some(&inputs), &legacy, true),
-            Ok(false)
-        );
-    }
 }
 
 pub(super) fn read_verified_result<T: DeserializeOwned>(
@@ -275,11 +231,11 @@ pub(super) fn verify_export_manifest(
         ExportIntegrityQuality::Partial
     };
     let scope = if complete {
-        ExportEvidenceScope::ResultPagesSourcesAndReplaySemantics
+        ExportEvidenceScope::SourcesAndReplaySemantics
     } else if sources_verified {
-        ExportEvidenceScope::ResultPagesAndReplaySources
+        ExportEvidenceScope::ReplaySources
     } else {
-        ExportEvidenceScope::ResultPagesOrPartialSources
+        ExportEvidenceScope::PartialSources
     };
     Ok(json!({
         "quality":quality,
@@ -862,5 +818,51 @@ impl AnalyticsService {
             "job_id":job_id,"artifact":artifact,"summary":value.get("summary").or_else(||value.pointer("/test/summary")),
             "rows":page,"returned_rows":page.len(),"total_rows":total,"next_cursor":next
         }))
+    }
+}
+
+#[cfg(test)]
+mod replay_link_tests {
+    use super::*;
+
+    #[test]
+    fn structural_graph_links_and_replay_counts_are_checked_without_reexecution() {
+        let inputs = json!({
+            "graph_spec":{"graph":{"version":"graph-test/v1"}},
+            "graph_oos_policy":{"version":"oos-test/v1","split_index":7}
+        });
+        let manifest = json!({
+            "trade_pages":[],"total_trades":3,"summary":{"trades":3},
+            "graph_signal":{"version":"graph-test/v1"},
+            "graph_oos":{"policy":{"version":"oos-test/v1","split_index":7}}
+        });
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &manifest, true),
+            Ok(true)
+        );
+        let mut forged_graph = manifest.clone();
+        forged_graph["graph_signal"]["version"] = json!("other");
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &forged_graph, true).unwrap_err(),
+            "EXPORT_REPLAY_REFERENCE_MISMATCH"
+        );
+        let mut forged_policy = manifest.clone();
+        forged_policy["graph_oos"]["policy"]["split_index"] = json!(8);
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &forged_policy, true).unwrap_err(),
+            "EXPORT_REPLAY_REFERENCE_MISMATCH"
+        );
+        let mut forged_count = manifest.clone();
+        forged_count["summary"]["trades"] = json!(4);
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &forged_count, true).unwrap_err(),
+            "EXPORT_REPLAY_COUNT_MISMATCH"
+        );
+        let mut legacy = manifest.clone();
+        legacy.as_object_mut().unwrap().remove("summary");
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &legacy, true),
+            Ok(false)
+        );
     }
 }
