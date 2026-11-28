@@ -324,7 +324,8 @@ impl AnalyticsService {
                                 "economic_audit":audit,
                                 "dataset_hash":result["dataset_hash"],"grid":result["grid"],
                                 "trades_cursor":format!("instrument:{index}:0")})
-                        },Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed","reason_code":error})};
+                        },Err(error)=>json!({"index":index,"instrument":instrument,"state":"failed",
+                            "reason_code":jobs::job_diagnostics::safe_reason(&error)})};
                         rows.push(row);rows.sort_by_key(|r|r["index"].as_u64().unwrap_or(0));
                         let economics=independent_replay_currency_totals(&rows)?;
                         let page=store.publish_evidence(&rows).map_err(|e|e.to_string())?.0;
@@ -340,6 +341,21 @@ impl AnalyticsService {
                         this.jobs
                             .update_async(hash.clone(), jobs::State::Running, Some(manifest), None)
                             .await?;
+                    }
+                    // Exhausted source failures have a diagnostic artifact,
+                    // not a successful research result. Preserve its last
+                    // immutable root in the FAILED job for bounded summary
+                    // and export, while never reporting completed/100%.
+                    if artifacts.is_empty() {
+                        let retryable = rows.iter().all(|row| {
+                            row["reason_code"] == "MARKET_SOURCE_RETRYABLE"
+                        });
+                        return Err(if retryable {
+                            "RESEARCH_BATCH_SOURCE_RETRYABLE"
+                        } else {
+                            "RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED"
+                        }
+                        .into());
                     }
                     this.jobs
                         .get_async(hash.clone())

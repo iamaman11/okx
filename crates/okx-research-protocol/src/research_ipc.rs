@@ -884,5 +884,6 @@ mod research_catalog_boundary_tests {
 }
 /// Preserve the existing public source backpressure classification across IPC.
 pub fn is_retryable_source_defer(error: &str) -> bool {
-    error.contains("OKX rate/backpressure defer:")
+    error == "RESEARCH_BATCH_SOURCE_RETRYABLE"
+        || error.contains("OKX rate/backpressure defer:")
 }

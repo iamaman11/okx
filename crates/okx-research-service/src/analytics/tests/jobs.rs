@@ -755,6 +755,36 @@ fn transient_rate_defer_is_requeued_instead_of_cached_as_failed() {
     );
 }
 #[test]
+fn all_source_deferred_batch_can_retry_the_same_request_without_reusing_failed_artifact() {
+    let jobs = Jobs::open(path("retry-exhausted-batch")).unwrap();
+    jobs.enqueue("retry-batch-key".into(), "retry-batch-id".into())
+        .unwrap();
+    jobs.update(
+        "retry-batch-id",
+        State::Failed,
+        Some(format!("sha256:{}", "b".repeat(64))),
+        Some("RESEARCH_BATCH_SOURCE_RETRYABLE".into()),
+    )
+    .unwrap();
+    let failed = jobs.get("retry-batch-id").unwrap();
+    assert_eq!(failed.state, State::Failed);
+    assert!(failed.artifact.is_some());
+    assert_eq!(
+        jobs.diagnostic_readback("retry-batch-id")["reason_code"],
+        "RESEARCH_BATCH_SOURCE_RETRYABLE"
+    );
+    assert!(jobs.diagnostic_readback("retry-batch-id")["result_ref"].is_null());
+
+    let (requeued, new, _) = jobs
+        .enqueue("retry-batch-key".into(), "retry-batch-id".into())
+        .unwrap();
+    assert!(new);
+    assert_eq!(requeued.state, State::Queued);
+    assert_eq!(requeued.progress, 0);
+    assert!(requeued.artifact.is_none());
+    assert!(requeued.error.is_none());
+}
+#[test]
 fn new_catalog_starts_without_old_json() {
     let p = path("strict");
     let obsolete = p.with_extension("json");
