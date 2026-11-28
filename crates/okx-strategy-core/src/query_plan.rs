@@ -485,8 +485,8 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
     use SeriesUnitRule as U;
     let input_unit = match op {
         ReturnsSeries => U::PriceOrContractsOrNativeVolume,
-        RollingMean | RollingRange | RollingZscore | RollingStddev
-        | EmaSeries | ScaleSeries | GreaterThanSeries | LessThanSeries => {
+        RollingMean | RollingRange | RollingZscore | RollingStddev | EmaSeries | ScaleSeries
+        | GreaterThanSeries | LessThanSeries => {
             U::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient
         }
         RollingMax | RollingMin => U::NumericOrBoolean,
@@ -516,8 +516,7 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         ForwardReturnLabel => U::OutcomeRatio,
     };
     let period = match op {
-        RollingMean | RollingMax | RollingMin | EmaSeries | Lag | Cooldown
-        | ForwardReturnLabel => {
+        RollingMean | RollingMax | RollingMin | EmaSeries | Lag | Cooldown | ForwardReturnLabel => {
             Some((1, 1000))
         }
         RollingRange | RollingStddev | RollingZscore => Some((2, 1000)),
@@ -1796,7 +1795,8 @@ impl CheckedComposition {
                     .collect(),
                 SeriesOp::IfElse => {
                     let other = &values[checked.step.other.as_ref().expect("validated false arm")];
-                    let condition = &values[checked.step.when.as_ref().expect("validated condition")];
+                    let condition =
+                        &values[checked.step.when.as_ref().expect("validated condition")];
                     input
                         .iter()
                         .zip(other)
@@ -1810,7 +1810,11 @@ impl CheckedComposition {
                     let mut gate = CooldownGate::new(
                         checked.step.period.expect("validated cooldown period") as usize,
                     );
-                    input.iter().copied().map(|event| gate.push(event)).collect()
+                    input
+                        .iter()
+                        .copied()
+                        .map(|event| gate.push(event))
+                        .collect()
                 }
                 SeriesOp::ReturnsSeries => {
                     let mut result = vec![None; input.len()];

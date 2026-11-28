@@ -578,8 +578,14 @@ mod tests {
 
     #[test]
     fn strict_boolean_negation_and_conditional_do_not_impute_unknown() {
-        assert_eq!(scalar_value(SeriesOp::Not, Some(0.0), None, None, None), Some(1.0));
-        assert_eq!(scalar_value(SeriesOp::Not, Some(1.0), None, None, None), Some(0.0));
+        assert_eq!(
+            scalar_value(SeriesOp::Not, Some(0.0), None, None, None),
+            Some(1.0)
+        );
+        assert_eq!(
+            scalar_value(SeriesOp::Not, Some(1.0), None, None, None),
+            Some(0.0)
+        );
         assert_eq!(scalar_value(SeriesOp::Not, None, None, None, None), None);
         assert_eq!(if_else_value(Some(1.0), Some(42.0), None), Some(42.0));
         assert_eq!(if_else_value(Some(0.0), None, Some(-42.0)), Some(-42.0));

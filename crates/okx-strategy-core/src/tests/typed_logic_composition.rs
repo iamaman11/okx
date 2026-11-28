@@ -217,8 +217,12 @@ fn reversal_volume_regime_graph_is_composable_causal_and_streaming() {
         &["selected", "trigger", "signal"],
         10,
     );
-    let closes = [100.0, 96.0, 92.0, 94.0, 97.0, 100.0, 99.0, 101.0, 103.0, 102.0];
-    let volume = [100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0];
+    let closes = [
+        100.0, 96.0, 92.0, 94.0, 97.0, 100.0, 99.0, 101.0, 103.0, 102.0,
+    ];
+    let volume = [
+        100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0,
+    ];
     let mut streaming = CausalGraphStream::new(&plan).unwrap();
     for index in 0..closes.len() {
         let historical = with_volume(&plan, &closes, &volume, index);
@@ -237,8 +241,14 @@ fn reversal_volume_regime_graph_is_composable_causal_and_streaming() {
         assert_eq!(historical["selected"].1, Unit::Boolean);
         assert_eq!(historical["signal"].1, Unit::Event);
     }
-    assert_eq!(with_volume(&plan, &closes, &volume, 4)["signal"].0, Some(1.0));
-    assert_eq!(with_volume(&plan, &closes, &volume, 8)["signal"].0, Some(0.0));
+    assert_eq!(
+        with_volume(&plan, &closes, &volume, 4)["signal"].0,
+        Some(1.0)
+    );
+    assert_eq!(
+        with_volume(&plan, &closes, &volume, 8)["signal"].0,
+        Some(0.0)
+    );
     // Future poison on both sources is not allowed to alter past decisions.
     let mut future_prices = closes;
     let mut future_volume = volume;
@@ -332,7 +342,10 @@ fn not_if_else_cooldown_microbenchmark_reports_median_ns_per_bar() {
                 checksum += black_box(values["signal"].0.unwrap_or(0.0));
             }
             *sample = started.elapsed().as_nanos() / bars as u128;
-            assert_eq!(runner.operation_count(), bars as u64 * plan.steps().len() as u64);
+            assert_eq!(
+                runner.operation_count(),
+                bars as u64 * plan.steps().len() as u64
+            );
             assert!(black_box(checksum).is_finite());
         }
         samples.sort_unstable();
