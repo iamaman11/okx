@@ -274,6 +274,9 @@ function validate(yaml, fileNames) {
   assert.match(classify, /component_scope: \$\{\{ steps.classify.outputs.component_scope \|\| steps.proven_scope.outputs.scope \}\}/);
   assert.match(classify, /python3 -B scripts\/check_ci_native_scope\.py --github-plan/);
   assert.match(classify, /plan_args\+=\(--allow-dependency-candidate\)/);
+  assert.match(classify,
+    /elif \[\[ "\$FORCED_PUSH" != true \]\]; then\s+base="\$BEFORE_SHA"[\s\S]*?if \[\[ "\$\{\{ github\.ref \}\}" == 'refs\/heads\/main' \]\]; then\s+plan_args\+=\(--allow-dependency-candidate\)/,
+    'MAIN_PUSH_RESEARCH_CANDIDATE_MUST_BE_COMPUTED_BEFORE_PROOF');
   assert.match(classify, /if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'/);
   assert.match(classify, /git fetch --no-tags --depth=1 origin "\$BASE_SHA"/);
   assert.match(classify, /git worktree add --detach "\$base" "\$BASE_SHA"/);
@@ -1316,6 +1319,9 @@ for (const [old, replacement, reason] of [
     'SINGLE_CI_CANNOT_IGNORE_' + reason);
 }
 assert.throws(() => validate(source.replace('name: select-checks', 'name: impact-only'), workflows));
+assert.throws(() => validate(source.replace("if [[ \"${{ github.ref }}\" == 'refs/heads/main' ]]; then",
+  "if [[ \"${{ github.ref }}\" == 'refs/heads/other' ]]; then"), workflows),
+  'MAIN_PUSH_CANDIDATE_GUARD_CANNOT_BE_REMOVED');
 assert.throws(() => validate(source.replace('component_scope: ${{ steps.classify.outputs.component_scope || steps.proven_scope.outputs.scope }}',
   'component_scope: ${{ steps.file_scope.outputs.scope }}'), workflows));
 assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.outputs.scope }}\' ]]; then',

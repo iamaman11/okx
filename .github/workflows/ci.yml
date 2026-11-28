@@ -158,6 +158,12 @@ jobs:
             fi
           elif [[ "$FORCED_PUSH" != true ]]; then
             base="$BEFORE_SHA"
+            # On main this is only a tentative owner candidate. The scope
+            # remains full unless the exact merged PR Ready/artifact proof
+            # below independently authorizes Research-only publication.
+            if [[ "${{ github.ref }}" == 'refs/heads/main' ]]; then
+              plan_args+=(--allow-dependency-candidate)
+            fi
           else
             base=''
           fi
