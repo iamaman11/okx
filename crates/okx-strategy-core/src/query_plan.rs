@@ -1,5 +1,6 @@
 //! Typed K7 analysis plan, independent of storage, transport and venue.
 use crate::operators::{Operator, registry};
+pub use crate::operation_contract::{OperationEffect, OperationShape, TimeBasis};
 use crate::stream::{MonotoneWindow, RollingMean, scalar_value};
 use crate::time_series::ClosedRange;
 pub use okx_research_protocol::strategy_contract::{
@@ -347,6 +348,82 @@ impl SeriesUnitRule {
     }
 }
 
+/// Finite, serializable contract semantics. `serde` preserves the v1 catalog
+/// strings while Rust callers can no longer silently invent new policies.
+/// Changing any variant's meaning requires a new operation contract version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmupPolicy {
+    None,
+    PeriodClosedBars,
+    OnePriorClosedBar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NullPolicy {
+    PropagateMissingOrNonpositivePrice,
+    StrictCompleteWindowNoForwardFill,
+    StrictCompleteWindowNoSyntheticZero,
+    StrictExactPairs,
+    StrictWindowOrZeroVariance,
+    StrictWindowZeroForConstant,
+    PropagateMissingOrZeroDenominator,
+    PropagateUnknown,
+    UnconfirmedWithoutFutureBars,
+    PropagateMissing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeCostModel {
+    LinearInSeriesLength,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRequirement {
+    DeclaredExactEventTimeNoForwardFill,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterRequirement {
+    FiniteThreshold,
+    PriorEventStepInWhen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VariancePolicy {
+    PopulationInclusiveWindow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NumericPolicy {
+    FiniteOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventTrigger {
+    FalseToTrue,
+    TrueToFalse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum OperationOwner {
+    #[serde(rename = "okx-strategy-core::query_plan")]
+    StrategyCoreQueryPlan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationPolicy {
+    CheckedCompositionUnitAndReplayTests,
+}
+
 /// One complete, immutable contract for every elemental series operation.
 /// The pure compiler owns version, type/units and cost; Market and Research
 /// serialize these descriptors directly instead of copying JSON catalogs.
@@ -358,32 +435,32 @@ pub struct SeriesOperationContract {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub other_unit: Option<SeriesUnitRule>,
     pub output_unit: SeriesUnitRule,
-    pub output_shape: &'static str,
+    pub output_shape: OperationShape,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub period_min: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub period_max: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub requires: Option<&'static str>,
-    pub warmup: &'static str,
-    pub null_policy: &'static str,
-    pub compute_cost: &'static str,
+    pub requires: Option<ParameterRequirement>,
+    pub warmup: WarmupPolicy,
+    pub null_policy: NullPolicy,
+    pub compute_cost: ComputeCostModel,
     pub cost_per_bar: u64,
     pub causal: bool,
     pub graph_backtest_supported: bool,
-    pub time_basis: &'static str,
-    pub source_requirement: &'static str,
-    pub effects: &'static str,
-    pub owner: &'static str,
-    pub verification: &'static str,
+    pub time_basis: TimeBasis,
+    pub source_requirement: SourceRequirement,
+    pub effects: OperationEffect,
+    pub owner: OperationOwner,
+    pub verification: VerificationPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub variance: Option<&'static str>,
+    pub variance: Option<VariancePolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum_pairs: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub numeric_policy: Option<&'static str>,
+    pub numeric_policy: Option<NumericPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<&'static str>,
+    pub trigger: Option<EventTrigger>,
 }
 
 pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
@@ -424,17 +501,17 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         _ => None,
     };
     let null_policy = match op {
-        ReturnsSeries => "propagate_missing_or_nonpositive_price",
-        RollingMean | RollingMax | RollingMin => "strict_complete_window_no_forward_fill",
-        RollingRange => "strict_complete_window_no_synthetic_zero",
-        RollingPearson => "strict_exact_pairs",
-        RollingZscore => "strict_window_or_zero_variance",
-        RollingStddev => "strict_window_zero_for_constant",
-        DivideSeries => "propagate_missing_or_zero_denominator",
+        ReturnsSeries => NullPolicy::PropagateMissingOrNonpositivePrice,
+        RollingMean | RollingMax | RollingMin => NullPolicy::StrictCompleteWindowNoForwardFill,
+        RollingRange => NullPolicy::StrictCompleteWindowNoSyntheticZero,
+        RollingPearson => NullPolicy::StrictExactPairs,
+        RollingZscore => NullPolicy::StrictWindowOrZeroVariance,
+        RollingStddev => NullPolicy::StrictWindowZeroForConstant,
+        DivideSeries => NullPolicy::PropagateMissingOrZeroDenominator,
         And | Or | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries | RisingEdge
-        | FallingEdge => "propagate_unknown",
-        ForwardReturnLabel => "unconfirmed_without_future_bars",
-        AddSeries | SubtractSeries | Lag => "propagate_missing",
+        | FallingEdge => NullPolicy::PropagateUnknown,
+        ForwardReturnLabel => NullPolicy::UnconfirmedWithoutFutureBars,
+        AddSeries | SubtractSeries | Lag => NullPolicy::PropagateMissing,
     };
     let cost_per_bar = match op {
         RollingMean => 3,
@@ -452,42 +529,43 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         input_unit,
         other_unit,
         output_unit,
-        output_shape: "series",
+        output_shape: OperationShape::Series,
         period_min: period.map(|(min, _)| min),
         period_max: period.map(|(_, max)| max),
         requires: match op {
-            GreaterThan | LessThan => Some("finite_threshold"),
-            ForwardReturnLabel => Some("prior_event_step_in_when"),
+            GreaterThan | LessThan => Some(ParameterRequirement::FiniteThreshold),
+            ForwardReturnLabel => Some(ParameterRequirement::PriorEventStepInWhen),
             _ => None,
         },
         warmup: if period.is_some() {
-            "period_closed_bars"
+            WarmupPolicy::PeriodClosedBars
         } else if matches!(op, ReturnsSeries | RisingEdge | FallingEdge) {
-            "one_prior_closed_bar"
+            WarmupPolicy::OnePriorClosedBar
         } else {
-            "none"
+            WarmupPolicy::None
         },
         null_policy,
-        compute_cost: "linear_in_series_length",
+        compute_cost: ComputeCostModel::LinearInSeriesLength,
         cost_per_bar,
         causal,
         graph_backtest_supported: causal,
         time_basis: if causal {
-            "closed_bar"
+            TimeBasis::ClosedBar
         } else {
-            "outcome_future_horizon"
+            TimeBasis::OutcomeFutureHorizon
         },
-        source_requirement: "declared_exact_event_time_no_forward_fill",
-        effects: "pure_no_io",
-        owner: "okx-strategy-core::query_plan",
-        verification: "checked_composition_unit_and_replay_tests",
+        source_requirement: SourceRequirement::DeclaredExactEventTimeNoForwardFill,
+        effects: OperationEffect::PureNoIo,
+        owner: OperationOwner::StrategyCoreQueryPlan,
+        verification: VerificationPolicy::CheckedCompositionUnitAndReplayTests,
         variance: matches!(op, RollingZscore | RollingStddev)
-            .then_some("population_inclusive_window"),
+            .then_some(VariancePolicy::PopulationInclusiveWindow),
         minimum_pairs: (op == RollingPearson).then_some(30),
-        numeric_policy: matches!(op, SubtractSeries | DivideSeries).then_some("finite_only"),
+        numeric_policy: matches!(op, SubtractSeries | DivideSeries)
+            .then_some(NumericPolicy::FiniteOnly),
         trigger: match op {
-            RisingEdge => Some("false_to_true"),
-            FallingEdge => Some("true_to_false"),
+            RisingEdge => Some(EventTrigger::FalseToTrue),
+            FallingEdge => Some(EventTrigger::TrueToFalse),
             _ => None,
         },
     }
@@ -515,14 +593,14 @@ mod typed_operation_catalog_tests {
             let id = serde_json::to_string(&contract.op).unwrap();
             assert!(ids.insert(id), "duplicate operation id");
             assert_eq!(contract.version, 1);
-            assert_eq!(contract.effects, "pure_no_io");
-            assert_eq!(contract.output_shape, "series");
+            assert_eq!(contract.effects, OperationEffect::PureNoIo);
+            assert_eq!(contract.output_shape, OperationShape::Series);
             assert!(contract.cost_per_bar > 0);
             assert_eq!(contract.period_min.is_some(), contract.period_max.is_some());
             assert_eq!(contract.graph_backtest_supported, contract.causal);
             assert_eq!(
                 contract.source_requirement,
-                "declared_exact_event_time_no_forward_fill"
+                SourceRequirement::DeclaredExactEventTimeNoForwardFill
             );
             if let (Some(min), Some(max)) = (contract.period_min, contract.period_max) {
                 assert!((1..=max).contains(&min));
@@ -530,6 +608,77 @@ mod typed_operation_catalog_tests {
             }
         }
         assert_eq!(ids.len(), 21);
+    }
+
+    #[test]
+    fn typed_semantics_preserve_the_existing_version_one_capability_wire() {
+        let expected_nulls = [
+            ("returns_series", "propagate_missing_or_nonpositive_price"),
+            ("rolling_mean", "strict_complete_window_no_forward_fill"),
+            ("rolling_max", "strict_complete_window_no_forward_fill"),
+            ("rolling_min", "strict_complete_window_no_forward_fill"),
+            ("rolling_range", "strict_complete_window_no_synthetic_zero"),
+            ("rolling_pearson", "strict_exact_pairs"),
+            ("rolling_zscore", "strict_window_or_zero_variance"),
+            ("rolling_stddev", "strict_window_zero_for_constant"),
+            ("add_series", "propagate_missing"),
+            ("subtract_series", "propagate_missing"),
+            ("divide_series", "propagate_missing_or_zero_denominator"),
+            ("and", "propagate_unknown"),
+            ("or", "propagate_unknown"),
+            ("lag", "propagate_missing"),
+            ("greater_than", "propagate_unknown"),
+            ("greater_than_series", "propagate_unknown"),
+            ("less_than", "propagate_unknown"),
+            ("less_than_series", "propagate_unknown"),
+            ("rising_edge", "propagate_unknown"),
+            ("falling_edge", "propagate_unknown"),
+            ("forward_return_label", "unconfirmed_without_future_bars"),
+        ];
+        for (contract, (id, null_policy)) in
+            series_operation_contracts().into_iter().zip(expected_nulls)
+        {
+            let published = serde_json::to_value(contract).unwrap();
+            assert_eq!(published["op"], id);
+            assert_eq!(published["null_policy"], null_policy);
+            assert_eq!(published["output_shape"], "series");
+            assert_eq!(published["effects"], "pure_no_io");
+            assert_eq!(published["owner"], "okx-strategy-core::query_plan");
+            assert_eq!(
+                published["verification"],
+                "checked_composition_unit_and_replay_tests"
+            );
+            assert_eq!(
+                published["source_requirement"],
+                "declared_exact_event_time_no_forward_fill"
+            );
+            assert_eq!(published["compute_cost"], "linear_in_series_length");
+            assert_eq!(
+                published["time_basis"],
+                if contract.causal {
+                    "closed_bar"
+                } else {
+                    "outcome_future_horizon"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn future_outcome_is_a_distinct_typed_contract_not_a_signal() {
+        let contract = series_operation_contract(SeriesOp::ForwardReturnLabel);
+        assert_eq!(contract.time_basis, TimeBasis::OutcomeFutureHorizon);
+        assert_eq!(contract.output_unit, SeriesUnitRule::OutcomeRatio);
+        assert_eq!(contract.requires, Some(ParameterRequirement::PriorEventStepInWhen));
+        assert_eq!(contract.warmup, WarmupPolicy::PeriodClosedBars);
+        assert!(!contract.causal);
+        assert!(!contract.graph_backtest_supported);
+        let published = serde_json::to_value(contract).unwrap();
+        assert_eq!(published["requires"], "prior_event_step_in_when");
+        assert_eq!(published["output_unit"], "outcome_ratio");
+        assert_eq!(published["warmup"], "period_closed_bars");
+        assert_eq!(published["graph_backtest_supported"], false);
+        assert_eq!(published["null_policy"], "unconfirmed_without_future_bars");
     }
 
     #[test]
@@ -2092,7 +2241,7 @@ mod t15_extension_contract {
             "rolling_range"
         );
         assert_eq!(descriptor.version, 1);
-        assert_eq!(descriptor.effects, "pure_no_io");
+        assert_eq!(descriptor.effects, OperationEffect::PureNoIo);
         assert_eq!(descriptor.output_unit, SeriesUnitRule::SameAsInput);
         assert_eq!(descriptor.period_min, Some(2));
         assert_eq!(descriptor.period_max, Some(1000));
@@ -2420,18 +2569,18 @@ pub fn input(name: &str) -> Result<Input, String> {
         unit,
     })
 }
-fn output_unit(op: Operator) -> Result<Unit, String> {
-    Ok(match registry(op).unit {
-        "price" => Unit::Price,
-        "ratio" => Unit::Ratio,
-        "annualized_ratio" => Unit::AnnualizedRatio,
-        "coefficient" => Unit::Coefficient,
-        "index" => Unit::Index,
-        "bps" => Unit::Bps,
-        "base_quantity" => Unit::Quantity,
-        "quote_currency" => Unit::QuoteCurrency,
-        other => return Err(format!("operators.output_unit:UNKNOWN:{other}")),
-    })
+fn output_unit(op: Operator) -> Unit {
+    use crate::operators::ScalarOutputUnit as U;
+    match registry(op).output_unit {
+        U::Price => Unit::Price,
+        U::Ratio => Unit::Ratio,
+        U::AnnualizedRatio => Unit::AnnualizedRatio,
+        U::Coefficient => Unit::Coefficient,
+        U::Index => Unit::Index,
+        U::Bps => Unit::Bps,
+        U::BaseQuantity => Unit::Quantity,
+        U::QuoteCurrency => Unit::QuoteCurrency,
+    }
 }
 impl QueryPlan {
     pub fn compile(
@@ -2519,7 +2668,7 @@ impl QueryPlan {
                 id: *op,
                 version: 1,
                 inputs,
-                output_unit: output_unit(*op)?,
+                output_unit: output_unit(*op),
                 warmup_bars: warmup,
                 null_policy: "propagate_missing".into(),
                 deterministic: true,

@@ -464,28 +464,6 @@ impl AnalyticsService {
             .iter()
             .map(|&operator| {
                 let info = okx_analysis::operators::registry(operator);
-                let (time_basis, data_availability) = match operator {
-                    Operator::SpreadBps => (
-                        "current_ticker_snapshot_not_historical",
-                        "live_snapshot_timestamp_unverified",
-                    ),
-                    Operator::FundingSum => (
-                        "realized_funding_event_time_not_publication_time",
-                        "historical_publication_time_unverified",
-                    ),
-                    Operator::OiChange => (
-                        "open_interest_event_time_not_publication_time",
-                        "historical_publication_time_unverified",
-                    ),
-                    Operator::PearsonCorrelation => (
-                        "exact_closed_candle_join",
-                        "requires_thirty_common_eligible_pairs",
-                    ),
-                    Operator::PositionSize | Operator::CostEstimate => {
-                        ("request_parameters", "requires_typed_request_arguments")
-                    }
-                    _ => ("closed_candles", "checked_per_request"),
-                };
                 let typed_inputs = info
                     .inputs
                     .iter()
@@ -493,10 +471,11 @@ impl AnalyticsService {
                         okx_analysis::query_plan::input(name).expect("registered operator input")
                     })
                     .collect::<Vec<_>>();
-                json!({"name":operator,"version":1,"status":"code_supported",
+                json!({"name":operator,"version":info.version,"status":"code_supported",
                     "route_status":"public_market_screen_compare",
-                    "data_availability":data_availability,"time_basis":time_basis,
-                    "output_shape":"scalar","unit":info.unit,"inputs":info.inputs,
+                    "data_availability":info.data_availability,"time_basis":info.time_basis,
+                    "output_shape":info.output_shape,"unit":info.output_unit,
+                    "effects":info.effects,"inputs":info.inputs,
                     "typed_inputs":typed_inputs})
             })
             .collect::<Vec<_>>();

@@ -564,6 +564,7 @@ fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
     let snapshot = |id: &str, origin: InvocationId, aliases: Vec<InvocationId>| Snapshot {
         id: id.to_owned(),
         state: "failed".into(),
+        observed_stage: ObservedStage::Terminal,
         progress: 0,
         candidate_progress: None,
         origin_invocation: Some(origin),
@@ -571,6 +572,7 @@ fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
         producer: None,
         result_ref: None,
         error_code: Some("CANDLE_RANGE_UNAVAILABLE".into()),
+        failure_class: Some(FailureClass::Source),
         pinned: false,
         observed_at_ms: 0,
         generation: 0,
@@ -617,6 +619,130 @@ fn conflicting_origin_and_retry_alias_never_selects_a_phantom_job() {
         projection.read_by_invocation(unrelated.as_str())["job"]["id"],
         second_job
     );
+}
+
+#[test]
+fn terminal_reason_classification_matches_live_reason_and_durable_sql_projection() {
+    // One stable reason contract across live Research/Market observations,
+    // the bounded job projection, and a catalog restart. Exact matching also
+    // prevents arbitrary secret-bearing prefixes from being reclassified as
+    // resource failure or source backpressure.
+    let (jobs, file) = jobs("reason-parity");
+    let cases = [
+        ("NONFINITE_SOURCE", "NONFINITE_SOURCE", "source"),
+        ("INVALID_FUNDING", "INVALID_FUNDING", "source"),
+        (
+            "GLOBAL_RANK_SOURCE_INCOMPLETE",
+            "GLOBAL_RANK_SOURCE_INCOMPLETE",
+            "source",
+        ),
+        ("RESEARCH_MEMORY_LIMIT", "RESEARCH_MEMORY_LIMIT", "resource"),
+        ("LIMIT_TOTAL_BARS:1000000", "LIMIT_TOTAL_BARS", "resource"),
+        ("LIMIT_BARS:1000000", "LIMIT_BARS", "resource"),
+        ("LIMIT_EXCEEDED:WORK_UNITS", "LIMIT_EXCEEDED", "resource"),
+        ("RESOURCE_BUSY:QUEUE_FULL", "RESOURCE_BUSY", "resource"),
+        (
+            "UNSUPPORTED_INSTRUMENT_TYPE",
+            "UNSUPPORTED_INSTRUMENT_TYPE",
+            "contract",
+        ),
+        (
+            "RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED",
+            "RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED",
+            "batch",
+        ),
+        (
+            "RESEARCH_BATCH_SOURCE_RETRYABLE",
+            "RESEARCH_BATCH_SOURCE_RETRYABLE",
+            "batch",
+        ),
+        (
+            "RESULT_EXPIRED_BY_7_DAY_RETENTION",
+            "RESULT_EXPIRED_BY_7_DAY_RETENTION",
+            "lifecycle",
+        ),
+        (
+            "process restarted before completion",
+            "RESEARCH_INTERRUPTED",
+            "lifecycle",
+        ),
+        (
+            "OKX rate/backpressure defer: limited",
+            "MARKET_SOURCE_RETRYABLE",
+            "source",
+        ),
+        (
+            "public OKX market API error: OKX rate/backpressure defer: limited",
+            "MARKET_SOURCE_RETRYABLE",
+            "source",
+        ),
+        (
+            "LIMIT_NOT_A_REAL_CODE:private",
+            "UNCLASSIFIED_RESEARCH_ERROR",
+            "unclassified",
+        ),
+        (
+            "credential=OKX rate/backpressure defer: secret",
+            "UNCLASSIFIED_RESEARCH_ERROR",
+            "unclassified",
+        ),
+        (
+            "limit_bars:private",
+            "UNCLASSIFIED_RESEARCH_ERROR",
+            "unclassified",
+        ),
+        (
+            "RESOURCE-BUSY:private",
+            "UNCLASSIFIED_RESEARCH_ERROR",
+            "unclassified",
+        ),
+        (
+            "okx rate/backpressure defer: secret",
+            "UNCLASSIFIED_RESEARCH_ERROR",
+            "unclassified",
+        ),
+    ];
+    for (index, &(raw, code, class)) in cases.iter().enumerate() {
+        assert_eq!(safe_reason(raw), code, "live classifier: {index}");
+        let id = format!("{index:064x}");
+        jobs.enqueue(format!("parity-{index}"), id.clone()).unwrap();
+        jobs.update(&id, JobState::Failed, None, Some(raw.to_owned()))
+            .unwrap();
+        let observed = jobs.diagnostic_readback(&id);
+        assert_eq!(observed["job"]["error_code"], code, "SQL: {index}");
+        assert_eq!(observed["job"]["failure_class"], class, "class: {index}");
+        assert_eq!(observed["job"]["observed_stage"], "terminal");
+        assert!(!observed.to_string().contains("secret"));
+        assert!(!observed.to_string().contains("private"));
+    }
+
+    let waiting = "f".repeat(64);
+    jobs.enqueue("waiting-parity".into(), waiting.clone()).unwrap();
+    assert_eq!(
+        jobs.diagnostic_readback(&waiting)["job"]["observed_stage"],
+        "admission"
+    );
+    jobs.update(&waiting, JobState::Running, None, None).unwrap();
+    assert_eq!(
+        jobs.diagnostic_readback(&waiting)["job"]["observed_stage"],
+        "execution"
+    );
+
+    drop(jobs);
+    let reopened = Jobs::open(file).unwrap();
+    for (index, &(_, code, class)) in cases.iter().enumerate() {
+        let observed = reopened.diagnostic_readback(&format!("{index:064x}"));
+        assert_eq!(
+            observed["job"]["error_code"], code,
+            "restored code: {index}"
+        );
+        assert_eq!(
+            observed["job"]["failure_class"], class,
+            "restored class: {index}"
+        );
+        assert_eq!(observed["job"]["observed_stage"], "terminal");
+        assert_eq!(observed["job"]["origin"], "durable_startup_subset");
+    }
 }
 
 #[test]

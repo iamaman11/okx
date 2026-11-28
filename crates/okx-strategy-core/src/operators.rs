@@ -1,4 +1,5 @@
 //! Typed, finite-only, causal operators for replay and live evaluation.
+use crate::operation_contract::{DataAvailability, OperationEffect, OperationShape, TimeBasis};
 pub use okx_research_protocol::strategy_contract::{
     BREAKOUT_STRATEGY_ID, BreakoutParameters, EmaParameters, StrategyParameters,
 };
@@ -122,7 +123,9 @@ pub enum Operator {
     PositionSize,
     CostEstimate,
 }
-/// The enumerable public DSL contract. Adding a typed operator requires listing it here.
+/// The finite scalar-analytics catalog. These operators are not automatically
+/// composable `SeriesOp` graph nodes; Market executes them as bounded scalar
+/// projections from individually checked inputs.
 pub const SUPPORTED_OPERATORS: &[Operator] = &[
     Operator::Returns,
     Operator::LogReturns,
@@ -142,32 +145,108 @@ pub const SUPPORTED_OPERATORS: &[Operator] = &[
     Operator::CostEstimate,
 ];
 
+/// Semantic scalar result dimensions. The existing public `unit` spelling is
+/// derived from this enum, never repeated independently in a second catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScalarOutputUnit {
+    Ratio,
+    AnnualizedRatio,
+    Coefficient,
+    Price,
+    Index,
+    Bps,
+    BaseQuantity,
+    QuoteCurrency,
+}
+
+impl ScalarOutputUnit {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ratio => "ratio",
+            Self::AnnualizedRatio => "annualized_ratio",
+            Self::Coefficient => "coefficient",
+            Self::Price => "price",
+            Self::Index => "index",
+            Self::Bps => "bps",
+            Self::BaseQuantity => "base_quantity",
+            Self::QuoteCurrency => "quote_currency",
+        }
+    }
+}
+
+pub type ScalarOutputShape = OperationShape;
+pub type ScalarEffect = OperationEffect;
+pub type ScalarTimeBasis = TimeBasis;
+pub type ScalarDataAvailability = DataAvailability;
+
 #[derive(Debug, Clone, Copy)]
 pub struct OperatorInfo {
     pub operator: Operator,
+    pub version: u16,
     pub inputs: &'static [&'static str],
+    /// Kept for the existing QueryPlan/Market wire API, derived from
+    /// `output_unit` rather than a separately maintained string mapping.
     pub unit: &'static str,
+    pub output_unit: ScalarOutputUnit,
+    pub output_shape: ScalarOutputShape,
+    pub effects: ScalarEffect,
+    pub time_basis: ScalarTimeBasis,
+    pub data_availability: ScalarDataAvailability,
 }
 pub fn registry(op: Operator) -> OperatorInfo {
     use Operator::*;
-    let (inputs, unit): (&[_], _) = match op {
-        Returns | LogReturns | MaxDrawdown => (&["close"], "ratio"),
-        RealizedVolatility | DownsideVolatility => (&["close"], "annualized_ratio"),
-        PearsonCorrelation => (&["close", "peer_close"], "coefficient"),
-        Ema | RollingMean => (&["close"], "price"),
-        Atr => (&["high", "low", "close"], "price"),
-        Rsi => (&["close"], "index"),
-        SpreadBps => (&["bid", "ask"], "bps"),
-        VolumeChange => (&["volume"], "ratio"),
-        OiChange => (&["open_interest"], "ratio"),
-        FundingSum => (&["funding"], "ratio"),
-        PositionSize => (&["budget", "price", "stop_distance"], "base_quantity"),
-        CostEstimate => (&["notional", "fee_bps", "slippage_bps"], "quote_currency"),
+    use ScalarOutputUnit as U;
+    let (inputs, output_unit): (&[_], _) = match op {
+        Returns | LogReturns | MaxDrawdown => (&["close"], U::Ratio),
+        RealizedVolatility | DownsideVolatility => (&["close"], U::AnnualizedRatio),
+        PearsonCorrelation => (&["close", "peer_close"], U::Coefficient),
+        Ema | RollingMean => (&["close"], U::Price),
+        Atr => (&["high", "low", "close"], U::Price),
+        Rsi => (&["close"], U::Index),
+        SpreadBps => (&["bid", "ask"], U::Bps),
+        VolumeChange => (&["volume"], U::Ratio),
+        OiChange => (&["open_interest"], U::Ratio),
+        FundingSum => (&["funding"], U::Ratio),
+        PositionSize => (&["budget", "price", "stop_distance"], U::BaseQuantity),
+        CostEstimate => (&["notional", "fee_bps", "slippage_bps"], U::QuoteCurrency),
+    };
+    let (time_basis, data_availability) = match op {
+        SpreadBps => (
+            ScalarTimeBasis::CurrentTickerSnapshotNotHistorical,
+            ScalarDataAvailability::LiveSnapshotTimestampUnverified,
+        ),
+        FundingSum => (
+            ScalarTimeBasis::RealizedFundingEventTimeNotPublicationTime,
+            ScalarDataAvailability::HistoricalPublicationTimeUnverified,
+        ),
+        OiChange => (
+            ScalarTimeBasis::OpenInterestEventTimeNotPublicationTime,
+            ScalarDataAvailability::HistoricalPublicationTimeUnverified,
+        ),
+        PearsonCorrelation => (
+            ScalarTimeBasis::ExactClosedCandleJoin,
+            ScalarDataAvailability::RequiresThirtyCommonEligiblePairs,
+        ),
+        PositionSize | CostEstimate => (
+            ScalarTimeBasis::RequestParameters,
+            ScalarDataAvailability::RequiresTypedRequestArguments,
+        ),
+        _ => (
+            ScalarTimeBasis::ClosedCandles,
+            ScalarDataAvailability::CheckedPerRequest,
+        ),
     };
     OperatorInfo {
         operator: op,
+        version: 1,
         inputs,
-        unit,
+        unit: output_unit.as_str(),
+        output_unit,
+        output_shape: ScalarOutputShape::Scalar,
+        effects: ScalarEffect::PureNoIo,
+        time_basis,
+        data_availability,
     }
 }
 pub fn returns(values: &[f64], log: bool) -> Vec<Option<f64>> {
@@ -550,6 +629,63 @@ impl NumericColumn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn scalar_catalog_is_finite_typed_pure_and_has_resolvable_inputs() {
+        assert_eq!(SUPPORTED_OPERATORS.len(), 16);
+        let mut ids = BTreeSet::new();
+        for &op in SUPPORTED_OPERATORS {
+            assert!(ids.insert(op), "duplicate scalar operator");
+            let info = registry(op);
+            assert_eq!(info.operator, op);
+            assert_eq!(info.version, 1);
+            assert!(!info.inputs.is_empty());
+            assert_eq!(info.unit, info.output_unit.as_str());
+            assert_eq!(info.output_shape, ScalarOutputShape::Scalar);
+            assert_eq!(info.effects, ScalarEffect::PureNoIo);
+            for input in info.inputs {
+                assert!(
+                    crate::query_plan::input(input).is_ok(),
+                    "unresolvable typed input {input} for {op:?}"
+                );
+            }
+            for contract in [
+                serde_json::to_value(info.output_unit).unwrap(),
+                serde_json::to_value(info.output_shape).unwrap(),
+                serde_json::to_value(info.effects).unwrap(),
+                serde_json::to_value(info.time_basis).unwrap(),
+                serde_json::to_value(info.data_availability).unwrap(),
+            ] {
+                let value = contract.as_str().expect("a closed enum wire spelling");
+                assert!(!value.is_empty());
+                assert!(value.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_'));
+            }
+        }
+        assert_eq!(ids.len(), 16);
+        for (op, time, availability) in [
+            (
+                Operator::SpreadBps,
+                "current_ticker_snapshot_not_historical",
+                "live_snapshot_timestamp_unverified",
+            ),
+            (
+                Operator::OiChange,
+                "open_interest_event_time_not_publication_time",
+                "historical_publication_time_unverified",
+            ),
+            (
+                Operator::FundingSum,
+                "realized_funding_event_time_not_publication_time",
+                "historical_publication_time_unverified",
+            ),
+        ] {
+            let info = registry(op);
+            assert_eq!(serde_json::to_value(info.time_basis).unwrap(), time);
+            assert_eq!(serde_json::to_value(info.data_availability).unwrap(), availability);
+        }
+    }
+
     #[test]
     fn correlation_timestamp_alignment() {
         let a = (0..60).map(|i| (i, i as f64)).collect::<Vec<_>>();
