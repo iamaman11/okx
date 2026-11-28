@@ -30,10 +30,9 @@ async fn public_add(external_increment: bool) {
     .unwrap();
     let (market_stop, market_task, socket, public) =
         opened_market_with_public_client(&mut fixture, Some(reference_client)).await;
-    // The opening/reference setup may exceed the original five-second NAV
-    // freshness bound. Observe a new, complete flat-account source before
-    // sending the first Execute, without relaxing financial admission.
-    refresh_flat_account_source(&fixture).await;
+    // The opening/reference setup may outlast the five-second NAV bound.
+    // Re-capture the finite original flat account before the first Execute.
+    capture(&fixture).await;
     let entry = create_entry(&fixture).await;
     let account = fixture._account.clone();
     // Admission used the ordinary capture task. From the first external fill

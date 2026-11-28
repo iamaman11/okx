@@ -590,16 +590,6 @@ pub(crate) async fn capture(fixture: &NativeFixture) {
     assert_eq!(stops, 0, "no source or projection stop may be hidden");
 }
 
-/// Re-observe the original flat account after market/reference setup. Those
-/// real fixture steps can outlast the five-second Native NAV validity window
-/// on a contended Windows runner. A newly signed balance and all six monetary
-/// pages must pass the unchanged production capture before trading admission.
-pub(crate) async fn refresh_flat_account_source(fixture: &NativeFixture) {
-    snapshot(&fixture.feed, "100", "0");
-    history(&fixture.feed, None);
-    capture(fixture).await;
-}
-
 pub(super) async fn close_market(
     socket: &RecordedWsConnector,
     public: &okx_market_runtime::PublicWsHandle,
