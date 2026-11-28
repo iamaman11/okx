@@ -131,13 +131,13 @@ async fn graph_preflight_rejects_unsupported_source_without_job_or_venue_get() {
     let (root, service) = service_with_source(transport.client());
     let request: ResearchRequest = serde_json::from_value(json!({
         "action":"graph_backtest", "idempotency_key":"graph-invalid-no-sources",
-        "instruments":["BTC-USDT"],"timeframe_ms":CANDLE_INTERVAL_MS,
+        "instruments":["BTC-USDT-SWAP"],"timeframe_ms":CANDLE_INTERVAL_MS,
         "start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,
         "graph_signal":{
             "version":"okx.graph-signal/v1",
             "graph":{"version":"okx.market.composition/v1","steps":[
-                {"id":"vol","op":"rolling_stddev","input":"volume","period":2},
-                {"id":"signal","op":"greater_than","input":"vol","threshold":0}
+                {"id":"oi","op":"rolling_stddev","input":"open_interest","period":2},
+                {"id":"signal","op":"greater_than","input":"oi","threshold":0}
             ],"result_steps":["signal"]},
             "signal_step":"signal","target_if_true":1,"target_if_false":0,
             "missing":"hold"
@@ -978,6 +978,59 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
         )
         .unwrap_err(),
         "EXPORT_REEXECUTION_MISMATCH"
+    );
+    // An independent graph uses all five closed-candle ports through the
+    // existing Research job, artifact and native semantic replay path.
+    let ohlcv_request: ResearchRequest = serde_json::from_value(json!({
+        "action":"graph_backtest", "idempotency_key":"c4-ohlcv-graph-owner-replay",
+        "instruments":["BTC-USDT"], "timeframe_ms":CANDLE_INTERVAL_MS,
+        "start_ms":CANDLE_START_MS, "end_ms":CANDLE_END_MS,
+        "graph_signal":{
+            "version":"okx.graph-signal/v1",
+            "graph":{"version":"okx.market.composition/v1","steps":[
+                {"id":"green","op":"greater_than_series","input":"close","other":"open"},
+                {"id":"valid_range","op":"greater_than_series","input":"high","other":"low"},
+                {"id":"active","op":"greater_than","input":"volume","threshold":0.0},
+                {"id":"price_signal","op":"and","input":"green","other":"valid_range"},
+                {"id":"entry","op":"and","input":"price_signal","other":"active"}
+            ],"result_steps":["entry"]},
+            "signal_step":"entry","target_if_true":1,"target_if_false":0,
+            "missing":"hold"
+        },
+        "costs":{"maker_fee_bps":8,"taker_fee_bps":10,"slippage_bps":5,
+            "funding_mode":"zero_assumption"},
+        "data_mode":"counterfactual","seed":7
+    }))
+    .unwrap();
+    assert!(ohlcv_request.valid());
+    let ohlcv_job = service.research(ohlcv_request).await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = service.jobs.get(&ohlcv_job).unwrap();
+            match state.state {
+                super::super::jobs::State::Completed => break,
+                super::super::jobs::State::Failed => panic!("OHLCV graph failed: {:?}", state.error),
+                _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let ohlcv_export = service
+        .research(ResearchRequest::Result {
+            job_id: ohlcv_job,
+            cursor: None,
+            limit: 20,
+            view: ResearchResultView::Export,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        ohlcv_export["integrity"]["reexecution"]["quality"],
+        "verified_reexecution"
     );
     let before = service.jobs.snapshot().len();
     if let ResearchRequest::Backtest { strategy_id, .. } = &mut request {

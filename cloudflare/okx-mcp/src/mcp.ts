@@ -5,7 +5,9 @@ const RESEARCH_OWNER = {target_owner:'research'} as const;
 // An on-demand, read-only operator catalogue includes all versioned type and
 // provenance descriptors. It is not a normal Research decision packet; keep
 // its own finite bound rather than silently dropping required T01/T15 fields.
-const MARKET_CAPABILITIES_RESULT_BYTES=20_480;
+// The canonical 21 series + 16 scalar + 7 source descriptors currently
+// require ~25.6 KiB; keep discovery complete and retain a finite response cap.
+const MARKET_CAPABILITIES_RESULT_BYTES=32_768;
 function hasOnlyKeys(v:Record<string,unknown>,keys:string[]){return Object.keys(v).every(k=>keys.includes(k));}
 function canonical(v:unknown):string{if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';if(isObject(v))return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';return JSON.stringify(v);}
 function bytes(value:Json):number{return new TextEncoder().encode(JSON.stringify(value)).byteLength;}

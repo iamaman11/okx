@@ -145,7 +145,8 @@ impl AnalyticsService {
                 .checked_sub(*start_ms)
                 .and_then(|range| range.checked_div(*timeframe_ms))
                 .ok_or("INVALID_GRAPH_RANGE")?;
-            let warmup = okx_research::graph_signal::preflight_graph(graph_signal, bars)?;
+            let (warmup, graph_sources) =
+                okx_research::graph_signal::preflight_graph_sources(graph_signal, bars)?;
             let policy = replay::graph_oos_policy(
                 usize::try_from(bars).map_err(|_| "graph_oos.range:RESOURCE_LIMIT")?,
                 warmup,
@@ -156,9 +157,8 @@ impl AnalyticsService {
                 .checked_add(policy.split_index as u64)
                 .ok_or("graph_oos.range:RESOURCE_LIMIT")?;
             okx_research::graph_signal::preflight_graph(graph_signal, replay_bars)?;
-            // Research's current graph consumes close only. Bind that exact
-            // source to each independent instrument and its closed grid using
-            // the same typed port contract as Market, before job/source I/O.
+            // Bind exactly the projected candle sources for each instrument
+            // to the same typed contract as Market, before job/source I/O.
             let range = okx_analysis::time_series::ClosedRange::normalize(
                 *start_ms,
                 *end_ms,
@@ -166,7 +166,9 @@ impl AnalyticsService {
             )
             .map_err(|reason| format!("graph_signal.range:{reason}"))?;
             for (index, instrument) in instruments.iter().enumerate() {
-                okx_analysis::query_plan::SeriesSource::Close.bind(instrument, range, index)?;
+                for source in &graph_sources {
+                    source.bind(instrument, range, index)?;
+                }
             }
         }
         // Estimate the complete batch before SQL admission or fetching candles.
