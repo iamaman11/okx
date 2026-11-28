@@ -41,10 +41,11 @@ fn verify_replay_manifest_links(
             None if manifest["graph_signal"].is_null() => {}
             _ => return Err("EXPORT_REPLAY_REFERENCE_MISMATCH".into()),
         }
-        let policy = inputs.get("graph_oos_policy").filter(|value| !value.is_null());
+        let policy = inputs
+            .get("graph_oos_policy")
+            .filter(|value| !value.is_null());
         match policy {
-            Some(policy)
-                if policy.is_object() && manifest["graph_oos"]["policy"] == *policy => {}
+            Some(policy) if policy.is_object() && manifest["graph_oos"]["policy"] == *policy => {}
             None if manifest["graph_oos"].is_null() => {}
             _ => return Err("EXPORT_REPLAY_REFERENCE_MISMATCH".into()),
         }
@@ -76,7 +77,10 @@ mod replay_link_tests {
             "graph_signal":{"version":"graph-test/v1"},
             "graph_oos":{"policy":{"version":"oos-test/v1","split_index":7}}
         });
-        assert_eq!(verify_replay_manifest_links(Some(&inputs), &manifest, true), Ok(true));
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &manifest, true),
+            Ok(true)
+        );
         let mut forged_graph = manifest.clone();
         forged_graph["graph_signal"]["version"] = json!("other");
         assert_eq!(
@@ -97,7 +101,10 @@ mod replay_link_tests {
         );
         let mut legacy = manifest.clone();
         legacy.as_object_mut().unwrap().remove("summary");
-        assert_eq!(verify_replay_manifest_links(Some(&inputs), &legacy, true), Ok(false));
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &legacy, true),
+            Ok(false)
+        );
     }
 }
 
@@ -218,12 +225,15 @@ pub(super) fn verify_export_manifest(
             let (funding_capture, expected_funding) = verify_experiment_funding(store, &inputs)?;
             let dataset =
                 verify_experiment_dataset(store, &inputs, manifest, expected_funding.as_deref())?;
-            (Some(
-                json!({"artifact":id,"checksum_verified":true,"references_match":true,
+            (
+                Some(
+                    json!({"artifact":id,"checksum_verified":true,"references_match":true,
                 "reference_capture_verified":reference_id.is_some(),
                 "funding_replay_attribution_verified":expected_funding.is_some(),
                 "dataset":dataset,"funding_capture":funding_capture}),
-            ), Some(inputs))
+                ),
+                Some(inputs),
+            )
         }
         None => (None, None),
     };
@@ -259,7 +269,11 @@ pub(super) fn verify_export_manifest(
     let sources_verified = dataset_verified && funding_verified;
     let reexecution_verified = reexecution["quality"] == "verified_reexecution";
     let complete = sources_verified && reexecution_verified && summary_trades_reconciled;
-    let quality = if complete { ExportIntegrityQuality::Complete } else { ExportIntegrityQuality::Partial };
+    let quality = if complete {
+        ExportIntegrityQuality::Complete
+    } else {
+        ExportIntegrityQuality::Partial
+    };
     let scope = if complete {
         ExportEvidenceScope::ResultPagesSourcesAndReplaySemantics
     } else if sources_verified {

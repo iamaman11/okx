@@ -506,7 +506,9 @@ async fn t13_export_with_verified_sources_but_unverified_budget_is_partial() {
         end_ms: 16_800_000,
         strategy_id: "close_breakout_v1".into(),
         variants: (2..66)
-            .map(|lookback| okx_research_protocol::analytics::BreakoutParameters { lookback }.into())
+            .map(|lookback| {
+                okx_research_protocol::analytics::BreakoutParameters { lookback }.into()
+            })
             .collect(),
         costs: ResearchCosts {
             maker_fee_bps: 0.0,
@@ -548,8 +550,7 @@ async fn t13_export_with_verified_sources_but_unverified_budget_is_partial() {
         .artifacts
         .read_evidence_json(&service.jobs.get(&id).unwrap().artifact.unwrap())
         .unwrap();
-    forged["summary"]["trades"] =
-        json!(forged["summary"]["trades"].as_u64().unwrap() + 1);
+    forged["summary"]["trades"] = json!(forged["summary"]["trades"].as_u64().unwrap() + 1);
     assert_eq!(
         verify_export_manifest(&service.artifacts, &forged).unwrap_err(),
         "EXPORT_REPLAY_COUNT_MISMATCH"
