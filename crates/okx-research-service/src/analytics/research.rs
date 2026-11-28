@@ -113,6 +113,23 @@ fn research_job_versions(request: &ResearchRequest) -> (&'static str, &'static s
 
 impl AnalyticsService {
     pub(super) async fn submit(&self, request: ResearchRequest) -> Result<Value, String> {
+        // An unavailable data mode must fail before durable admission, resource
+        // reservations or public market reads for every executable research kind.
+        if matches!(
+            &request,
+            ResearchRequest::Backtest {
+                data_mode: ResearchDataMode::HistoricalObserved,
+                ..
+            } | ResearchRequest::Grid {
+                data_mode: ResearchDataMode::HistoricalObserved,
+                ..
+            } | ResearchRequest::GraphBacktest {
+                data_mode: ResearchDataMode::HistoricalObserved,
+                ..
+            }
+        ) {
+            return Err("HISTORICAL_RULES_AND_FEES_UNAVAILABLE".into());
+        }
         // A graph that cannot execute must not create a durable job or fetch
         // venue data. The same pure preflight is repeated against actual bars.
         if let ResearchRequest::GraphBacktest {

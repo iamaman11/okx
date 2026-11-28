@@ -13,6 +13,52 @@ const CANDLE_END_MS: u64 = CANDLE_START_MS + 20 * CANDLE_INTERVAL_MS;
 const CANDLE_GAP_MS: u64 = CANDLE_START_MS + 10 * CANDLE_INTERVAL_MS;
 
 #[tokio::test]
+async fn unavailable_historical_mode_rejects_all_executions_before_sql_or_market_reads() {
+    let transport = RecordedGet::new(vec![]);
+    let (root, service) = service_with_source(transport.client());
+    let backtest = json!({
+        "action":"backtest", "idempotency_key":"historical-backtest-no-job",
+        "instruments":["BTC-USDT"], "timeframe_ms":CANDLE_INTERVAL_MS,
+        "start_ms":CANDLE_START_MS, "end_ms":CANDLE_END_MS,
+        "strategy_id":"ema_cross_v1", "parameters":{"fast":2,"slow":3},
+        "costs":{"maker_fee_bps":0,"taker_fee_bps":10,"slippage_bps":5,
+            "funding_mode":"zero_assumption"},
+        "data_mode":"historical_observed"
+    });
+    let mut grid = backtest.clone();
+    grid["action"] = json!("grid");
+    grid["idempotency_key"] = json!("historical-grid-no-job");
+    grid.as_object_mut().unwrap().remove("parameters");
+    grid["variants"] = json!([{"fast":2,"slow":3}]);
+    let mut graph = backtest.clone();
+    graph["action"] = json!("graph_backtest");
+    graph["idempotency_key"] = json!("historical-graph-no-job");
+    graph.as_object_mut().unwrap().remove("strategy_id");
+    graph.as_object_mut().unwrap().remove("parameters");
+    graph["graph_signal"] = json!({
+        "version":"okx.graph-signal/v1",
+        "graph":{"version":"okx.market.composition/v1","steps":[
+            {"id":"gain","op":"returns_series","input":"close"},
+            {"id":"entry","op":"greater_than","input":"gain","threshold":0}
+        ],"result_steps":["entry"]},
+        "signal_step":"entry","target_if_true":1,"target_if_false":0,
+        "missing":"hold"
+    });
+    for value in [backtest, grid, graph] {
+        let request: ResearchRequest = serde_json::from_value(value).unwrap();
+        assert!(request.valid());
+        assert_eq!(
+            service.research(request).await.unwrap_err(),
+            "HISTORICAL_RULES_AND_FEES_UNAVAILABLE"
+        );
+    }
+    assert!(service.jobs.snapshot().is_empty());
+    assert!(transport.routes.lock().unwrap().is_empty());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn graph_preflight_rejects_unsupported_operator_without_job_or_venue_get() {
     let transport = RecordedGet::new(vec![]);
     let (root, service) = service_with_source(transport.client());
