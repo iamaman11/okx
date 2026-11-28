@@ -169,16 +169,19 @@ async fn t14_market_retry_and_cursor_never_publish_cancelled_or_interrupted_part
 #[test]
 fn t02_funding_composition_rejects_non_swap_before_source_reads() {
     let spot = vec!["BTC-USDT-SWAP".to_owned(), "ETH-USDT".to_owned()];
+    let range = okx_analysis::time_series::ClosedRange::strict(0, 180_000, 60_000).unwrap();
+    use okx_analysis::query_plan::SeriesSource;
     assert_eq!(
-        validate_composition_source_products(&spot, false, true).unwrap_err(),
+        SeriesSource::FundingRate.bind(&spot[1], range, 1).unwrap_err(),
         "composition.sources.funding_rate:UNSUPPORTED_PRODUCT"
     );
     assert_eq!(
-        validate_composition_source_products(&spot, true, true).unwrap_err(),
+        SeriesSource::OpenInterest.bind(&spot[1], range, 1).unwrap_err(),
         "composition.sources.open_interest:UNSUPPORTED_PRODUCT"
     );
-    assert!(validate_composition_source_products(&["BTC-USDT-SWAP".into()], true, true).is_ok());
-    assert!(validate_composition_source_products(&spot, false, false).is_ok());
+    assert!(SeriesSource::FundingRate.bind(&spot[0], range, 0).is_ok());
+    assert!(SeriesSource::OpenInterest.bind(&spot[0], range, 0).is_ok());
+    assert!(SeriesSource::Close.bind(&spot[1], range, 1).is_ok());
 }
 
 #[test]
@@ -932,7 +935,7 @@ fn t10_unprojected_oi_and_funding_branches_never_require_sources_on_spot() {
             .sources()
             .contains(&okx_analysis::query_plan::Source::OpenInterest)
     );
-    assert!(validate_composition_source_products(&request.instruments, false, false).is_ok());
+    assert_eq!(plan.bound_series_source_ports().unwrap().len(), 1);
     // No OI/funding values exist in this spot fixture. An unreachable
     // branch must not downgrade the projected result or invent evidence.
     let result = compute_row_planned(row(), &request, None, &plan, true).unwrap();

@@ -3099,18 +3099,13 @@ impl QueryPlan {
         let Some(composition) = &self.composition else {
             return Ok(Vec::new());
         };
-        let sources = composition
-            .steps()
-            .iter()
-            .flat_map(|checked| {
-                [
-                    Some(checked.step.input.as_str()),
-                    checked.step.other.as_deref(),
-                ]
-            })
-            .flatten()
-            .filter_map(SeriesSource::parse)
-            .collect::<BTreeSet<_>>();
+        // Use the same projected dependency closure as source scheduling.
+        // Dead branches are type-checked during compilation, but must not
+        // cause source admission failures or trigger additional data reads.
+        let sources = SERIES_SOURCES
+            .into_iter()
+            .filter(|source| composition.uses_source(source.as_str()))
+            .collect::<Vec<_>>();
         let mut result = Vec::with_capacity(self.universe.len().saturating_mul(sources.len()));
         for (index, instrument) in self.universe.iter().enumerate() {
             for source in &sources {

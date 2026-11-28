@@ -64,6 +64,9 @@ ValueType = (shape, unit, instrument_scope, timeframe_and_range,
   derives the current `close`-only subset from the same contracts. A metadata
   flag cannot enable a missing physical input port in the stream evaluator.
   The bound port is **derived**, not a new persisted plan or separate runtime.
+  Only ports in the projected dependency closure are bound: an unreachable
+  declaration may be type-checked but cannot cause extra source reads or
+  spuriously reject an otherwise executable query.
   It distinguishes quote-per-base price, unresolved native volume, contract
   count requiring exchange-reference evidence and dimensionless funding.
   Quote currency parsed from an instrument is *not* proof of a swap's actual
