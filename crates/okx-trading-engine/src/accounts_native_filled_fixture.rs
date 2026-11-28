@@ -131,7 +131,7 @@ impl ClockPhaseTimings {
 /// transcripts; without this scoped continuation a slow CI executor makes
 /// the real five-second SQL readiness fence expire during the test itself.
 /// This never changes the clock, source generations, balances or safety rules.
-pub(super) fn keep_captured_readiness_current(
+pub(crate) fn keep_captured_readiness_current(
     fixture: &NativeFixture,
 ) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
     let service = fixture.trade.clone();
@@ -170,7 +170,7 @@ pub(super) fn keep_captured_readiness_current(
     (stop, task)
 }
 
-pub(super) async fn stop_captured_readiness(
+pub(crate) async fn stop_captured_readiness(
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
 ) {
