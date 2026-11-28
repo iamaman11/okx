@@ -191,6 +191,8 @@ function validate(yaml, fileNames) {
   assert.match(header, /^        default: true$/m);
   assert.match(header, /^      cache_profile:\n        description: 'Select which trusted main Windows Cargo cache to warm'\n        required: true\n        type: choice\n        options: \[tests, release, research, both\]\n        default: both$/m,
     'MANUAL_CACHE_MUST_EXPOSE_ALL_PROFILES_WITH_SAFE_BOTH_DEFAULT');
+  assert.match(header, /^      recover_research_660:\n        description: 'One-time verified #660 Research artifact publication only \(no build or install\)'\n        required: false\n        type: boolean\n        default: false$/m,
+    'HISTORICAL_RESEARCH_RECOVERY_MUST_BE_EXPLICIT_AND_OFF_BY_DEFAULT');
   assert.doesNotMatch(header, /^  contents: write$/m);
   assert.match(header, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 
@@ -1085,6 +1087,28 @@ function validate(yaml, fileNames) {
   assert.match(researchPublish, /needs\['dependency-audit'\]\.result == 'skipped' &&/,
     'RESEARCH_MAIN_PUBLISH_REUSES_READY_AUDIT_ONLY');
   assert.match(researchPublish, /needs.required_ci.result == 'success'/);
+  // This is a one-off repair of the #660 publication misclassification, not
+  // generic manual artifact promotion. Every immutable identifier is pinned;
+  // the original PR Ready and release-asset checks remain below unchanged.
+  assert.match(researchPublish, /github.ref == 'refs\/heads\/main' &&/);
+  assert.match(researchPublish, /\(github.event_name == 'workflow_dispatch' && inputs.recover_research_660 == true\)/);
+  assert.match(researchPublish, /RECOVER_660: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.recover_research_660 == true \}\}/);
+  assert.match(researchPublish, /ACCEPTED_MAIN: \$\{\{ inputs.recover_research_660 == true && '1203a329a29d964743cdcf4a1a972ff70d1f3325' \|\| github.sha \}\}/);
+  assert.match(researchPublish, /test "\$\(git rev-parse HEAD\)" = "\$PUBLISH_TIP"/);
+  assert.match(researchPublish, /RESEARCH_RECOVERY_MAIN_ADVANCED/);
+  assert.match(researchPublish, /compare="\$\(gh api "\/repos\/\$GITHUB_REPOSITORY\/compare\/\$ACCEPTED_MAIN\.\.\.\$PUBLISH_TIP"\)"/);
+  assert.match(researchPublish, /\.merge_base_commit.sha == \$base/);
+  assert.match(researchPublish, /\.total_commits < 250 and \(\.commits \| length\) == \.total_commits/);
+  assert.match(researchPublish, /test "\$head" = 8f912fa5e4ab69ee968ed77965b02f679cb1bda2/);
+  assert.match(researchPublish, /test "\$head_tree" = 9652f03674790ade9f1d3f6dfffc71d4b9fa31cb/);
+  assert.match(researchPublish, /test "\$run_id" = 46089314806/);
+  assert.match(researchPublish, /test "\$run_attempt" = 1/);
+  assert.match(researchPublish, /test "\$artifact_id" = 15239933703/);
+  assert.match(researchPublish, /test "\$artifact_digest" = sha256:f00fb3116e476d94cecab8ba11502f143f9e604c6a9710f9d88f82402ba1c0ac/);
+  assert.equal(researchPublish.split('branches/main" --jq .commit.sha)" = "$PUBLISH_TIP"').length - 1, 3,
+    'RECOVERY_MUST_STOP_IF_MAIN_ADVANCES_BEFORE_ASSET_PUBLISH_OR_FINAL_READBACK');
+  assert.match(job('trusted_main_cache_prime'), /inputs.recover_research_660 != true &&/,
+    'RECOVERY_MUST_NOT_LAUNCH_OPTIONAL_CACHE_WARMERS');
   assert.match(researchPublish, /\.merge_commit_sha == \$main and \.base.ref == "main"/);
   assert.match(researchPublish, /test "\$main_tree" = "\$head_tree"/);
   for (const name of ['select-checks', 'dependency-audit', 'architecture-contracts',
@@ -1816,6 +1840,25 @@ function changeJobInput(yaml, id, before, after) {
   assert.ok(block.includes(before), `MISSING_CACHE_INPUT:${id}`);
   return yaml.slice(0, start) + block.replace(before, after) + yaml.slice(end);
 }
+// This recovery input is intentionally narrower than a generic manual
+// publisher: any mismatch in the accepted merge, Ready run, artifact or
+// ancestry proof must prevent the publishing job from being considered safe.
+for (const [before, after, reason] of [
+  ['inputs.recover_research_660 == true)', 'true)', 'DISPATCH_GATE'],
+  ['.merge_base_commit.sha == $base', '.merge_base_commit.sha != $base', 'ANCESTRY'],
+  ['test "$head" = 8f912fa5e4ab69ee968ed77965b02f679cb1bda2',
+    'test -n "$head"', 'HEAD'],
+  ['test "$head_tree" = 9652f03674790ade9f1d3f6dfffc71d4b9fa31cb',
+    'test -n "$head_tree"', 'TREE'],
+  ['test "$run_id" = 46089314806', 'test -n "$run_id"', 'READY_RUN'],
+  ['test "$artifact_id" = 15239933703', 'test -n "$artifact_id"', 'ARTIFACT_ID'],
+  ['test "$artifact_digest" = sha256:f00fb3116e476d94cecab8ba11502f143f9e604c6a9710f9d88f82402ba1c0ac',
+    'test -n "$artifact_digest"', 'ARTIFACT_DIGEST'],
+  ['RESEARCH_RECOVERY_MAIN_ADVANCED', 'RECOVERY_STALE_MAIN_IGNORED', 'MAIN_ADVANCE'],
+]) assert.throws(() => validate(changeJobInput(source, 'publish_accepted_research_component', before, after), workflows),
+  `RESEARCH_660_RECOVERY_MUST_PRESERVE_${reason}`);
+assert.throws(() => validate(source.replace('inputs.recover_research_660 != true &&', 'true &&'), workflows),
+  'RESEARCH_RECOVERY_MUST_NOT_SPEND_WINDOWS_CACHE_SEED');
 // The two Host jobs must stay independent, preserve identical conservative
 // owner routing, and remain separately mandatory in the one required ci.
 for (const id of ['host_component_release_windows', 'host_controller_launcher_checks']) {
