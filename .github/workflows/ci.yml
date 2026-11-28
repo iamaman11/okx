@@ -120,7 +120,9 @@ jobs:
       reason: ${{ steps.classify.outputs.reason }}
       native_required: ${{ steps.classify.outputs.native_required }}
       native_proof: ${{ steps.classify.outputs.native_proof }}
-      component_scope: ${{ steps.proven_scope.outputs.scope }}
+      # A verified first-attempt Research artifact can narrow an identical
+      # merged main tree. Unverified source changes keep the conservative scope.
+      component_scope: ${{ steps.classify.outputs.component_scope || steps.proven_scope.outputs.scope }}
       research_only: ${{ steps.classify.outputs.research_only }}
       edge_required: ${{ steps.classify.outputs.edge_required }}
       draft_checks: ${{ steps.file_scope.outputs.draft_checks }}
@@ -345,6 +347,33 @@ jobs:
                     break
                   fi
                   if [[ "$merge_tree" =~ ^[0-9a-f]{40}$ && "$merge_tree" == "$head_tree" ]]; then
+                    # A Research protocol/service edit is conservatively full
+                    # on main because the Windows Cargo closure proof ran on
+                    # its PR. Inherit Research-only only from that exact,
+                    # successful first-attempt run AND its immutable component
+                    # artifact; never trust a candidate or a missing witness.
+                    if [[ "$scope" == full && '${{ steps.file_scope.outputs.manifest_candidate }}' == research ]] &&
+                       jq -e --argjson run "$run" --arg head "$head_sha" '
+                         [.[].jobs[]] as $jobs |
+                         all($jobs[]; .run_id == $run and .head_sha == $head and .run_attempt == 1) and
+                         all(["architecture-contracts", "dependency-audit", "cloudflare-mcp",
+                              "research-windows", "research-clippy-windows",
+                              "research-ipc-windows", "research-component-windows"][];
+                           . as $name | ([$jobs[] | select(.name == $name and .conclusion == "success")] | length) == 1)
+                       ' <<<"$jobs" >/dev/null; then
+                      if artifacts="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?per_page=100")" &&
+                         jq -e --arg name "okx-research-component-$head_sha" --arg head "$head_sha" --argjson run "$run" '
+                           .total_count == (.artifacts | length) and .total_count < 100 and
+                           ([.artifacts[] | select(.name == $name and .expired == false and
+                              .id > 0 and .size_in_bytes > 0 and (.digest | test("^sha256:[0-9a-f]{64}$")) and
+                              .workflow_run.id == $run and .workflow_run.repository_id == 1388071566 and
+                              .workflow_run.head_repository_id == 1388071566 and
+                              .workflow_run.head_sha == $head)] | length) == 1
+                         ' <<<"$artifacts" >/dev/null; then
+                        echo "component_scope=research" >> "$GITHUB_OUTPUT"
+                        echo "ACCEPTED_MAIN_COMPONENT_SCOPE=research; exact first-attempt PR component witness"
+                      fi
+                    fi
                     echo "build_required=false" >> "$GITHUB_OUTPUT"
                     echo "native_required=false" >> "$GITHUB_OUTPUT"
                     echo "reason=merged tree exactly matches successful PR head tree" >> "$GITHUB_OUTPUT"

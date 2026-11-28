@@ -367,7 +367,9 @@ def _self_test() -> None:
     scope_guards = re.findall(r'case "\$scope" in ([a-z|-]+)\)', selector)
     assert len(scope_guards) == 1, "CI_SCOPE_GUARD_MISSING_OR_AMBIGUOUS"
     assert set(scope_guards[0].split("|")) == expected_scopes, "CI_SCOPE_GUARD_DRIFT"
-    assert "component_scope: ${{ steps.proven_scope.outputs.scope }}" in workflow
+    assert "component_scope: ${{ steps.classify.outputs.component_scope || steps.proven_scope.outputs.scope }}" in workflow
+    assert "ACCEPTED_MAIN_COMPONENT_SCOPE=research" in selector
+    assert "steps.file_scope.outputs.manifest_candidate" in selector
     assert 'research_only: ${{ steps.classify.outputs.research_only }}' in workflow
     assert 'scope="${{ steps.proven_scope.outputs.scope }}"' in workflow
     assert "--filter-platform x86_64-pc-windows-msvc" in workflow

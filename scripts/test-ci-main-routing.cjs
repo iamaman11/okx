@@ -47,8 +47,12 @@ function checkAcceptedMainJqFixtures(yaml) {
     yaml.indexOf('            echo \'::error title=ACCEPTED_MAIN_READY_UNPROVEN'));
   const merged = block.match(/head_sha="\$\(jq -r --arg main "\$GITHUB_SHA" --arg repo "\$GITHUB_REPOSITORY" '([\s\S]*?)' <<<"\$prs_json"\)"/);
   const runs = block.match(/if ! candidates="[\s\S]*?--jq '([\s\S]*?)'\)"; then/);
-  const jobs = block.match(/if jq -e --argjson run "\$run" --arg head "\$head_sha" '([\s\S]*?)' <<<"\$jobs"/);
-  assert.ok(merged && runs && jobs, 'MAIN_REUSE_JQ_SOURCE_MISSING');
+  const jobPredicates = [...block.matchAll(/jq -e --argjson run "\$run" --arg head "\$head_sha" '([\s\S]*?)' <<<"\$jobs"/g)];
+  const jobs = jobPredicates[0];
+  const researchJobs = jobPredicates[1];
+  const researchArtifact = block.match(/jq -e --arg name "okx-research-component-\$head_sha" --arg head "\$head_sha" --argjson run "\$run" '([\s\S]*?)' <<<"\$artifacts"/);
+  assert.ok(merged && runs && jobs && researchJobs && researchArtifact,
+    'MAIN_REUSE_AND_COMPONENT_WITNESS_JQ_SOURCE_MISSING');
   const head = '9a0c5ba8d5d1207d3f647f7f744109ecdb015a2b';
   const main = 'eaeea8dcfdfe7d3d2c140a06191adffd51a87656';
   const repo = 'iamaman11/okx';
@@ -106,6 +110,54 @@ function checkAcceptedMainJqFixtures(yaml) {
   for (const list of altered)
     assert.equal(checkJobs(list),'false','FAKE_OR_SECOND_ATTEMPT_JOBS_REJECTED');
   assert.equal(checkJobs(acceptedJobs,99),'false','INCOMPLETE_JOB_PAGINATION_REJECTED');
+
+  // A green aggregate alone does NOT narrow a Research dependency candidate
+  // on main. Require the real Windows Research component job and its exact
+  // immutable first-attempt archive; otherwise retain the full scope.
+  const researchNames = ['architecture-contracts', 'dependency-audit', 'cloudflare-mcp',
+    'research-windows', 'research-clippy-windows', 'research-ipc-windows',
+    'research-component-windows'];
+  const researchReady = [...acceptedJobs, ...researchNames.map(name => ({
+    name,run_id:runId,head_sha:head,run_attempt:1,conclusion:'success'
+  }))];
+  function checkResearchJobs(list) {
+    return jq(researchJobs[1], [{total_count:list.length,jobs:list}],
+      '--argjson','run',String(runId),'--arg','head',head);
+  }
+  assert.equal(checkResearchJobs(researchReady),'true','EXACT_RESEARCH_READY_JOBS_ACCEPTED');
+  for (const invalid of [
+    researchReady.filter(x => x.name !== 'research-component-windows'),
+    researchReady.map(x => x.name === 'research-component-windows' ?
+      {...x,conclusion:'skipped'} : x),
+    [...researchReady, {...researchReady.at(-1)}],
+    researchReady.map(x => ({...x,run_attempt:2})),
+  ]) assert.equal(checkResearchJobs(invalid),'false','INCOMPLETE_RESEARCH_PROOF_REJECTED');
+
+  const acceptedArtifact = {id:15239933703,name:`okx-research-component-${head}`,expired:false,
+    size_in_bytes:1200,digest:`sha256:${'a'.repeat(64)}`,
+    workflow_run:{id:runId,repository_id:1388071566,
+      head_repository_id:1388071566,head_sha:head}};
+  function checkResearchArtifact(list,totalCount=list.length) {
+    return jq(researchArtifact[1], {total_count:totalCount,artifacts:list},
+      '--arg','name',acceptedArtifact.name,'--arg','head',head,
+      '--argjson','run',String(runId));
+  }
+  assert.equal(checkResearchArtifact([acceptedArtifact]),'true','RESEARCH_ARTIFACT_WITNESS_ACCEPTED');
+  for (const invalid of [
+    {...acceptedArtifact,expired:true},
+    {...acceptedArtifact,size_in_bytes:0},
+    {...acceptedArtifact,id:0},
+    {...acceptedArtifact,digest:'sha256:broken'},
+    {...acceptedArtifact,name:'unrelated'},
+    {...acceptedArtifact,workflow_run:{...acceptedArtifact.workflow_run,id:runId+1}},
+    {...acceptedArtifact,workflow_run:{...acceptedArtifact.workflow_run,head_sha:'0'.repeat(40)}},
+    {...acceptedArtifact,workflow_run:{...acceptedArtifact.workflow_run,repository_id:1}},
+  ]) assert.equal(checkResearchArtifact([invalid]),'false','UNTRUSTED_RESEARCH_ARTIFACT_REJECTED');
+  assert.equal(checkResearchArtifact([]),'false','MISSING_RESEARCH_ARCHIVE_REJECTED');
+  assert.equal(checkResearchArtifact([acceptedArtifact,acceptedArtifact]),'false',
+    'AMBIGUOUS_RESEARCH_ARCHIVE_REJECTED');
+  assert.equal(checkResearchArtifact([acceptedArtifact],5),'false',
+    'INCOMPLETE_RESEARCH_ARCHIVE_PAGINATION_REJECTED');
 }
 checkAcceptedMainJqFixtures(source);
 const windowsIpcSummary = String.raw`test result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`;
@@ -219,7 +271,7 @@ function validate(yaml, fileNames) {
   assert.match(classify, /^    name: select-checks$/m);
   assert.match(classify, /python3 -B scripts\/test_verify_host_component_release\.py/,
     'HOST_COMPONENT_STRICT_BYTE_NEGATIVE_TESTS_MUST_RUN_ON_FULL_BOOTSTRAP');
-  assert.match(classify, /component_scope: \$\{\{ steps.proven_scope.outputs.scope \}\}/);
+  assert.match(classify, /component_scope: \$\{\{ steps.classify.outputs.component_scope \|\| steps.proven_scope.outputs.scope \}\}/);
   assert.match(classify, /python3 -B scripts\/check_ci_native_scope\.py --github-plan/);
   assert.match(classify, /plan_args\+=\(--allow-dependency-candidate\)/);
   assert.match(classify, /if: github.event_name == 'pull_request' && github.event.pull_request.draft != true && steps.file_scope.outputs.manifest_candidate != 'none'/);
@@ -250,6 +302,9 @@ function validate(yaml, fileNames) {
       'MAIN_REUSE_SUCCESS_REQUIRED_JOB:' + name);
   }
   assert.match(classify, /ACCEPTED_MAIN_READY_UNPROVEN/, 'MAIN_REUSE_UNKNOWN_MUST_FAIL_CLOSED');
+  assert.match(classify, /ACCEPTED_MAIN_COMPONENT_SCOPE=research/, 'EXACT_RESEARCH_WITNESS_CAN_NARROW_MAIN');
+  assert.match(classify, /steps.file_scope.outputs.manifest_candidate \}\}' == research/, 'PR_DEPENDENCY_CANDIDATE_REQUIRED_FOR_MAIN_SCOPE');
+  assert.match(classify, /\.workflow_run.head_repository_id == 1388071566/, 'RESEARCH_ARCHIVE_EXACT_REPO_WITNESS');
   assert.match(classify, /for lookup_attempt in 1 2 3; do/, 'MAIN_REUSE_BOUNDED_INDEX_RETRY');
   assert.match(classify, /engine\|host-controller\|host-launcher\) edge_required="\$\{\{ steps\.file_scope\.outputs\.edge_changed \}\}"/);
   assert.match(classify, /research\|research-host\) edge_required=true/,
@@ -1261,7 +1316,7 @@ for (const [old, replacement, reason] of [
     'SINGLE_CI_CANNOT_IGNORE_' + reason);
 }
 assert.throws(() => validate(source.replace('name: select-checks', 'name: impact-only'), workflows));
-assert.throws(() => validate(source.replace('component_scope: ${{ steps.proven_scope.outputs.scope }}',
+assert.throws(() => validate(source.replace('component_scope: ${{ steps.classify.outputs.component_scope || steps.proven_scope.outputs.scope }}',
   'component_scope: ${{ steps.file_scope.outputs.scope }}'), workflows));
 assert.throws(() => validate(source.replace('if [[ -n \'${{ steps.cargo_closure.outputs.scope }}\' ]]; then',
   'if [[ -n \'${{ steps.file_scope.outputs.scope }}\' ]]; then'), workflows));
