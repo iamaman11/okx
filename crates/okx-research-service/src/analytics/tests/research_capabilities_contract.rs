@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn graph_backtest_capabilities_follow_the_same_typed_catalog_as_market_and_compiler() {
+    let capabilities = research_capabilities();
+    let contracts = okx_analysis::query_plan::series_operation_contracts();
+    let supported = contracts
+        .iter()
+        .filter(|contract| contract.graph_backtest_supported)
+        .map(|contract| contract.op)
+        .collect::<Vec<_>>();
+    let unavailable = contracts
+        .iter()
+        .filter(|contract| !contract.graph_backtest_supported)
+        .map(|contract| contract.op)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        capabilities["graph_backtest"]["supported_operators"],
+        json!(supported)
+    );
+    assert_eq!(
+        capabilities["graph_backtest"]["unavailable_operators"],
+        json!(unavailable)
+    );
+    assert_eq!(supported.len(), 20);
+    assert_eq!(
+        unavailable,
+        vec![okx_research_protocol::strategy_contract::SeriesOp::ForwardReturnLabel]
+    );
+    assert_eq!(capabilities["graph_backtest"]["trading_authority"], false);
+}
+
+#[test]
 fn t10_capabilities_separate_memory_permit_from_observed_rss_and_full_slo() {
     let caps = research_capabilities();
     assert_eq!(caps["limits"]["research_memory_total_mib"], 4096);
