@@ -743,7 +743,9 @@ impl Jobs {
                      FROM research_jobs ORDER BY created_ms DESC,id DESC LIMIT ?1",
                 )
                 .map_err(|e| e.to_string())?;
-            let mapped = statement.query_map([size], row).map_err(|e| e.to_string())?;
+            let mapped = statement
+                .query_map([size], row)
+                .map_err(|e| e.to_string())?;
             mapped
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| e.to_string())?
