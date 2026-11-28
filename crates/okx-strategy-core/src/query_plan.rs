@@ -2779,25 +2779,43 @@ mod series_source_contract_tests {
         assert_eq!(spot.availability, DataAvailability::CheckedPerRequest);
         assert!(!spot.publication_time_verified);
         assert_ne!(spot.instrument, peer.instrument);
-        assert_ne!(spot.instrument.quote_currency, peer.instrument.quote_currency);
+        assert_ne!(
+            spot.instrument.quote_currency,
+            peer.instrument.quote_currency
+        );
         assert_eq!(spot.range, peer.range);
 
         let swap = "BTC-USD-SWAP";
         let volume = SeriesSource::Volume.bind(swap, range, 0).unwrap();
         let oi = SeriesSource::OpenInterest.bind(swap, range, 0).unwrap();
         let funding = SeriesSource::FundingRate.bind(swap, range, 0).unwrap();
-        assert_eq!(volume.currency_basis, SeriesCurrencyBasis::NativeVolumeUnresolved);
-        assert_eq!(oi.currency_basis, SeriesCurrencyBasis::ContractsRequireReference);
-        assert_eq!(funding.currency_basis, SeriesCurrencyBasis::DimensionlessRate);
+        assert_eq!(
+            volume.currency_basis,
+            SeriesCurrencyBasis::NativeVolumeUnresolved
+        );
+        assert_eq!(
+            oi.currency_basis,
+            SeriesCurrencyBasis::ContractsRequireReference
+        );
+        assert_eq!(
+            funding.currency_basis,
+            SeriesCurrencyBasis::DimensionlessRate
+        );
         assert_eq!(oi.instrument.quote_currency, "USD");
-        assert_eq!(oi.availability, DataAvailability::HistoricalPublicationTimeUnverified);
+        assert_eq!(
+            oi.availability,
+            DataAvailability::HistoricalPublicationTimeUnverified
+        );
         assert!(!oi.publication_time_verified);
         assert!(!funding.publication_time_verified);
 
         for source in [SeriesSource::OpenInterest, SeriesSource::FundingRate] {
             assert_eq!(
                 source.bind("BTC-USDT", range, 0).unwrap_err(),
-                format!("composition.sources.{}:UNSUPPORTED_PRODUCT", source.as_str())
+                format!(
+                    "composition.sources.{}:UNSUPPORTED_PRODUCT",
+                    source.as_str()
+                )
             );
         }
         for invalid in ["btc-usdt", "BTC", "BTC-BTC", "BTC-USDT-DEC", "BTC--SWAP"] {
@@ -2821,7 +2839,12 @@ mod series_source_contract_tests {
         }))
         .unwrap();
         let base = QueryPlan::compile(
-            vec![], range, vec![Operator::Returns], BTreeMap::new(), vec![], None,
+            vec![],
+            range,
+            vec![Operator::Returns],
+            BTreeMap::new(),
+            vec![],
+            None,
         )
         .unwrap()
         .with_composition(Some(graph.clone()))
@@ -2845,9 +2868,11 @@ mod series_source_contract_tests {
         assert_eq!(ports[0].range, range);
         let mut forged = serde_json::to_value(&checked).unwrap();
         forged["universe"][0] = json!("BTC-USDT");
-        assert_eq!(
-            serde_json::from_value::<QueryPlan>(forged).unwrap_err(),
-            "composition.sources.open_interest:UNSUPPORTED_PRODUCT"
+        assert!(
+            serde_json::from_value::<QueryPlan>(forged)
+                .unwrap_err()
+                .to_string()
+                .contains("composition.sources.open_interest:UNSUPPORTED_PRODUCT")
         );
         assert_eq!(
             QueryPlan::compile(
