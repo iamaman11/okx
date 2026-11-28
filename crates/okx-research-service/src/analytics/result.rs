@@ -425,7 +425,20 @@ impl AnalyticsService {
             return Err("RESULT_EXPIRED".into());
         }
         let artifact = j.artifact.ok_or("RESULT_NOT_READY")?;
-        if j.state != jobs::State::Completed {
+        // A batch where every instrument failed retains its immutable
+        // diagnostic root. Only its top-level summary/export can be read:
+        // failed jobs do not acquire a tradable or re-playable result.
+        let failed_batch_diagnostic = j.state == jobs::State::Failed
+            && matches!(
+                j.error.as_deref(),
+                Some("RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED" | "RESEARCH_BATCH_SOURCE_RETRYABLE")
+            )
+            && matches!(
+                view,
+                ResearchResultView::Summary | ResearchResultView::Export
+            )
+            && cursor.is_none();
+        if j.state != jobs::State::Completed && !failed_batch_diagnostic {
             return Err("RESULT_NOT_READY".into());
         }
         let signing_key = self.jobs.cursor_signing_key()?;
@@ -453,6 +466,16 @@ impl AnalyticsService {
         if let Some(id) = value.get("result_artifact").and_then(Value::as_str) {
             leaf_artifact = id.to_owned();
             value = read_verified_result(&self.artifacts, id)?;
+        }
+        if failed_batch_diagnostic
+            && (value["kind"] != "research_batch"
+                || value["summary"]["completed"] != 0
+                || value["total_rows"].as_u64().is_none_or(|n| n == 0 || n > 8)
+                || value["summary"]["failed"] != value["total_rows"]
+                || value["instruments"].as_array().map_or(0, Vec::len) as u64
+                    != value["total_rows"].as_u64().unwrap_or(0))
+        {
+            return Err("RESULT_NOT_READY".into());
         }
         let batch = value.get("instruments").and_then(Value::as_array).is_some();
         let instrument_index = signed.as_ref().and_then(|s| s.instrument).or(selector);
@@ -502,7 +525,9 @@ impl AnalyticsService {
                 "code_version":value.get("code_version"),
                 "producer":value.get("producer"),
                 "experiment_artifact":value.get("experiment_artifact"),
-                "read_data_via":["trades","equity"],"side_effects":"none"
+                "batch_summary":failed_batch_diagnostic.then(|| value.get("summary")).flatten(),
+                "read_data_via":if failed_batch_diagnostic {vec!["summary"]} else {vec!["trades","equity"]},
+                "side_effects":"none"
             }));
         }
         let mut metadata = json!({

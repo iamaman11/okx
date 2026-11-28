@@ -805,7 +805,11 @@ impl Jobs {
         let updated = db
             .execute(
                 "UPDATE research_jobs SET state=?2,
-                    progress=CASE WHEN ?2='completed' THEN 100 WHEN ?2='running' AND candidate_progress IS NULL THEN 10 ELSE progress END,
+                    progress=CASE
+                      WHEN ?2='completed' AND (candidate_progress IS NULL OR
+                           json_extract(candidate_progress,'$.phase')='publishing') THEN 100
+                      WHEN ?2='running' AND candidate_progress IS NULL THEN 10
+                      ELSE progress END,
                     artifact=?3,error=?4
                  WHERE id=?1 AND state IN ('queued','running')",
                 params![id, state.wire(), artifact, error],

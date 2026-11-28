@@ -37,6 +37,194 @@ pub(super) fn service_with_source(
     let service = AnalyticsService::new(root.clone(), source).unwrap();
     (root, service)
 }
+
+async fn cached_two_instrument_grid(complete_btc: bool) -> (PathBuf, AnalyticsService) {
+    let (root, service) = service();
+    for instrument in ["BTC-USDT", "ETH-USDT"] {
+        let bars = if complete_btc && instrument == "BTC-USDT" {
+            (0..200)
+                .map(|i| {
+                    let open = 100.0 + i as f64 * 0.2;
+                    replay::Bar {
+                        time: i * 60_000,
+                        open,
+                        high: open + 2.0,
+                        low: open - 1.0,
+                        close: open + 1.0,
+                        volume: 10.0,
+                        funding_rate: None,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        service
+            .sources
+            .cache
+            .load(
+                cache::SourceKey {
+                    source: "candles".into(),
+                    instrument: instrument.into(),
+                    timeframe_ms: 60_000,
+                    start_ms: 0,
+                    end_ms: 12_000_000,
+                    closed_only: true,
+                    schema: 1,
+                },
+                || async { Ok(bars) },
+            )
+            .await
+            .unwrap();
+    }
+    (root, service)
+}
+
+fn two_instrument_grid_request(key: &str) -> ResearchRequest {
+    ResearchRequest::Grid {
+        idempotency_key: key.into(),
+        instruments: vec!["BTC-USDT".into(), "ETH-USDT".into()],
+        timeframe_ms: 60_000,
+        start_ms: 0,
+        end_ms: 12_000_000,
+        strategy_id: "ema_cross_v1".into(),
+        variants: [3, 4]
+            .into_iter()
+            .map(|slow| okx_analysis::operators::EmaParameters { fast: 2, slow }.into())
+            .collect(),
+        costs: ResearchCosts {
+            maker_fee_bps: 0.0,
+            taker_fee_bps: 1.0,
+            slippage_bps: 0.0,
+            funding_mode: FundingMode::ZeroAssumption,
+        },
+        data_mode: ResearchDataMode::Counterfactual,
+        seed: 7,
+    }
+}
+
+async fn terminal_grid_job(service: &AnalyticsService, request: ResearchRequest) -> jobs::Job {
+    let id = service.research(request).await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let job = service.jobs.get(&id).unwrap();
+            if matches!(job.state, jobs::State::Completed | jobs::State::Failed) {
+                break job;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn c3_all_failed_grid_does_not_claim_completion_and_retains_read_only_diagnostics() {
+    let (root, service) = cached_two_instrument_grid(false).await;
+    let request = two_instrument_grid_request("c3-all-instruments-failed");
+    assert!(request.valid());
+    let job = terminal_grid_job(&service, request.clone()).await;
+    assert_eq!(job.state, jobs::State::Failed);
+    assert_eq!(
+        job.error.as_deref(),
+        Some("RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED")
+    );
+    assert!(job.progress < 100);
+    let candidates = job.candidate_progress.unwrap();
+    assert_eq!(candidates.completed_candidates, 0);
+    assert_eq!(candidates.total_candidates, 4);
+    assert_eq!(candidates.completed_work_units, 0);
+    assert_eq!(candidates.phase, candidate_progress::Phase::Preparing);
+    let artifact = job.artifact.unwrap();
+    let root_evidence: Value = service.artifacts.read_evidence_json(&artifact).unwrap();
+    assert_eq!(root_evidence["summary"]["completed"], 0);
+    assert_eq!(root_evidence["summary"]["failed"], 2);
+    assert_eq!(root_evidence["summary"]["quality"], "partial");
+    assert!(
+        root_evidence["instruments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| {
+                row["state"] == "failed" && row["reason_code"] == "CANDLE_RANGE_INCOMPLETE"
+            })
+    );
+    assert!(service.jobs.diagnostic_readback(&job.id)["result_ref"].is_null());
+
+    let read = |view| ResearchRequest::Result {
+        job_id: job.id.clone(),
+        cursor: None,
+        limit: 20,
+        view,
+    };
+    let summary = service
+        .research(read(ResearchResultView::Summary))
+        .await
+        .unwrap();
+    assert_eq!(summary["metadata"]["summary"]["failed"], 2);
+    assert_eq!(summary["returned_rows"], 2);
+    let export = service
+        .research(read(ResearchResultView::Export))
+        .await
+        .unwrap();
+    assert_eq!(export["batch_summary"]["completed"], 0);
+    assert_eq!(export["integrity"]["counts_verified"], true);
+    assert_eq!(export["read_data_via"], json!(["summary"]));
+    for view in [
+        ResearchResultView::Trades,
+        ResearchResultView::Equity,
+        ResearchResultView::Variants,
+    ] {
+        assert_eq!(
+            service.research(read(view)).await.unwrap_err(),
+            "RESULT_NOT_READY"
+        );
+    }
+    let replayed = service.research(request).await.unwrap();
+    assert_eq!(replayed["id"], job.id);
+    assert_eq!(replayed["state"], "failed");
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn c3_mixed_grid_retains_partial_quality_without_inventing_candidate_progress() {
+    let (root, service) = cached_two_instrument_grid(true).await;
+    let job = terminal_grid_job(
+        &service,
+        two_instrument_grid_request("c3-one-instrument-failed"),
+    )
+    .await;
+    assert_eq!(job.state, jobs::State::Completed);
+    assert!(
+        job.progress < 100,
+        "missing candidates must not become 100% computed"
+    );
+    let candidates = job.candidate_progress.unwrap();
+    assert_eq!(candidates.completed_candidates, 2);
+    assert_eq!(candidates.total_candidates, 4);
+    assert_eq!(candidates.completed_work_units, 7);
+    let result = service
+        .research(ResearchRequest::Result {
+            job_id: job.id,
+            cursor: None,
+            limit: 20,
+            view: ResearchResultView::Summary,
+        })
+        .await
+        .unwrap();
+    assert_eq!(result["metadata"]["summary"]["quality"], "partial");
+    assert_eq!(result["metadata"]["summary"]["completed"], 1);
+    assert_eq!(result["metadata"]["summary"]["failed"], 1);
+    assert_eq!(result["rows"][0]["state"], "completed");
+    assert_eq!(result["rows"][1]["state"], "failed");
+    assert_eq!(result["rows"][1]["reason_code"], "CANDLE_RANGE_INCOMPLETE");
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
 // market() promises a bounded synchronous response, NOT completion within
 // two seconds under arbitrary simultaneous test CPU load. A queued/running
 // job is a valid response; wait for its original durable terminal state,
