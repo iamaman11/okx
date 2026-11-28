@@ -18,6 +18,14 @@ the same live Research connection through the existing Durable Object.
   and a still-current Research WebSocket before reporting process proof `PASS`.
   A timeout, missing credential, rotation, changed generation, or mismatch
   remains `partial`; no persistent positive attestation is cached.
+- Edge owns the **2.5-second** one-use challenge expiry. Native CONTROL allows
+  up to **3 seconds** of Windows/Edge wall-clock difference when checking the
+  transmitted absolute deadline, matching Edge's existing observed-timestamp
+  allowance. This is not extra time to earn `PASS`: Edge still discards an
+  observation outside its own pending nonce/timer. Native diagnostics separate
+  malformed challenge fields (`ATTESTOR_CHALLENGE_INVALID`), implausibly far
+  future deadlines (`ATTESTOR_CHALLENGE_CLOCK_SKEW`), and expired deadlines
+  (`ATTESTOR_CHALLENGE_EXPIRED`) without logging raw nonces or credentials.
 - The reported SHA represents CONTROL's independently observed selected binary
   **file**, not an in-memory hash of the executing process. CONTROL and Research
   run in the same Windows security context: a distinct credential protects
