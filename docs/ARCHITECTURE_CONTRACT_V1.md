@@ -1,6 +1,6 @@
-# Current ownership contract — one Engine (#448)
+# Ownership contract — Engine / Research / CONTROL / Edge
 
-The **only normative specification** is [issue #448](https://github.com/iamaman11/okx/issues/448); [issue #449](https://github.com/iamaman11/okx/issues/449) is the sole implementation cursor. Issue #398 and [older architecture](history/ARCHITECTURE_CONTRACT_V1-before-398.md) are historical evidence, not competing product requirements. This page documents current ownership boundaries, not proof of physical acceptance.
+The **current normative specification** is [#537](https://github.com/iamaman11/okx/issues/537), with Research operations in [#684](https://github.com/iamaman11/okx/issues/684), independent ownership in [#580](https://github.com/iamaman11/okx/issues/580), and CI in [#599](https://github.com/iamaman11/okx/issues/599). Earlier #448/#449, #398, and [older architecture](history/ARCHITECTURE_CONTRACT_V1-before-398.md) are historical evidence, not competing plans. This page is a source map, not proof of physical acceptance.
 
 **Worker:** OAuth and typed MCP public surface: six non-trade tools plus seven independently annotated `trade.*` operations (13 total), with central persistent governance revisions and one global RiskBook; one native-result projection. Worker neither submits exchange orders nor offers arbitrary RPC/SQL.
 

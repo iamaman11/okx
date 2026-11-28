@@ -72,6 +72,14 @@ pub struct EmaKernel {
     slow: Option<f64>,
     samples: usize,
 }
+
+/// The same EMA recurrence feeds registered strategies and composable series.
+/// A first observed value seeds the state; warmup is controlled by the caller.
+pub(crate) fn ema_update(previous: Option<f64>, value: f64, period: usize) -> f64 {
+    previous.map_or(value, |prior| {
+        prior + 2.0 / (period + 1) as f64 * (value - prior)
+    })
+}
 impl EmaKernel {
     pub fn new(params: EmaParameters) -> Result<Self, String> {
         Ok(Self {
@@ -85,12 +93,8 @@ impl EmaKernel {
         if !close.is_finite() || close <= 0.0 {
             return Err("invalid close".into());
         }
-        self.fast = Some(self.fast.map_or(close, |v| {
-            v + 2.0 / (self.params.fast + 1) as f64 * (close - v)
-        }));
-        self.slow = Some(self.slow.map_or(close, |v| {
-            v + 2.0 / (self.params.slow + 1) as f64 * (close - v)
-        }));
+        self.fast = Some(ema_update(self.fast, close, self.params.fast));
+        self.slow = Some(ema_update(self.slow, close, self.params.slow));
         self.samples += 1;
         Ok((self.samples >= self.params.slow).then(|| {
             if self.fast > self.slow {

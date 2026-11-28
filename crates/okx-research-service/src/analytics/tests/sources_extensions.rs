@@ -678,6 +678,7 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
                     version: okx_analysis::query_plan::COMPOSITION_VERSION.into(),
                     steps: vec![
                         okx_analysis::query_plan::SeriesStep {
+                            factor: None,
                             id: "r1".into(),
                             op: okx_analysis::query_plan::SeriesOp::ReturnsSeries,
                             input: "close".into(),
@@ -687,6 +688,7 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
                             other: None,
                         },
                         okx_analysis::query_plan::SeriesStep {
+                            factor: None,
                             id: "w1".into(),
                             op: okx_analysis::query_plan::SeriesOp::RollingMean,
                             input: "r1".into(),
