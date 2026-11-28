@@ -28,7 +28,10 @@ fn graph_backtest_capabilities_follow_the_same_typed_catalog_as_market_and_compi
         .filter(|contract| contract.graph_backtest_supported)
         .map(|contract| contract.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(capabilities["graph_backtest"]["sources"], json!(graph_sources));
+    assert_eq!(
+        capabilities["graph_backtest"]["sources"],
+        json!(graph_sources)
+    );
     assert_eq!(graph_sources, vec!["close"]);
     assert_eq!(
         unavailable,

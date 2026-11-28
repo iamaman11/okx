@@ -949,8 +949,7 @@ impl CheckedComposition {
             {
                 return Err(format!("{path}.id:INVALID"));
             }
-            if SeriesSource::parse(&step.id).is_some() || known.contains_key(&step.id)
-            {
+            if SeriesSource::parse(&step.id).is_some() || known.contains_key(&step.id) {
                 return Err(format!("{path}.id:DUPLICATE"));
             }
             let (input_unit, parent_depth) = match SeriesSource::parse(&step.input) {
@@ -2566,7 +2565,10 @@ impl SeriesSource {
 }
 
 pub fn series_source_contracts() -> Vec<SeriesSourceContract> {
-    SERIES_SOURCES.into_iter().map(SeriesSource::contract).collect()
+    SERIES_SOURCES
+        .into_iter()
+        .map(SeriesSource::contract)
+        .collect()
 }
 
 #[cfg(test)]
@@ -2579,9 +2581,18 @@ mod series_source_contract_tests {
         let contracts = series_source_contracts();
         assert_eq!(contracts.len(), 7);
         assert_eq!(
-            contracts.iter().map(|contract| contract.id.as_str()).collect::<Vec<_>>(),
+            contracts
+                .iter()
+                .map(|contract| contract.id.as_str())
+                .collect::<Vec<_>>(),
             vec![
-                "open", "high", "low", "close", "volume", "open_interest", "funding_rate"
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "open_interest",
+                "funding_rate"
             ]
         );
         let ids = contracts
@@ -2615,7 +2626,10 @@ mod series_source_contract_tests {
         assert_eq!(eligible, vec![SeriesSource::Close]);
         for id in [SeriesSource::OpenInterest, SeriesSource::FundingRate] {
             let source = id.contract();
-            assert_eq!(source.availability, DataAvailability::HistoricalPublicationTimeUnverified);
+            assert_eq!(
+                source.availability,
+                DataAvailability::HistoricalPublicationTimeUnverified
+            );
             assert_eq!(source.scope, SeriesSourceScope::SwapOnlySameInstrument);
             assert!(!source.graph_backtest_supported);
         }
@@ -2629,7 +2643,10 @@ mod series_source_contract_tests {
         );
         let encoded = serde_json::to_value(SeriesSource::FundingRate.contract()).unwrap();
         assert_eq!(encoded["id"], "funding_rate");
-        assert_eq!(encoded["time_basis"], "realized_funding_event_time_not_publication_time");
+        assert_eq!(
+            encoded["time_basis"],
+            "realized_funding_event_time_not_publication_time"
+        );
     }
 
     #[test]

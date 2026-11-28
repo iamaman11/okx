@@ -75,10 +75,12 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
     );
     assert_eq!(
         capabilities["composition"]["input_sources"],
-        serde_json::json!(registered_sources
-            .iter()
-            .map(|source| source.id.as_str())
-            .collect::<Vec<_>>())
+        serde_json::json!(
+            registered_sources
+                .iter()
+                .map(|source| source.id.as_str())
+                .collect::<Vec<_>>()
+        )
     );
     for contract in registered_sources {
         assert_eq!(
