@@ -35,7 +35,13 @@ const FRAME_SCHEMA: &str = "okx.control-attestor.frame/v1";
 const ATTESTOR_URL: &str = "wss://okx-cloudflare-mcp.okx-794.workers.dev/attestor";
 const MAX_FRAME_BYTES: usize = 8192;
 const MAX_CHALLENGES_PER_SESSION: usize = 128;
-const MAX_CHALLENGE_FUTURE_MS: u64 = 3000;
+// Edge owns the actual 2.5-second challenge timer. Its response validator
+// already allows 3 seconds of Windows/Edge wall-clock skew; CONTROL must use
+// that same allowance rather than rejecting a live challenge when Windows is
+// only ~500 ms behind Edge (the previous 3-second future bound).
+const EDGE_CHALLENGE_TTL_MS: u64 = 2500;
+const MAX_CLOCK_SKEW_MS: u64 = 3000;
+const MAX_CHALLENGE_FUTURE_MS: u64 = EDGE_CHALLENGE_TTL_MS + MAX_CLOCK_SKEW_MS;
 // Research's fresh installed-image proof hashes the executable on every
 // observation. Allow a slow disk read within Edge's 2.5-second challenge,
 // leaving 700 ms for socket delivery and independent Edge validation.
@@ -155,10 +161,17 @@ impl Challenge {
             || self.session_id != session_id
             || self.connection_generation != generation
             || self.research_connection_generation == 0
-            || self.deadline_ms <= now_ms
-            || self.deadline_ms.saturating_sub(now_ms) > MAX_CHALLENGE_FUTURE_MS
         {
             return Err("ATTESTOR_CHALLENGE_INVALID");
+        }
+        // The authenticated Edge Durable Object alone decides whether the
+        // challenge is still live. These local wall-clock checks only reject
+        // implausible frames without imposing a tighter skew bound than Edge.
+        if self.deadline_ms.saturating_add(MAX_CLOCK_SKEW_MS) <= now_ms {
+            return Err("ATTESTOR_CHALLENGE_EXPIRED");
+        }
+        if self.deadline_ms.saturating_sub(now_ms) > MAX_CHALLENGE_FUTURE_MS {
+            return Err("ATTESTOR_CHALLENGE_CLOCK_SKEW");
         }
         Ok(())
     }
@@ -327,7 +340,11 @@ async fn run_session(
                 }
                 let status = request_owner_observation(requests, STATUS_TIMEOUT).await?;
                 let observed_at_ms = unix_millis()?;
-                if observed_at_ms >= challenge.deadline_ms {
+                // Compare with the same cross-host skew allowance used by
+                // Edge. Its independent 2.5-second timer and pending nonce
+                // still reject a late observation, even if CONTROL's local
+                // wall clock is ahead of Edge's.
+                if observed_at_ms >= challenge.deadline_ms.saturating_add(MAX_CLOCK_SKEW_MS) {
                     return Err("ATTESTOR_CHALLENGE_EXPIRED");
                 }
                 send_frame(&mut sender, OutgoingFrame::ResearchObservation {
@@ -637,7 +654,7 @@ mod tests {
         Challenge {
             request_id: "att_0123456789abcdef".into(),
             nonce: "nonce_0123456789abcdef".into(),
-            session_id: "session_0123456789abcdef".into(),
+            session_id: "control_0123456789abcdef".into(),
             connection_generation: 7,
             research_session_id: "session_1234567890abcdef".into(),
             research_connection_generation: 9,
@@ -650,20 +667,89 @@ mod tests {
         let now = 1_800_000_000_000;
         let correct = valid_challenge(now);
         assert!(correct.validate(&correct.session_id, 7, now).is_ok());
-        assert!(correct.validate(&correct.session_id, 8, now).is_err());
-        assert!(correct.validate("session_foreign00000000", 7, now).is_err());
+        assert_eq!(
+            correct.validate(&correct.session_id, 8, now),
+            Err("ATTESTOR_CHALLENGE_INVALID")
+        );
+        assert_eq!(
+            correct.validate("control_foreign00000000", 7, now),
+            Err("ATTESTOR_CHALLENGE_INVALID")
+        );
         let mut stale = correct.clone();
-        stale.deadline_ms = now;
-        assert!(stale.validate(&stale.session_id, 7, now).is_err());
+        stale.deadline_ms = now - MAX_CLOCK_SKEW_MS;
+        assert_eq!(
+            stale.validate(&stale.session_id, 7, now),
+            Err("ATTESTOR_CHALLENGE_EXPIRED")
+        );
         let mut far_future = correct.clone();
         far_future.deadline_ms = now + MAX_CHALLENGE_FUTURE_MS + 1;
-        assert!(far_future.validate(&far_future.session_id, 7, now).is_err());
+        assert_eq!(
+            far_future.validate(&far_future.session_id, 7, now),
+            Err("ATTESTOR_CHALLENGE_CLOCK_SKEW")
+        );
         let mut no_research_generation = correct.clone();
         no_research_generation.research_connection_generation = 0;
         assert!(
             no_research_generation
                 .validate(&no_research_generation.session_id, 7, now)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn edge_challenge_accepts_bounded_bidirectional_host_clock_skew() {
+        let edge_issued_at_ms = 1_800_000_000_000;
+        let challenge = valid_challenge(edge_issued_at_ms);
+        assert_eq!(
+            challenge.deadline_ms - edge_issued_at_ms,
+            EDGE_CHALLENGE_TTL_MS
+        );
+
+        // Windows 3 seconds behind or ahead of Edge must not invalidate an
+        // otherwise authenticated, freshly issued challenge. Edge's own
+        // pending nonce/timer remains the authoritative freshness gate.
+        assert!(
+            challenge
+                .validate(
+                    &challenge.session_id,
+                    7,
+                    edge_issued_at_ms - MAX_CLOCK_SKEW_MS
+                )
+                .is_ok()
+        );
+        assert!(
+            challenge
+                .validate(
+                    &challenge.session_id,
+                    7,
+                    edge_issued_at_ms + MAX_CLOCK_SKEW_MS
+                )
+                .is_ok()
+        );
+        assert!(
+            challenge
+                .validate(
+                    &challenge.session_id,
+                    7,
+                    challenge.deadline_ms + MAX_CLOCK_SKEW_MS - 1
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            challenge.validate(
+                &challenge.session_id,
+                7,
+                edge_issued_at_ms - MAX_CLOCK_SKEW_MS - 1
+            ),
+            Err("ATTESTOR_CHALLENGE_CLOCK_SKEW")
+        );
+        assert_eq!(
+            challenge.validate(
+                &challenge.session_id,
+                7,
+                challenge.deadline_ms + MAX_CLOCK_SKEW_MS
+            ),
+            Err("ATTESTOR_CHALLENGE_EXPIRED")
         );
     }
 
