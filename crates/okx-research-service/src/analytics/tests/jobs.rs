@@ -19,7 +19,8 @@ fn research_catalog_lists_bounded_keyset_pages_with_tied_times_and_existing_inde
     {
         let db = jobs.db.lock().unwrap();
         // Identical timestamps force deterministic ID tie-breaking.
-        db.execute("UPDATE research_jobs SET created_ms=1000", []).unwrap();
+        db.execute("UPDATE research_jobs SET created_ms=1000", [])
+            .unwrap();
         db.execute(
             "UPDATE research_jobs SET state='completed',artifact=?2 WHERE id=?1",
             params![&ids[3], format!("sha256:{}", "c".repeat(64))],
@@ -33,7 +34,8 @@ fn research_catalog_lists_bounded_keyset_pages_with_tied_times_and_existing_inde
         db.execute(
             "UPDATE research_jobs SET state='failed',error='VENUE_DETAIL_UNSAFE' WHERE id=?1",
             [&ids[0]],
-        ).unwrap();
+        )
+        .unwrap();
         let plan: Vec<String> = db
             .prepare(
                 "EXPLAIN QUERY PLAN SELECT id,state,created_ms,artifact,decision_artifact,pinned,error
@@ -46,7 +48,8 @@ fn research_catalog_lists_bounded_keyset_pages_with_tied_times_and_existing_inde
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert!(
-            plan.iter().any(|line| line.contains("idx_research_jobs_diagnostics_recent")),
+            plan.iter()
+                .any(|line| line.contains("idx_research_jobs_diagnostics_recent")),
             "unexpected SQLite plan: {plan:?}"
         );
     }
@@ -75,9 +78,18 @@ fn research_catalog_lists_bounded_keyset_pages_with_tied_times_and_existing_inde
     assert_eq!(complete["jobs"][6]["state"], "failed");
     assert!(complete["jobs"][6].get("reason_code").is_none());
     assert_eq!(jobs.list(0, None).unwrap_err(), "RESEARCH_LIST_LIMIT:1..50");
-    assert_eq!(jobs.list(51, None).unwrap_err(), "RESEARCH_LIST_LIMIT:1..50");
-    assert_eq!(jobs.list(2, Some(&"f".repeat(64))).unwrap_err(), "INVALID_CURSOR");
-    assert_eq!(jobs.list(2, Some(&"A".repeat(64))).unwrap_err(), "INVALID_CURSOR");
+    assert_eq!(
+        jobs.list(51, None).unwrap_err(),
+        "RESEARCH_LIST_LIMIT:1..50"
+    );
+    assert_eq!(
+        jobs.list(2, Some(&"f".repeat(64))).unwrap_err(),
+        "INVALID_CURSOR"
+    );
+    assert_eq!(
+        jobs.list(2, Some(&"A".repeat(64))).unwrap_err(),
+        "INVALID_CURSOR"
+    );
 }
 
 #[test]
@@ -87,14 +99,23 @@ fn annotated_catalog_fifty_row_request_stays_under_edge_budget_without_skipping_
     for i in 0..55 {
         let id = format!("{i:064x}");
         jobs.enqueue(format!("dense-key-{i}"), id.clone()).unwrap();
-        jobs.update(&id, State::Completed, Some(format!("sha256:{}", "a".repeat(64))), None)
-            .unwrap();
+        jobs.update(
+            &id,
+            State::Completed,
+            Some(format!("sha256:{}", "a".repeat(64))),
+            None,
+        )
+        .unwrap();
         expected.insert(id);
     }
-    jobs.db.lock().unwrap().execute(
-        "UPDATE research_jobs SET created_ms=1234,pinned=1,decision_artifact=?1",
-        [format!("sha256:{}", "b".repeat(64))],
-    ).unwrap();
+    jobs.db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE research_jobs SET created_ms=1234,pinned=1,decision_artifact=?1",
+            [format!("sha256:{}", "b".repeat(64))],
+        )
+        .unwrap();
     let mut cursor = None;
     let mut observed = std::collections::BTreeSet::new();
     for _ in 0..6 {
@@ -169,7 +190,8 @@ fn decision_backfill_has_exact_seven_day_boundary_and_is_idempotent() {
                 "UPDATE research_jobs SET state='completed',artifact='sha256:result',
                  decision_artifact='sha256:decision',created_ms=?2,pinned=0 WHERE id=?1",
                 params![id, instant],
-            ).unwrap();
+            )
+            .unwrap();
         }
         let fixed_now = cutoff + 7 * 86_400_000;
         // Equality is expired: require_decision_result rejects expiry <= now.

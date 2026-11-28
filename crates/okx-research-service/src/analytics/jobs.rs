@@ -647,6 +647,20 @@ impl Jobs {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         Self::read(&db, id)?.ok_or("JOB_NOT_FOUND".into())
     }
+    #[cfg(test)]
+    pub(crate) fn set_created_ms_for_test(&self, id: &str, created_ms: i64) -> Result<(), String> {
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        let changed = db
+            .execute(
+                "UPDATE research_jobs SET created_ms=?2 WHERE id=?1",
+                params![id, created_ms],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("JOB_NOT_FOUND".into());
+        }
+        Ok(())
+    }
     /// Bounded, read-only catalog page. An exact existing job ID identifies
     /// the exclusive continuation point in (created_ms, id) order. Both SQL
     /// branches use the existing idx_research_jobs_diagnostics_recent index.
@@ -655,7 +669,10 @@ impl Jobs {
             return Err("RESEARCH_LIST_LIMIT:1..50".into());
         }
         if cursor.is_some_and(|id| {
-            id.len() != 64 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            id.len() != 64
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         }) {
             return Err("INVALID_CURSOR".into());
         }
@@ -676,8 +693,8 @@ impl Jobs {
             let job_id: String = row.get(0)?;
             let state: String = row.get(1)?;
             State::parse(&state)?;
-            let created_ms = u64::try_from(row.get::<_, i64>(2)?)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let created_ms =
+                u64::try_from(row.get::<_, i64>(2)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
             let result_id: Option<String> = row.get(3)?;
             let decision_id: Option<String> = row.get(4)?;
             let pinned = row.get::<_, i64>(5)? != 0;
@@ -748,10 +765,7 @@ impl Jobs {
             // Cutting a full page without adjusting its cursor loses jobs.
             let page = serde_json::json!({"schema":"okx.research.jobs/v1",
                 "jobs":&rows[..count],"next_cursor":next_cursor});
-            if serde_json::to_vec(&page)
-                .map_err(|e| e.to_string())?
-                .len() <= MAX_LIST_JSON_BYTES
-            {
+            if serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() <= MAX_LIST_JSON_BYTES {
                 return Ok(page);
             }
             if count <= 1 {

@@ -691,7 +691,9 @@ impl ResearchRequest {
                 (1..=50).contains(limit)
                     && cursor.as_deref().is_none_or(|id| {
                         id.len() == 64
-                            && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                            && id
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
                     })
             }
             Self::Cancel {
@@ -722,9 +724,13 @@ mod list_contract_tests {
         let parsed: ResearchRequest = serde_json::from_value(request.clone()).unwrap();
         assert!(parsed.valid());
         assert_eq!(serde_json::to_value(parsed).unwrap(), request);
-        assert!(serde_json::from_value::<ResearchRequest>(serde_json::json!({
-            "action":"list","limit":1
-        })).unwrap().valid());
+        assert!(
+            serde_json::from_value::<ResearchRequest>(serde_json::json!({
+                "action":"list","limit":1
+            }))
+            .unwrap()
+            .valid()
+        );
 
         for (limit, cursor) in [
             (0, "a".repeat(64)),
@@ -735,7 +741,11 @@ mod list_contract_tests {
             (1, "".into()),
         ] {
             let input = serde_json::json!({"action":"list","limit":limit,"cursor":cursor});
-            assert!(!serde_json::from_value::<ResearchRequest>(input).unwrap().valid());
+            assert!(
+                !serde_json::from_value::<ResearchRequest>(input)
+                    .unwrap()
+                    .valid()
+            );
         }
         for extra in [
             serde_json::json!({"action":"list","limit":1,"account":"demo"}),

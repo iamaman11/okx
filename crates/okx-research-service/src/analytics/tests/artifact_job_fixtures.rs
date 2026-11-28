@@ -825,10 +825,7 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
     assert_eq!(summary["rows"][1]["trades_cursor"], "instrument:1:0");
     let totals = &summary["metadata"]["summary"];
     assert_eq!(totals["semantics"], "independent_instruments");
-    assert_eq!(
-        totals["economic_totals"]["fx_conversion"],
-        "not_performed"
-    );
+    assert_eq!(totals["economic_totals"]["fx_conversion"], "not_performed");
     assert!(totals["economic_totals"]["cross_currency_total"].is_null());
     assert!(totals["economic_totals"]["portfolio_sharpe"].is_null());
     assert_eq!(

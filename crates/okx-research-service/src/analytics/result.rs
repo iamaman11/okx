@@ -478,7 +478,9 @@ impl AnalyticsService {
         if batch
             && matches!(
                 view,
-                ResearchResultView::Trades | ResearchResultView::Variants | ResearchResultView::Equity
+                ResearchResultView::Trades
+                    | ResearchResultView::Variants
+                    | ResearchResultView::Equity
             )
             && instrument_index.is_none()
         {

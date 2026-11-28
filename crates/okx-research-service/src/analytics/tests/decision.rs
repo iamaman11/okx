@@ -60,16 +60,24 @@ fn recording_decision_pins_result_through_retention_and_replay_is_stable() {
     let pinned = service.jobs.get(&saved_job).unwrap();
     assert!(pinned.pinned);
     assert!(pinned.expires_at_ms.is_none());
-    assert_eq!(pinned.decision_artifact.as_deref(), first["decision_id"].as_str());
+    assert_eq!(
+        pinned.decision_artifact.as_deref(),
+        first["decision_id"].as_str()
+    );
     assert_eq!(service.research_decision(request).unwrap(), first);
     assert!(service.jobs.get(&saved_job).unwrap().pinned);
 
     let future = jiff::Timestamp::now().as_millisecond().max(0) as u64 + 8 * 86_400_000;
     assert_eq!(service.apply_retention(future).unwrap(), 1);
-    assert_eq!(service.research_decision(read(&saved_job, None)).unwrap(), first);
+    assert_eq!(
+        service.research_decision(read(&saved_job, None)).unwrap(),
+        first
+    );
     assert_eq!(service.jobs.get(&unsaved_job).unwrap().artifact, None);
     assert_eq!(
-        service.research_decision(read(&unsaved_job, None)).unwrap_err(),
+        service
+            .research_decision(read(&unsaved_job, None))
+            .unwrap_err(),
         "RESULT_EXPIRED"
     );
     drop(service);
@@ -81,12 +89,11 @@ fn expired_result_cannot_commit_decision_or_pin_job() {
     let (root, service) = super::super::artifact_job_fixtures::service();
     let (job, result) = fixture(&service, 'c');
     let old = (jiff::Timestamp::now().as_millisecond() - 8 * 86_400_000).max(0);
-    service.jobs.db.lock().unwrap().execute(
-        "UPDATE research_jobs SET created_ms=?2 WHERE id=?1",
-        rusqlite::params![&job, old],
-    ).unwrap();
+    service.jobs.set_created_ms_for_test(&job, old).unwrap();
     assert_eq!(
-        service.research_decision(record(&job, &result, None, "Expired case")).unwrap_err(),
+        service
+            .research_decision(record(&job, &result, None, "Expired case"))
+            .unwrap_err(),
         "RESULT_EXPIRED"
     );
     let observed = service.jobs.get(&job).unwrap();
@@ -225,7 +232,10 @@ fn concurrent_decision_cas_commits_only_one_revision_and_replay_keeps_id() {
     let observed = service.jobs.get(&job).unwrap();
     assert!(observed.pinned);
     assert!(observed.expires_at_ms.is_none());
-    assert_eq!(observed.decision_artifact.as_deref(), winner["decision_id"].as_str());
+    assert_eq!(
+        observed.decision_artifact.as_deref(),
+        winner["decision_id"].as_str()
+    );
     let request = record(
         &job,
         &result,

@@ -145,7 +145,8 @@ impl ResearchCommand {
             Self::Explain { .. }
             | Self::Capabilities
             | Self::Research {
-                request: ResearchRequest::Status { .. }
+                request:
+                    ResearchRequest::Status { .. }
                     | ResearchRequest::List { .. }
                     | ResearchRequest::Capabilities {},
             } => ResearchLane::Observation,
