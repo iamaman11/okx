@@ -433,7 +433,10 @@ impl AnalyticsService {
                 j.error.as_deref(),
                 Some("RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED" | "RESEARCH_BATCH_SOURCE_RETRYABLE")
             )
-            && matches!(view, ResearchResultView::Summary | ResearchResultView::Export)
+            && matches!(
+                view,
+                ResearchResultView::Summary | ResearchResultView::Export
+            )
             && cursor.is_none();
         if j.state != jobs::State::Completed && !failed_batch_diagnostic {
             return Err("RESULT_NOT_READY".into());

@@ -770,7 +770,7 @@ fn all_source_deferred_batch_can_retry_the_same_request_without_reusing_failed_a
     assert_eq!(failed.state, State::Failed);
     assert!(failed.artifact.is_some());
     assert_eq!(
-        jobs.diagnostic_readback("retry-batch-id")["reason_code"],
+        jobs.diagnostic_readback("retry-batch-id")["job"]["error_code"],
         "RESEARCH_BATCH_SOURCE_RETRYABLE"
     );
     assert!(jobs.diagnostic_readback("retry-batch-id")["result_ref"].is_null());

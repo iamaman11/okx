@@ -128,7 +128,10 @@ async fn c3_all_failed_grid_does_not_claim_completion_and_retains_read_only_diag
     assert!(request.valid());
     let job = terminal_grid_job(&service, request.clone()).await;
     assert_eq!(job.state, jobs::State::Failed);
-    assert_eq!(job.error.as_deref(), Some("RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED"));
+    assert_eq!(
+        job.error.as_deref(),
+        Some("RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED")
+    );
     assert!(job.progress < 100);
     let candidates = job.candidate_progress.unwrap();
     assert_eq!(candidates.completed_candidates, 0);
@@ -140,9 +143,15 @@ async fn c3_all_failed_grid_does_not_claim_completion_and_retains_read_only_diag
     assert_eq!(root_evidence["summary"]["completed"], 0);
     assert_eq!(root_evidence["summary"]["failed"], 2);
     assert_eq!(root_evidence["summary"]["quality"], "partial");
-    assert!(root_evidence["instruments"].as_array().unwrap().iter().all(|row| {
-        row["state"] == "failed" && row["reason_code"] == "CANDLE_RANGE_INCOMPLETE"
-    }));
+    assert!(
+        root_evidence["instruments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| {
+                row["state"] == "failed" && row["reason_code"] == "CANDLE_RANGE_INCOMPLETE"
+            })
+    );
     assert!(service.jobs.diagnostic_readback(&job.id)["result_ref"].is_null());
 
     let read = |view| ResearchRequest::Result {
@@ -151,10 +160,16 @@ async fn c3_all_failed_grid_does_not_claim_completion_and_retains_read_only_diag
         limit: 20,
         view,
     };
-    let summary = service.research(read(ResearchResultView::Summary)).await.unwrap();
+    let summary = service
+        .research(read(ResearchResultView::Summary))
+        .await
+        .unwrap();
     assert_eq!(summary["metadata"]["summary"]["failed"], 2);
     assert_eq!(summary["returned_rows"], 2);
-    let export = service.research(read(ResearchResultView::Export)).await.unwrap();
+    let export = service
+        .research(read(ResearchResultView::Export))
+        .await
+        .unwrap();
     assert_eq!(export["batch_summary"]["completed"], 0);
     assert_eq!(export["integrity"]["counts_verified"], true);
     assert_eq!(export["read_data_via"], json!(["summary"]));
@@ -163,7 +178,10 @@ async fn c3_all_failed_grid_does_not_claim_completion_and_retains_read_only_diag
         ResearchResultView::Equity,
         ResearchResultView::Variants,
     ] {
-        assert_eq!(service.research(read(view)).await.unwrap_err(), "RESULT_NOT_READY");
+        assert_eq!(
+            service.research(read(view)).await.unwrap_err(),
+            "RESULT_NOT_READY"
+        );
     }
     let replayed = service.research(request).await.unwrap();
     assert_eq!(replayed["id"], job.id);
@@ -175,9 +193,16 @@ async fn c3_all_failed_grid_does_not_claim_completion_and_retains_read_only_diag
 #[tokio::test]
 async fn c3_mixed_grid_retains_partial_quality_without_inventing_candidate_progress() {
     let (root, service) = cached_two_instrument_grid(true).await;
-    let job = terminal_grid_job(&service, two_instrument_grid_request("c3-one-instrument-failed")).await;
+    let job = terminal_grid_job(
+        &service,
+        two_instrument_grid_request("c3-one-instrument-failed"),
+    )
+    .await;
     assert_eq!(job.state, jobs::State::Completed);
-    assert!(job.progress < 100, "missing candidates must not become 100% computed");
+    assert!(
+        job.progress < 100,
+        "missing candidates must not become 100% computed"
+    );
     let candidates = job.candidate_progress.unwrap();
     assert_eq!(candidates.completed_candidates, 2);
     assert_eq!(candidates.total_candidates, 4);
