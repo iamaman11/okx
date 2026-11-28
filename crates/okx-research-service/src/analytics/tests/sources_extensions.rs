@@ -14,6 +14,39 @@ const CANDLE_END_MS: u64 = CANDLE_START_MS + 20 * CANDLE_INTERVAL_MS;
 const CANDLE_GAP_MS: u64 = CANDLE_START_MS + 10 * CANDLE_INTERVAL_MS;
 
 #[tokio::test]
+async fn graph_oos_rejects_a_train_window_without_two_scored_bars_before_any_io() {
+    let transport = RecordedGet::new(vec![]);
+    let (root, service) = service_with_source(transport.client());
+    let request: ResearchRequest = serde_json::from_value(json!({
+        "action":"graph_backtest","idempotency_key":"graph-oos-insufficient-train",
+        "instruments":["BTC-USDT"],"timeframe_ms":CANDLE_INTERVAL_MS,
+        "start_ms":CANDLE_START_MS,"end_ms":CANDLE_END_MS,
+        "graph_signal":{
+            "version":"okx.graph-signal/v1",
+            "graph":{"version":"okx.market.composition/v1","steps":[
+                {"id":"mean","op":"rolling_mean","input":"close","period":19},
+                {"id":"entry","op":"greater_than","input":"mean","threshold":0}
+            ],"result_steps":["entry"]},
+            "signal_step":"entry","target_if_true":1,"target_if_false":0,
+            "missing":"hold"
+        },
+        "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,
+            "funding_mode":"zero_assumption"},
+        "data_mode":"counterfactual"
+    }))
+    .unwrap();
+    assert!(request.valid());
+    assert_eq!(
+        service.research(request).await.unwrap_err(),
+        "graph_oos.range:INSUFFICIENT_TRAIN_OR_HOLDOUT"
+    );
+    assert!(service.jobs.snapshot().is_empty());
+    assert!(transport.routes.lock().unwrap().is_empty());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn unavailable_historical_mode_rejects_all_executions_before_sql_or_market_reads() {
     let transport = RecordedGet::new(vec![]);
     let (root, service) = service_with_source(transport.client());
@@ -844,6 +877,18 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
         graph_result["metadata"]["economic_audit"]["net_exact"],
         graph_result["metadata"]["summary"]["pnl_exact"]
     );
+    let oos = &graph_result["metadata"]["graph_oos"];
+    assert_eq!(oos["schema"], "okx.research.graph-oos/v1");
+    assert_eq!(oos["policy"]["split_index"], 14);
+    assert_eq!(oos["policy"]["train_score_start_index"], 2);
+    assert_eq!(oos["policy"]["test_score_start_index"], 14);
+    assert_eq!(oos["policy"]["selection"], "fixed_graph_no_model_fitting");
+    assert_eq!(oos["selection"], "predeclared_graph_no_optimization");
+    assert_eq!(oos["holdout"]["summary"], graph_result["metadata"]["summary"]);
+    assert_eq!(
+        oos["train"]["economic_audit"]["net_exact"],
+        oos["train"]["summary"]["pnl_exact"]
+    );
     let graph_experiment: serde_json::Value = service
         .artifacts
         .read_evidence_json(
@@ -857,6 +902,7 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
         "entry"
     );
     assert!(graph_experiment.get("spec").is_none());
+    assert_eq!(graph_experiment["graph_oos_policy"], oos["policy"]);
     let exported = service
         .research(ResearchRequest::Result {
             job_id: graph_job,
@@ -869,6 +915,33 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
     assert_eq!(
         exported["integrity"]["reexecution"]["quality"],
         "verified_reexecution"
+    );
+    assert_eq!(exported["graph_oos"], *oos);
+    let manifest: serde_json::Value = service
+        .artifacts
+        .read_evidence_json(exported["leaf_id"].as_str().unwrap())
+        .unwrap();
+    let mut forged_train = manifest.clone();
+    forged_train["graph_oos"]["train"]["result_hash"] = json!("forged");
+    assert_eq!(
+        super::super::result_reexecution::verify(
+            &service.artifacts,
+            &graph_experiment,
+            &forged_train
+        )
+        .unwrap_err(),
+        "EXPORT_REEXECUTION_MISMATCH"
+    );
+    let mut forged_split = manifest;
+    forged_split["graph_oos"]["policy"]["split_index"] = json!(13);
+    assert_eq!(
+        super::super::result_reexecution::verify(
+            &service.artifacts,
+            &graph_experiment,
+            &forged_split
+        )
+        .unwrap_err(),
+        "EXPORT_REEXECUTION_MISMATCH"
     );
     let before = service.jobs.snapshot().len();
     if let ResearchRequest::Backtest { strategy_id, .. } = &mut request {
