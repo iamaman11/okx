@@ -282,6 +282,9 @@ async fn risk_book_contract_native_public_execute_lost_ack_and_replay_send_once(
         .update_governance(&fixture.authority)
         .await
         .unwrap();
+    // Opening maintenance and market publication can age the initial NAV.
+    // Repeat the finite original signed capture, including in the OS-kill child.
+    filled_fixture::capture(&fixture).await;
     let now = jiff::Timestamp::now().as_millisecond().to_string();
     fixture.feed.expect_current_public_clock();
     // Each observation belongs to a concrete production assessment. The
