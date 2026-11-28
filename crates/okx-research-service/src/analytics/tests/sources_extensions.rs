@@ -136,7 +136,7 @@ async fn graph_preflight_rejects_unsupported_source_without_job_or_venue_get() {
         "graph_signal":{
             "version":"okx.graph-signal/v1",
             "graph":{"version":"okx.market.composition/v1","steps":[
-                {"id":"oi","op":"rolling_stddev","input":"open_interest","period":2},
+                {"id":"oi","op":"returns_series","input":"open_interest"},
                 {"id":"signal","op":"greater_than","input":"oi","threshold":0}
             ],"result_steps":["signal"]},
             "signal_step":"signal","target_if_true":1,"target_if_false":0,
