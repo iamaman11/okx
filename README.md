@@ -56,9 +56,10 @@ with `research.validate`, submits a registered `backtest`/`grid` or a causal
 reporting the assumptions and evidence. There is no separate workflow service,
 strategy-code generator or Research UI. `graph_backtest` consumes a typed
 `okx.graph-signal/v1` composition and reuses the same next-open execution,
-funding, costs and evidence store; the initial incremental graph executor
-accepts only causal close-based inputs and its supported operators. Unsupported
-sources/operators fail explicitly. Historical rules/fees remain unverified:
+funding, costs and evidence store; the incremental graph executor accepts
+causal closed-candle `open/high/low/close/volume` inputs and its supported
+operators. OI/funding and unsupported operators fail explicitly. Historical
+rules/fees remain unverified:
 results are **counterfactual hypotheses, never trading authority**.
 
 **Trading:** an authorized `trade` MCP action → gateway → the single Agent trade
