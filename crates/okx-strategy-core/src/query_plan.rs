@@ -319,7 +319,11 @@ impl SeriesUnitRule {
             }
             Self::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient => matches!(
                 actual,
-                Unit::Price | Unit::Ratio | Unit::Contracts | Unit::NativeVolume | Unit::Coefficient
+                Unit::Price
+                    | Unit::Ratio
+                    | Unit::Contracts
+                    | Unit::NativeVolume
+                    | Unit::Coefficient
             ),
             Self::PriceOrRatioOrNativeVolumeOrCoefficient => matches!(
                 actual,
@@ -427,8 +431,8 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         RollingZscore => "strict_window_or_zero_variance",
         RollingStddev => "strict_window_zero_for_constant",
         DivideSeries => "propagate_missing_or_zero_denominator",
-        And | Or | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries
-        | RisingEdge | FallingEdge => "propagate_unknown",
+        And | Or | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries | RisingEdge
+        | FallingEdge => "propagate_unknown",
         ForwardReturnLabel => "unconfirmed_without_future_bars",
         AddSeries | SubtractSeries | Lag => "propagate_missing",
     };
@@ -437,8 +441,8 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         RollingZscore | RollingStddev => 6,
         RollingRange => 4,
         RollingPearson => 8,
-        AddSeries | SubtractSeries | DivideSeries | GreaterThanSeries | LessThanSeries
-        | And | Or => 2,
+        AddSeries | SubtractSeries | DivideSeries | GreaterThanSeries | LessThanSeries | And
+        | Or => 2,
         _ => 1,
     };
     let causal = op != ForwardReturnLabel;
@@ -468,7 +472,11 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         cost_per_bar,
         causal,
         graph_backtest_supported: causal,
-        time_basis: if causal { "closed_bar" } else { "outcome_future_horizon" },
+        time_basis: if causal {
+            "closed_bar"
+        } else {
+            "outcome_future_horizon"
+        },
         source_requirement: "declared_exact_event_time_no_forward_fill",
         effects: "pure_no_io",
         owner: "okx-strategy-core::query_plan",
@@ -486,7 +494,10 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
 }
 
 pub fn series_operation_contracts() -> Vec<SeriesOperationContract> {
-    SeriesOp::ALL.into_iter().map(series_operation_contract).collect()
+    SeriesOp::ALL
+        .into_iter()
+        .map(series_operation_contract)
+        .collect()
 }
 
 #[cfg(test)]
@@ -509,7 +520,10 @@ mod typed_operation_catalog_tests {
             assert!(contract.cost_per_bar > 0);
             assert_eq!(contract.period_min.is_some(), contract.period_max.is_some());
             assert_eq!(contract.graph_backtest_supported, contract.causal);
-            assert_eq!(contract.source_requirement, "declared_exact_event_time_no_forward_fill");
+            assert_eq!(
+                contract.source_requirement,
+                "declared_exact_event_time_no_forward_fill"
+            );
             if let (Some(min), Some(max)) = (contract.period_min, contract.period_max) {
                 assert!((1..=max).contains(&min));
                 assert!(max <= 1000);
@@ -2073,7 +2087,10 @@ mod t15_extension_contract {
             "rolling_range"
         );
         let descriptor = series_operation_contract(SeriesOp::RollingRange);
-        assert_eq!(serde_json::to_value(descriptor.op).unwrap(), "rolling_range");
+        assert_eq!(
+            serde_json::to_value(descriptor.op).unwrap(),
+            "rolling_range"
+        );
         assert_eq!(descriptor.version, 1);
         assert_eq!(descriptor.effects, "pure_no_io");
         assert_eq!(descriptor.output_unit, SeriesUnitRule::SameAsInput);
