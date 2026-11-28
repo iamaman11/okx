@@ -239,8 +239,9 @@ impl AnalyticsService {
             // The outer slot outlives the inner computation future. This is
             // deliberate: the lease must survive its terminal SQLite write.
             let mut active_lease = None;
+            let source_meter = Arc::new(crate::source_io::SourceIoMeter::default());
             let outcome = {
-                let outcome = async {
+                let outcome = crate::source_io::observe(source_meter.clone(), async {
                     // Bounded SQL admission happens at submit. Accepted queued
                     // jobs wait for an existing heavy permit instead of becoming
                     // FAILED because two other research jobs are in progress.
@@ -253,9 +254,13 @@ impl AnalyticsService {
                     tracing::info!(job_id = %hash, reserved_mib = lease.reserved_mib,
                         wait_ms = lease.wait_ms, phase = "research_resource_acquired",
                         "research resource lease acquired");
+                    let queue_wait_ms = lease.wait_ms;
                     active_lease = Some(lease);
                     this.jobs
-                        .update_async(hash.clone(), jobs::State::Running, None, None)
+                        .update_with_observation_async(
+                            hash.clone(), jobs::State::Running, None, None,
+                            Some(queue_wait_ms), None,
+                        )
                         .await?;
                     tracing::info!(job_id = %hash, stage = "execution", state = "running", "research job running");
                     if matches!(request, ResearchRequest::Benchmark { .. }) {
@@ -387,7 +392,7 @@ impl AnalyticsService {
                         .await?
                         .artifact
                         .ok_or_else(|| "EMPTY_BATCH".into())
-                };
+                });
                 // Poll observations alongside the existing job future. One bounded
                 // snapshot per tick; no detached consumer survives any exit path.
                 tokio::pin!(outcome);
@@ -414,9 +419,15 @@ impl AnalyticsService {
                 )
                 .await;
             }
+            // Source attempts piggyback on the existing terminal SQL write.
+            // If the meter failed or cancellation won, absence stays unknown.
+            let source_observation = source_meter.job_observation();
             match outcome {
                 Ok(a) => {
-                    match this.jobs.update_async(hash.clone(), jobs::State::Completed, Some(a), None).await {
+                    match this.jobs.update_with_observation_async(
+                        hash.clone(), jobs::State::Completed, Some(a), None,
+                        None, source_observation,
+                    ).await {
                         Ok(true) => tracing::info!(job_id = %hash, stage = "terminal", state = "completed", "research job completed"),
                         Ok(false) => tracing::info!(job_id = %hash, stage = "terminal", state = "cancelled", "late research completion rejected by cancellation fence"),
                         Err(_) => tracing::warn!(job_id = %hash, stage = "terminal", reason_code = "RESEARCH_TERMINAL_COMMIT_FAILED", "research result not committed"),
@@ -436,7 +447,10 @@ impl AnalyticsService {
                         .await
                         .ok()
                         .and_then(|j| j.artifact);
-                    match this.jobs.update_async(hash.clone(), state, artifact, Some(e)).await {
+                    match this.jobs.update_with_observation_async(
+                        hash.clone(), state, artifact, Some(e),
+                        None, source_observation,
+                    ).await {
                         Ok(true) => tracing::info!(job_id = %hash, stage = "terminal", state = terminal_state, reason_code, "research job ended"),
                         Ok(false) => tracing::info!(job_id = %hash, stage = "terminal", state = "cancelled", "late research failure rejected by cancellation fence"),
                         Err(_) => tracing::warn!(job_id = %hash, stage = "terminal", reason_code = "RESEARCH_TERMINAL_COMMIT_FAILED", "research terminal state not committed"),

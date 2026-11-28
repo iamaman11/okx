@@ -22,6 +22,19 @@ window*, **not** “the request had no effect.” If more than one job matches,
 exact `job_id`. Older jobs can still be inspected by their ID if retained in
 the projection; otherwise the diagnostic cannot infer their state.
 
+Research jobs may also expose bounded `job.diagnostic_evidence`, committed by
+the **same job-catalog SQL transitions** that move the job to `running` and
+`completed` / `failed`. `queue_wait_ms` is measured only after resource
+admission; `source.scope: "research_job_execution"` identifies aggregate
+Worker source attempts, replies, errors, aborted futures and cache hits.
+These are **not** proven venue HTTP sends: `venue_http_requests` remains
+`null`, and a lost source reply does not establish whether an HTTP request
+reached the venue. Missing evidence, including a cancellation before resource
+admission or a terminal cancellation that wins before source observation, is
+unknown, not zero. No extra telemetry write, process or diagnostic database
+is on the execution path. Recognized source/cache errors retain their safe
+`job.error_code` on restart; arbitrary raw exception text is never echoed.
+
 For live strategies, the existing `strategies.status` includes
 `data.runtime_observation`: the last observed turn, bounded failure reason and
 timestamps for the current Engine process. `durable=false`, `history=UNKNOWN`

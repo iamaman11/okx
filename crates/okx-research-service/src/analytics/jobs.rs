@@ -311,7 +311,7 @@ impl Jobs {
                 )
                 .map_err(|e| e.to_string())?;
         }
-        for column in ["producer", "origin_invocation"] {
+        for column in ["producer", "origin_invocation", "diagnostic_evidence"] {
             let columns = migration
                 .prepare("PRAGMA table_info(research_jobs)")
                 .map_err(|e| e.to_string())?
@@ -524,7 +524,7 @@ impl Jobs {
         let is_new = if let Some(job) = &existing {
             if job.state == State::Failed && is_transient_rate_defer(job.error.as_deref()) {
                 tx.execute(
-                    "UPDATE research_jobs SET state='queued',progress=0,candidate_progress=NULL,artifact=NULL,error=NULL WHERE id=?1",
+                    "UPDATE research_jobs SET state='queued',progress=0,candidate_progress=NULL,artifact=NULL,error=NULL,diagnostic_evidence=NULL WHERE id=?1",
                     [&hash],
                 )
                 .map_err(|e| e.to_string())?;
@@ -789,6 +789,21 @@ impl Jobs {
         artifact: Option<String>,
         error: Option<String>,
     ) -> Result<bool, String> {
+        self.update_with_observation(id, state, artifact, error, None, None)
+    }
+    /// Same atomic SQL transition and terminal fence as update(). Diagnostic
+    /// evidence piggybacks on the job write; it never adds an awaited operation.
+    /// A malformed or oversized measurement is omitted, not allowed to block
+    /// the authoritative state transition.
+    pub(super) fn update_with_observation(
+        &self,
+        id: &str,
+        state: State,
+        artifact: Option<String>,
+        error: Option<String>,
+        queue_wait_ms: Option<u64>,
+        source: Option<crate::source_io::JobSourceObservation>,
+    ) -> Result<bool, String> {
         // Admission alone creates QUEUED, and startup recovery alone creates
         // INTERRUPTED. Neither is a permissible executor transition: a late
         // CPU task may not requeue itself or forge a restart diagnosis.
@@ -802,6 +817,47 @@ impl Jobs {
             return Err("RESEARCH_COMPLETED_ERROR_UNEXPECTED".into());
         }
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        let has_observation = queue_wait_ms.is_some() || source.is_some();
+        let diagnostic = if has_observation {
+            // The one Research SQL owner serializes this read and the following
+            // UPDATE under a single mutex. Terminal cancellation can still win
+            // before this lock; the UPDATE fence then rejects all evidence.
+            (|| -> Option<String> {
+                let old = db
+                    .query_row(
+                        "SELECT diagnostic_evidence FROM research_jobs WHERE id=?1",
+                        [id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .ok()?;
+                let mut evidence = old
+                    .as_deref()
+                    .map(serde_json::from_str::<job_diagnostics::Evidence>)
+                    .transpose()
+                    .ok()?
+                    .unwrap_or_default();
+                if !evidence.valid() {
+                    return None;
+                }
+                if let Some(wait_ms) = queue_wait_ms {
+                    evidence.queue_wait_ms = Some(wait_ms);
+                }
+                if let Some(source) = source {
+                    if !source.valid() {
+                        return None;
+                    }
+                    evidence.source = Some(source);
+                }
+                let value = serde_json::to_string(&evidence).ok()?;
+                (value.len() <= 4096).then_some(value)
+            })()
+        } else {
+            None
+        };
+        if has_observation && diagnostic.is_none() {
+            tracing::warn!(job_id = %id, reason_code = "RESEARCH_DIAGNOSTIC_EVIDENCE_UNAVAILABLE",
+                "bounded observation omitted; job transition remains authoritative");
+        }
         let updated = db
             .execute(
                 "UPDATE research_jobs SET state=?2,
@@ -810,9 +866,10 @@ impl Jobs {
                            json_extract(candidate_progress,'$.phase')='publishing') THEN 100
                       WHEN ?2='running' AND candidate_progress IS NULL THEN 10
                       ELSE progress END,
-                    artifact=?3,error=?4
+                    artifact=?3,error=?4,
+                    diagnostic_evidence=COALESCE(?5,diagnostic_evidence)
                  WHERE id=?1 AND state IN ('queued','running')",
-                params![id, state.wire(), artifact, error],
+                params![id, state.wire(), artifact, error, diagnostic],
             )
             .map_err(|e| e.to_string())?;
         if updated == 0 {
@@ -1162,6 +1219,22 @@ impl Jobs {
         tokio::task::spawn_blocking(move || owner.update(&id, state, artifact, error))
             .await
             .map_err(|_| "RESEARCH_SQL_WORKER_FAILED".to_owned())?
+    }
+    pub(super) async fn update_with_observation_async(
+        &self,
+        id: String,
+        state: State,
+        artifact: Option<String>,
+        error: Option<String>,
+        queue_wait_ms: Option<u64>,
+        source: Option<crate::source_io::JobSourceObservation>,
+    ) -> Result<bool, String> {
+        let owner = self.clone();
+        tokio::task::spawn_blocking(move || {
+            owner.update_with_observation(&id, state, artifact, error, queue_wait_ms, source)
+        })
+        .await
+        .map_err(|_| "RESEARCH_SQL_WORKER_FAILED".to_owned())?
     }
     pub async fn cancel_async(&self, id: String, key: String) -> Result<Job, String> {
         let owner = self.clone();
