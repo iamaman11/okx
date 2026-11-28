@@ -743,9 +743,7 @@ fn graph_field_failure(reason: &str) -> Option<(&str, &str)> {
     if path.len() > 128
         || (detail.contains(':') && !path.starts_with("composition.steps["))
         || !path.bytes().all(|b| {
-            b.is_ascii_lowercase()
-                || b.is_ascii_digit()
-                || matches!(b, b'_' | b'.' | b'[' | b']')
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'[' | b']')
         })
         || !(path.starts_with("graph_signal.")
             || path == "graph_signal"
@@ -1143,11 +1141,31 @@ mod tests {
     #[test]
     fn graph_admission_fields_are_typed_at_edge_without_raw_error_disclosure() {
         for (raw, reason, path) in [
-            ("graph_signal.graph.steps[1].input:INVALID_REFERENCE", "GRAPH_PREFLIGHT_INVALID_REFERENCE", "graph_signal.graph.steps[1].input"),
-            ("research.graph_backtest.costs.taker_fee_bps:OUT_OF_RANGE", "GRAPH_PREFLIGHT_OUT_OF_RANGE", "research.graph_backtest.costs.taker_fee_bps"),
-            ("composition.steps[0].input:UNIT_MISMATCH:expected=boolean:actual=price", "GRAPH_PREFLIGHT_UNIT_MISMATCH", "composition.steps[0].input"),
-            ("graph_signal:SIGNAL_MUST_BE_BOOLEAN_OR_EVENT", "GRAPH_PREFLIGHT_SIGNAL_MUST_BE_BOOLEAN_OR_EVENT", "graph_signal"),
-            ("composition:CELLS_LIMIT", "GRAPH_PREFLIGHT_CELLS_LIMIT", "composition"),
+            (
+                "graph_signal.graph.steps[1].input:INVALID_REFERENCE",
+                "GRAPH_PREFLIGHT_INVALID_REFERENCE",
+                "graph_signal.graph.steps[1].input",
+            ),
+            (
+                "research.graph_backtest.costs.taker_fee_bps:OUT_OF_RANGE",
+                "GRAPH_PREFLIGHT_OUT_OF_RANGE",
+                "research.graph_backtest.costs.taker_fee_bps",
+            ),
+            (
+                "composition.steps[0].input:UNIT_MISMATCH:expected=boolean:actual=price",
+                "GRAPH_PREFLIGHT_UNIT_MISMATCH",
+                "composition.steps[0].input",
+            ),
+            (
+                "graph_signal:SIGNAL_MUST_BE_BOOLEAN_OR_EVENT",
+                "GRAPH_PREFLIGHT_SIGNAL_MUST_BE_BOOLEAN_OR_EVENT",
+                "graph_signal",
+            ),
+            (
+                "composition:CELLS_LIMIT",
+                "GRAPH_PREFLIGHT_CELLS_LIMIT",
+                "composition",
+            ),
         ] {
             let response = rejected("research_request_0123456789", raw);
             assert_eq!(response.status, AgentResponseStatus::Rejected);

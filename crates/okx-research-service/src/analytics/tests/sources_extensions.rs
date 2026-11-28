@@ -1,11 +1,11 @@
 use super::super::artifact_job_fixtures::service_with_source;
 use super::*;
 use crate::independent_source::test_support::RecordedGet;
-use okx_research_protocol::edge::{ResearchCommand, ResearchRequestEnvelope};
 use okx_research_protocol::analytics::{
     EmaParameters, FundingMode, MarketAction, MarketRequest, ResearchCosts, ResearchDataMode,
     ResearchRequest, ResearchResultView,
 };
+use okx_research_protocol::edge::{ResearchCommand, ResearchRequestEnvelope};
 use serde_json::json;
 
 const CANDLE_INTERVAL_MS: u64 = 60_000;
@@ -114,15 +114,51 @@ async fn graph_admission_identifies_invalid_field_at_edge_and_owner_without_side
         "data_mode":"counterfactual"
     });
     for (pointer, bad, reason) in [
-        ("/graph_signal/version", json!("bad"), "graph_signal.version:UNSUPPORTED"),
-        ("/graph_signal/graph/steps/0/input", json!("private/source"), "graph_signal.graph.steps[0].input:INVALID_REFERENCE"),
-        ("/graph_signal/graph/steps/1/op", json!("forward_return_label"), "graph_signal.graph.steps[1].op:FORWARD_LABEL_FORBIDDEN"),
-        ("/graph_signal/signal_step", json!("unused"), "graph_signal.signal_step:UNPROJECTED"),
-        ("/graph_signal/target_if_true", json!(2), "graph_signal.target_if_true:INVALID_POSITION"),
-        ("/costs/taker_fee_bps", json!(-1), "research.graph_backtest.costs.taker_fee_bps:OUT_OF_RANGE"),
-        ("/timeframe_ms", json!(1), "research.graph_backtest.timeframe_ms:UNSUPPORTED"),
-        ("/end_ms", json!(CANDLE_START_MS + 1_000_001 * CANDLE_INTERVAL_MS), "research.graph_backtest.range:RESOURCE_LIMIT"),
-        ("/instruments/0", json!(""), "research.graph_backtest.instruments[0]:INVALID_LENGTH"),
+        (
+            "/graph_signal/version",
+            json!("bad"),
+            "graph_signal.version:UNSUPPORTED",
+        ),
+        (
+            "/graph_signal/graph/steps/0/input",
+            json!("private/source"),
+            "graph_signal.graph.steps[0].input:INVALID_REFERENCE",
+        ),
+        (
+            "/graph_signal/graph/steps/1/op",
+            json!("forward_return_label"),
+            "graph_signal.graph.steps[1].op:FORWARD_LABEL_FORBIDDEN",
+        ),
+        (
+            "/graph_signal/signal_step",
+            json!("unused"),
+            "graph_signal.signal_step:UNPROJECTED",
+        ),
+        (
+            "/graph_signal/target_if_true",
+            json!(2),
+            "graph_signal.target_if_true:INVALID_POSITION",
+        ),
+        (
+            "/costs/taker_fee_bps",
+            json!(-1),
+            "research.graph_backtest.costs.taker_fee_bps:OUT_OF_RANGE",
+        ),
+        (
+            "/timeframe_ms",
+            json!(1),
+            "research.graph_backtest.timeframe_ms:UNSUPPORTED",
+        ),
+        (
+            "/end_ms",
+            json!(CANDLE_START_MS + 1_000_001 * CANDLE_INTERVAL_MS),
+            "research.graph_backtest.range:RESOURCE_LIMIT",
+        ),
+        (
+            "/instruments/0",
+            json!(""),
+            "research.graph_backtest.instruments[0]:INVALID_LENGTH",
+        ),
     ] {
         let mut value = base.clone();
         *value.pointer_mut(pointer).unwrap() = bad;
@@ -131,10 +167,18 @@ async fn graph_admission_identifies_invalid_field_at_edge_and_owner_without_side
             "operation":{"type":"research","request":value.clone()}
         }))
         .unwrap();
-        assert_eq!(ResearchCommand::try_from(envelope).err().unwrap(), reason, "{pointer}: Edge");
+        assert_eq!(
+            ResearchCommand::try_from(envelope).err().unwrap(),
+            reason,
+            "{pointer}: Edge"
+        );
         let request: ResearchRequest = serde_json::from_value(value).unwrap();
         assert!(!request.valid(), "{pointer}");
-        assert_eq!(service.research(request).await.unwrap_err(), reason, "{pointer}: owner");
+        assert_eq!(
+            service.research(request).await.unwrap_err(),
+            reason,
+            "{pointer}: owner"
+        );
     }
     assert!(service.jobs.snapshot().is_empty());
     assert!(transport.routes.lock().unwrap().is_empty());

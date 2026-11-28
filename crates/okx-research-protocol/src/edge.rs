@@ -256,7 +256,9 @@ impl TryFrom<ResearchRequestEnvelope> for ResearchCommand {
         let command = match envelope.operation {
             ResearchOperation::Market { request } if request.valid() => Self::Market(request),
             ResearchOperation::MarketCapabilities => Self::MarketCapabilities,
-            ResearchOperation::Research { request: request @ ResearchRequest::GraphBacktest { .. } } => {
+            ResearchOperation::Research {
+                request: request @ ResearchRequest::GraphBacktest { .. },
+            } => {
                 request.validate_graph_backtest()?;
                 Self::Research(request)
             }

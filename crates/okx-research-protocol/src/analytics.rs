@@ -517,7 +517,8 @@ impl ResearchRequest {
             graph_signal,
             costs,
             ..
-        } = self else {
+        } = self
+        else {
             return Err("INVALID_RESEARCH_REQUEST".into());
         };
         if !(1..=128).contains(&idempotency_key.len()) {
@@ -560,7 +561,9 @@ impl ResearchRequest {
             ("slippage_bps", costs.slippage_bps),
         ] {
             if !value.is_finite() || !(0.0..=10000.0).contains(&value) {
-                return Err(format!("research.graph_backtest.costs.{field}:OUT_OF_RANGE"));
+                return Err(format!(
+                    "research.graph_backtest.costs.{field}:OUT_OF_RANGE"
+                ));
             }
         }
         graph_signal.validate_structure()
