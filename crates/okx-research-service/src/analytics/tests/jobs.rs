@@ -9,6 +9,25 @@ fn path(label: &str) -> PathBuf {
         .join("catalog.sqlite")
 }
 
+// The owner is already dropped. Allow a bounded OS lock-release delay, but
+// never tolerate a retained owner or a different catalog initialization error.
+fn reopen_after_root_release(file: PathBuf) -> Jobs {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match Jobs::open(file.clone()) {
+            Ok(jobs) => return jobs,
+            Err(error) if error == "RESEARCH_ROOT_LOCKED" => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "research catalog root lock remained held after owner drop"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("research catalog did not unlock after owner drop: {error}"),
+        }
+    }
+}
+
 #[test]
 fn research_catalog_lists_bounded_keyset_pages_with_tied_times_and_existing_index() {
     let jobs = Jobs::open(path("analyst-list-keyset")).unwrap();
@@ -580,8 +599,9 @@ fn c17_terminal_manifest_survives_restart_and_rejects_late_overwrite() {
         "RESEARCH_TERMINAL_IMMUTABLE"
     );
     assert!(matches!(Jobs::open(file.clone()), Err(e) if e == "RESEARCH_ROOT_LOCKED"));
+    assert_eq!(std::sync::Arc::strong_count(&original._root_lock), 1);
     drop(original);
-    let restarted = Jobs::open(file).unwrap();
+    let restarted = reopen_after_root_release(file);
     assert_eq!(restarted.get("c17-id").unwrap().state, State::Completed);
     assert_eq!(restarted.get("c17-id").unwrap().artifact, saved.artifact);
     assert!(
@@ -628,23 +648,7 @@ fn c17_restart_interrupts_incomplete_without_resurrecting_it() {
     // to tolerate the next open failing.
     assert_eq!(std::sync::Arc::strong_count(&before._root_lock), 1);
     drop(before);
-    // A brief OS lock-release delay is not a second owner. Retry only the
-    // exact ownership conflict for a bounded time; every other error and a
-    // persistently held root lock still fail the crash-recovery contract.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-    let after = loop {
-        match Jobs::open(file.clone()) {
-            Ok(after) => break after,
-            Err(error) if error == "RESEARCH_ROOT_LOCKED" => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "research catalog root lock remained held after owner drop"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Err(error) => panic!("research catalog did not unlock after owner drop: {error}"),
-        }
-    };
+    let after = reopen_after_root_release(file);
     assert_eq!(after.get("queued").unwrap().state, State::Interrupted);
     assert_eq!(after.get("running").unwrap().state, State::Interrupted);
     assert_eq!(

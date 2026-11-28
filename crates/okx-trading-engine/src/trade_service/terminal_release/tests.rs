@@ -1,12 +1,15 @@
 //! Terminal release frontier guards on the original fresh Native owner.
 use super::*;
 use crate::accounts::native_trade_contracts::{
-    filled_fixture::{INSTRUMENT, OPEN_ORDER, opened_market},
+    filled_fixture::{
+        INSTRUMENT, OPEN_ORDER, keep_captured_readiness_current, opened_market,
+        stop_captured_readiness,
+    },
     fixture::{envelope, execute, fixture, record_fee, record_leverage},
 };
 use crate::accounts::recorded_support::{RecordedGet, RecordedPost};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn terminal_coverage_requires_all_frontiers_without_refreshing_source() {
@@ -111,6 +114,11 @@ async fn stale_bill_coverage_blocks_settlement_after_inspect() {
 async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
     let mut f = fixture().await;
     let (market_stop, market_task, _socket, _public) = opened_market(&mut f).await;
+    // Setup under contended Windows CI must not age out the independently
+    // captured campaign opening before the test's FIRST order. Keep the
+    // existing production refresh running only until that order is admitted;
+    // the stale-fill/bill assertions below still run without a refresher.
+    let (readiness_stop, readiness_task) = keep_captured_readiness_current(&f);
     let now = jiff::Timestamp::now().as_millisecond().to_string();
     f.feed.expect_current_public_clock();
     record_fee(&f.feed, &now);
@@ -132,6 +140,30 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
             "clOrdId":"__REQUEST_CL_ORD_ID__","sCode":"0"}])),
     });
     f.feed.arm_lost_next_create_ack();
+    // Establish a verified fresh opening immediately before the first order;
+    // starting the maintenance task alone is not an acknowledgement. The
+    // independent source frontier may briefly lag its moving cutoff.
+    let ready_until = Instant::now() + Duration::from_secs(8);
+    loop {
+        match f
+            .trade
+            .install_captured_empty_campaign_opening(&f.authority, ready_until)
+            .await
+        {
+            Ok(()) => break,
+            Err(reason)
+                if matches!(
+                    reason.as_str(),
+                    "ENTRY_BASELINE_CAPTURE_PENDING"
+                        | "FINANCE_CAMPAIGN_IDENTITY_UNAVAILABLE"
+                        | "COMPLETE_ACCOUNT_CENSUS_UNPROVEN"
+                ) && Instant::now() < ready_until =>
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(reason) => panic!("fresh captured campaign opening unavailable: {reason}"),
+        }
+    }
     let mut request = execute();
     if let okx_ipc_contracts::trading::TradeRequest::Execute { expires_in_ms, .. } = &mut request {
         *expires_in_ms = 10_000;
@@ -141,6 +173,7 @@ async fn stale_terminal_coverage_blocks_release(stale_bills: bool) {
         .trade(&f.config.alias, &request, Some(&f.authority))
         .await
         .unwrap();
+    stop_captured_readiness(readiness_stop, readiness_task).await;
     assert_eq!(
         sent["reason_code"], "EXCHANGE_POST_OUTCOME_UNKNOWN",
         "{sent}"
