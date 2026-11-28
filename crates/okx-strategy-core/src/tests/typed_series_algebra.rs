@@ -168,7 +168,10 @@ fn ema_scale_microbenchmark_reports_median_ns_per_bar() {
                 checksum += black_box(values[result_step].0.unwrap_or(0.0));
             }
             *sample = started.elapsed().as_nanos() / bars as u128;
-            assert_eq!(runner.operation_count(), bars as u64 * plan.steps().len() as u64);
+            assert_eq!(
+                runner.operation_count(),
+                bars as u64 * plan.steps().len() as u64
+            );
             assert!(black_box(checksum).is_finite());
         }
         samples.sort_unstable();
