@@ -21,6 +21,11 @@ on:
         type: choice
         options: [tests, release, research, both]
         default: both
+      recover_research_660:
+        description: 'One-time verified #660 Research artifact publication only (no build or install)'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   # The release step is part of this main CI run. A later main commit must not
@@ -2376,6 +2381,7 @@ jobs:
         github.ref == 'refs/heads/main' &&
         github.event_name == 'workflow_dispatch' &&
         inputs.prime_windows_cargo_cache == true &&
+        inputs.recover_research_660 != true &&
         needs.component_impact.outputs.build_required == 'false' &&
         needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree'
       }}
@@ -2708,19 +2714,26 @@ jobs:
     if: >-
       ${{
         always() &&
-        github.event_name == 'push' &&
         github.ref == 'refs/heads/main' &&
-        needs.component_impact.outputs.component_scope == 'research' &&
-        needs.component_impact.outputs.build_required == 'false' &&
-        needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree' &&
-        needs['dependency-audit'].result == 'skipped' &&
-        needs.component_impact.result == 'success' &&
-        needs.required_ci.result == 'success'
+        (
+          (github.event_name == 'workflow_dispatch' && inputs.recover_research_660 == true) ||
+          (github.event_name == 'push' &&
+           needs.component_impact.outputs.component_scope == 'research' &&
+           needs.component_impact.outputs.build_required == 'false' &&
+           needs.component_impact.outputs.reason == 'merged tree exactly matches successful PR head tree' &&
+           needs['dependency-audit'].result == 'skipped' &&
+           needs.component_impact.result == 'success' &&
+           needs.required_ci.result == 'success')
+        )
       }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      ACCEPTED_MAIN: ${{ github.sha }}
+      # Historical backfill is intentionally NOT an arbitrary SHA/run selector.
+      # Existing successful PR Ready proof remains mandatory below.
+      ACCEPTED_MAIN: ${{ inputs.recover_research_660 == true && '1203a329a29d964743cdcf4a1a972ff70d1f3325' || github.sha }}
+      PUBLISH_TIP: ${{ github.sha }}
+      RECOVER_660: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_research_660 == true }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2732,11 +2745,27 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$ACCEPTED_MAIN" =~ ^[0-9a-f]{40}$ ]]
-          test "$(git rev-parse HEAD)" = "$ACCEPTED_MAIN"
+          test "$(git rev-parse HEAD)" = "$PUBLISH_TIP"
           current="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
-          if [[ "$current" != "$ACCEPTED_MAIN" ]]; then
+          if [[ "$current" != "$PUBLISH_TIP" ]]; then
+            [[ "$RECOVER_660" != true ]] || { echo 'RESEARCH_RECOVERY_MAIN_ADVANCED' >&2; exit 1; }
             echo 'Main advanced; the newer accepted run owns publication.'
             exit 0
+          fi
+          if [[ "$RECOVER_660" == true ]]; then
+            # Recovery can only publish the already merged #660 source tree.
+            # Reject a detached/stale dispatch or a non-ancestor commit.
+            test "$ACCEPTED_MAIN" = 1203a329a29d964743cdcf4a1a972ff70d1f3325
+            compare="$(gh api "/repos/$GITHUB_REPOSITORY/compare/$ACCEPTED_MAIN...$PUBLISH_TIP")"
+            jq -e --arg base "$ACCEPTED_MAIN" --arg tip "$PUBLISH_TIP" '
+              (.status == "ahead" or .status == "identical") and
+              .base_commit.sha == $base and .merge_base_commit.sha == $base and
+              .total_commits == .ahead_by and .total_commits > 0 and
+              .total_commits < 250 and (.commits | length) == .total_commits and
+              .commits[-1].sha == $tip
+            ' <<<"$compare" >/dev/null
+          else
+            test "$PUBLISH_TIP" = "$ACCEPTED_MAIN"
           fi
           prs="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$ACCEPTED_MAIN/pulls")"
           test "$(jq -r --arg main "$ACCEPTED_MAIN" '[.[] | select(.merged_at != null and .merge_commit_sha == $main and .base.ref == "main")] | length' <<<"$prs")" = 1
@@ -2746,6 +2775,10 @@ jobs:
           head_tree="$(gh api "/repos/$GITHUB_REPOSITORY/git/commits/$head" --jq .tree.sha)"
           [[ "$main_tree" =~ ^[0-9a-f]{40}$ ]]
           test "$main_tree" = "$head_tree"
+          if [[ "$RECOVER_660" == true ]]; then
+            test "$head" = 8f912fa5e4ab69ee968ed77965b02f679cb1bda2
+            test "$head_tree" = 9652f03674790ade9f1d3f6dfffc71d4b9fa31cb
+          fi
           runs="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/actions/runs" \
             -f head_sha="$head" -f event=pull_request -f per_page=100)"
           run_id=''; run_attempt=''; artifact_id=''; artifact_digest=''
@@ -2792,6 +2825,12 @@ jobs:
           [[ "$run_id" =~ ^[1-9][0-9]*$ && "$artifact_id" =~ ^[1-9][0-9]*$ ]] || {
             echo 'NO_EXACT_SUCCESSFUL_RESEARCH_READY_PR_ARTIFACT' >&2; exit 1;
           }
+          if [[ "$RECOVER_660" == true ]]; then
+            test "$run_id" = 46089314806
+            test "$run_attempt" = 1
+            test "$artifact_id" = 15239933703
+            test "$artifact_digest" = sha256:f00fb3116e476d94cecab8ba11502f143f9e604c6a9710f9d88f82402ba1c0ac
+          fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
           echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "tree=$head_tree" >> "$GITHUB_OUTPUT"
@@ -2833,7 +2872,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$PUBLISH_TIP"
           tag="research-component-$ACCEPTED_MAIN"
           # target_commitish is ignored if the tag already exists. Bind the
           # actual Git ref (including peeled annotated tags) to accepted main.
@@ -2976,7 +3015,7 @@ jobs:
               [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
             done
             verify_tag_target optional
-            test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
+            test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$PUBLISH_TIP"
             if ! gh api --method PATCH "/repos/$GITHUB_REPOSITORY/releases/$release_id" \
               -F draft=false > "$RUNNER_TEMP/research-release-publish.json"; then
               echo 'RESEARCH_DRAFT_PUBLISH_AMBIGUOUS_VERIFY_RELEASE' >&2
@@ -3010,6 +3049,6 @@ jobs:
           [[ -n "$published" ]] || { echo 'RESEARCH_PUBLISHED_TAG_READBACK_NOT_VISIBLE' >&2; exit 1; }
           test "$(jq -r .id <<<"$published")" = "$release_id"
           verify_tag_target required
-          test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$ACCEPTED_MAIN"
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$PUBLISH_TIP"
           echo 'RESEARCH_COMPONENT_RELEASE=VERIFIED_APPEND_ONLY' >> "$GITHUB_STEP_SUMMARY"
           echo 'RESEARCH_ROLLBACK_RELEASE_RETENTION=KEEP_ALL_ACCEPTED' >> "$GITHUB_STEP_SUMMARY"
