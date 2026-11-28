@@ -730,12 +730,12 @@ impl Jobs {
                      ORDER BY created_ms DESC,id DESC LIMIT ?3",
                 )
                 .map_err(|e| e.to_string())?;
-            let result = statement
+            let mapped = statement
                 .query_map(params![at, cursor, size], row)
-                .map_err(|e| e.to_string())?
-                .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| e.to_string())?;
-            result
+            mapped
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
         } else {
             let mut statement = db
                 .prepare(
@@ -743,12 +743,10 @@ impl Jobs {
                      FROM research_jobs ORDER BY created_ms DESC,id DESC LIMIT ?1",
                 )
                 .map_err(|e| e.to_string())?;
-            let result = statement
-                .query_map([size], row)
-                .map_err(|e| e.to_string())?
+            let mapped = statement.query_map([size], row).map_err(|e| e.to_string())?;
+            mapped
                 .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|e| e.to_string())?;
-            result
+                .map_err(|e| e.to_string())?
         };
         let extra_row = rows.len() > usize::from(limit);
         rows.truncate(usize::from(limit));
