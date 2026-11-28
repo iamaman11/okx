@@ -686,7 +686,7 @@ mod tests {
         let plan = CheckedComposition::compile(request, 128).unwrap();
         let mut runner = CausalGraphStream::new(&plan).unwrap();
         let mut history = Vec::new();
-        let mut (opens, highs, lows, closes, volumes) =
+        let (mut opens, mut highs, mut lows, mut closes, mut volumes) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for index in 0..80 {
             let open = 100.0 + (index % 7) as f64;

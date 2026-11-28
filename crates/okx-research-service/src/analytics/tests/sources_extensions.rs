@@ -1012,7 +1012,9 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
             let state = service.jobs.get(&ohlcv_job).unwrap();
             match state.state {
                 super::super::jobs::State::Completed => break,
-                super::super::jobs::State::Failed => panic!("OHLCV graph failed: {:?}", state.error),
+                super::super::jobs::State::Failed => {
+                    panic!("OHLCV graph failed: {:?}", state.error)
+                }
                 _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
             }
         }

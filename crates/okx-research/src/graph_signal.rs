@@ -444,6 +444,9 @@ mod tests {
         spec.signal_step = "signal".into();
         let (warmup, sources) = preflight_graph_sources(&spec, 100).unwrap();
         assert_eq!(warmup, 1);
-        assert_eq!(sources, vec![SeriesSource::High, SeriesSource::Low, SeriesSource::Volume]);
+        assert_eq!(
+            sources,
+            vec![SeriesSource::High, SeriesSource::Low, SeriesSource::Volume]
+        );
     }
 }

@@ -32,7 +32,10 @@ fn graph_backtest_capabilities_follow_the_same_typed_catalog_as_market_and_compi
         capabilities["graph_backtest"]["sources"],
         json!(graph_sources)
     );
-    assert_eq!(graph_sources, vec!["open", "high", "low", "close", "volume"]);
+    assert_eq!(
+        graph_sources,
+        vec!["open", "high", "low", "close", "volume"]
+    );
     assert_eq!(
         unavailable,
         vec![okx_research_protocol::strategy_contract::SeriesOp::ForwardReturnLabel]
