@@ -267,6 +267,20 @@ pub struct ResearchSupervisor {
 }
 
 impl ResearchSupervisor {
+    /// A controller exit closes Research's process Job. Never permit an
+    /// ostensibly non-disruptive handoff while that Job or its desired owner
+    /// remains active. This check does not reconcile or stop Research.
+    pub(crate) fn ensure_stopped_for_controller_handoff(&self) -> HostControlResult<()> {
+        if self.state_error.is_some()
+            || self.desired.desired_running
+            || self.child.is_some()
+            || self.job.is_some()
+        {
+            return Err(HostControlError::ControllerHandoffNotQuiescent);
+        }
+        Ok(())
+    }
+
     pub fn canonical() -> HostControlResult<Self> {
         Self::at(
             PathBuf::from(okx_host_launcher::CONTROL_ROOT),
@@ -847,6 +861,55 @@ impl Drop for ResearchSupervisor {
 mod tests {
     use super::*;
     use catalog::CATALOG_DB;
+
+    #[test]
+    fn controller_handoff_rejects_desired_or_unverified_research_ownership() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-research-handoff-{}-{}",
+            std::process::id(),
+            fresh_scope().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut owner = ResearchSupervisor::at(root.clone(), root.join("runtime")).unwrap();
+        assert!(owner.ensure_stopped_for_controller_handoff().is_ok());
+
+        owner.desired.desired_running = true;
+        assert_eq!(
+            owner
+                .ensure_stopped_for_controller_handoff()
+                .unwrap_err()
+                .code(),
+            "CONTROLLER_HANDOFF_NOT_QUIESCENT"
+        );
+        owner.desired.desired_running = false;
+        owner.state_error = Some("RESEARCH_STATE_CORRUPT".into());
+        assert_eq!(
+            owner
+                .ensure_stopped_for_controller_handoff()
+                .unwrap_err()
+                .code(),
+            "CONTROLLER_HANDOFF_NOT_QUIESCENT"
+        );
+        owner.state_error = None;
+
+        #[cfg(windows)]
+        {
+            // A retained Job is an unresolved process-ownership boundary,
+            // even if the child handle was lost before a status readback.
+            owner.job = Some(AgentJob::new().unwrap());
+            assert_eq!(
+                owner
+                    .ensure_stopped_for_controller_handoff()
+                    .unwrap_err()
+                    .code(),
+                "CONTROLLER_HANDOFF_NOT_QUIESCENT"
+            );
+            owner.job = None;
+        }
+        assert!(owner.ensure_stopped_for_controller_handoff().is_ok());
+        drop(owner);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn research_process_exit_diagnostic_distinguishes_local_startup_failures() {

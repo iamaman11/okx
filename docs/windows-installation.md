@@ -98,6 +98,16 @@ component validation follows the distinct three-file rules above):
    Agent must belong to the accepted release set. Recover from failures before
    reporting the update successful.
 
+Controller handoff is **not** a hot swap of running Engine/Research processes:
+the existing CONTROL owns both children with kill-on-close Windows Jobs.
+The guarded `HandoffControllerUpdate` and `HandoffToAutostart` operations must
+return `CONTROLLER_HANDOFF_NOT_QUIESCENT` while either child, its desired-running
+state, or its Job ownership remains present. A full verified bundle may be
+staged separately, but activation is allowed only after both owners are
+independently stopped and verified; stopping either owner is **not** implicit
+in the handoff. Older installed CONTROL versions have no such guard, so never
+submit a live handoff on them based solely on the new source or CI results.
+
 `.github/workflows/promote-production-recovery.yml` publishes a versioned GitHub
 release from an already tested artifact after main promotion with equal trees.
 It does not rebuild or overwrite an existing release tag. Initial bootstrap must

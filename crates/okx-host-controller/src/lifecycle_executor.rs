@@ -368,6 +368,22 @@ pub struct HostExecutor {
 }
 
 impl HostExecutor {
+    /// Handoff exits CONTROL and closes its kill-on-close Windows Job handles.
+    /// Reject before staging an activation ACK if either independently owned
+    /// child or its desired state could be interrupted/restarted by that exit.
+    /// The single CONTROL owner loop serializes this check and handoff.
+    pub fn ensure_quiescent_controller_handoff(&self) -> HostControlResult<()> {
+        if self.desired_error.is_some()
+            || self.desired_agent != AgentDesired::Stopped
+            || self.agent_child.is_some()
+            || self.native_child_pipe.is_some()
+            || !self.agent_job.is_empty()?
+        {
+            return Err(HostControlError::ControllerHandoffNotQuiescent);
+        }
+        self.research.ensure_stopped_for_controller_handoff()
+    }
+
     /// Independent read-only observation. Keep the supervisor private: callers
     /// cannot use this witness channel to start, stop or reconcile Research.
     pub fn observe_research_read_only(&mut self) -> HostControlResult<Value> {
@@ -2353,6 +2369,77 @@ fn direct_git_command(repo_root: &Path, args: &[&str]) -> std::process::Command 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn controller_handoff_job_probe_child() {
+        if std::env::var_os("OKX_HANDOFF_JOB_PROBE").is_some() {
+            std::thread::sleep(Duration::from_secs(20));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn controller_handoff_rejects_live_engine_job_without_terminating_it() {
+        let root = std::env::temp_dir().join(format!(
+            "okx-engine-handoff-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let control = root.join("control");
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&control).unwrap();
+        let mut owner = HostExecutor::with_lifecycle(
+            runtime.clone(),
+            DesiredStateStore::at(control.join("engine-state.pb")),
+            ResearchSupervisor::at(control, runtime).unwrap(),
+        )
+        .unwrap();
+        assert!(owner.ensure_quiescent_controller_handoff().is_ok());
+
+        owner.desired_agent = AgentDesired::Running;
+        assert_eq!(
+            owner
+                .ensure_quiescent_controller_handoff()
+                .unwrap_err()
+                .code(),
+            "CONTROLLER_HANDOFF_NOT_QUIESCENT"
+        );
+        owner.desired_agent = AgentDesired::Stopped;
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "lifecycle_executor::tests::controller_handoff_job_probe_child",
+            ])
+            .env("OKX_HANDOFF_JOB_PROBE", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        owner.agent_job.assign(&mut child).unwrap();
+        assert!(!owner.agent_job.is_empty().unwrap());
+        assert_eq!(
+            owner
+                .ensure_quiescent_controller_handoff()
+                .unwrap_err()
+                .code(),
+            "CONTROLLER_HANDOFF_NOT_QUIESCENT"
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "quiescence check must not stop the owned process"
+        );
+
+        owner.agent_job.terminate().unwrap();
+        child.wait().unwrap();
+        assert!(owner.ensure_quiescent_controller_handoff().is_ok());
+        owner.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn research_release_gate_never_requires_a_valid_engine_desired_state() {
