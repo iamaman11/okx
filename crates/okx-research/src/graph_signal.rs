@@ -344,7 +344,7 @@ mod tests {
     fn preflight_rejects_unavailable_source_and_accepts_incremental_dispersion() {
         let mut unavailable = spec();
         for source in okx_analysis::query_plan::SERIES_SOURCES {
-            if source.contract().graph_backtest_supported {
+            if source.contract().graph_backtest_supported || source == SeriesSource::FundingRate {
                 continue;
             }
             unavailable.graph.steps[0].input = source.as_str().into();
@@ -355,6 +355,17 @@ mod tests {
                 source.as_str()
             );
         }
+        unavailable.graph = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"buy","op":"greater_than","input":"funding_rate","threshold":0.0}],
+            "result_steps":["buy"]
+        }))
+        .unwrap();
+        unavailable.signal_step = "buy".into();
+        assert_eq!(
+            preflight_graph(&unavailable, 100).unwrap_err(),
+            "composition.steps[0].input:SOURCE_UNAVAILABLE"
+        );
         unavailable.graph = serde_json::from_value(serde_json::json!({
             "version":COMPOSITION_VERSION,
             "steps":[
