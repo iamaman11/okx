@@ -52,6 +52,8 @@ const NATIVE_IDENTITY_TIMEOUT: Duration = Duration::from_secs(15);
 const WORKSPACE_TEST_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const LOG_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const CHILD_REAP_GRACE: Duration = Duration::from_secs(1);
+#[cfg(windows)]
+const NATIVE_JOB_ACCOUNTING_GRACE: Duration = Duration::from_millis(500);
 const NATIVE_REPLY_MAX_BYTES: u64 = 4096;
 const IDENTITY_PROBE_SCHEMA_V1: &str = "okx.agent.identity-probe/v1";
 
@@ -182,6 +184,23 @@ fn wait_owned_child(
     Ok(None)
 }
 
+/// A signaled process handle can precede the Job's final ActiveProcesses=0
+/// accounting update on Windows. Keep the containment proof, but allow that
+/// bounded kernel bookkeeping delay before treating the receipt as uncertain.
+#[cfg(windows)]
+fn native_job_empty_after_exit(job: &AgentJob) -> bool {
+    let deadline = Instant::now() + NATIVE_JOB_ACCOUNTING_GRACE;
+    loop {
+        if job.is_empty().unwrap_or(false) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// One native receipt with explicit exit status. Read-only callers may
 /// distinguish a failed command; mutating callers require proven success.
 fn bounded_native_status_output(
@@ -227,7 +246,7 @@ fn bounded_native_status_output(
                 .map_err(|_| HostControlError::NativeStorageOutcomeUnknown)?;
             let status = wait_owned_child(&mut child, &job, timeout)?
                 .ok_or(HostControlError::NativeStorageOutcomeUnknown)?;
-            if !job.is_empty().unwrap_or(false) {
+            if !native_job_empty_after_exit(&job) {
                 let _ = job.terminate();
                 return Err(HostControlError::NativeStorageOutcomeUnknown);
             }
@@ -3038,6 +3057,40 @@ mod tests {
             String::from_utf8(bytes).expect("UTF-8 receipt").trim(),
             "BOUNDED-CUTOVER-RECEIPT"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fast_native_receipts_survive_delayed_job_accounting() {
+        // The process handle can be signaled before Job accounting drops to
+        // zero; the same bounded path must accept each proven clean exit.
+        for _ in 0..24 {
+            let mut command = Command::new("cmd");
+            command.arg("/C").arg("echo FAST-NATIVE-RECEIPT");
+            let bytes = bounded_native_output(&mut command, Duration::from_secs(5))
+                .expect("clean fast child must not depend on immediate Job accounting");
+            assert_eq!(
+                String::from_utf8(bytes).unwrap().trim(),
+                "FAST-NATIVE-RECEIPT"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_receipt_rejects_a_surviving_owned_descendant() {
+        // The accounting grace is not permission to treat a live grandchild
+        // as a completed native operation.
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("logged_child_inherited_pipe_fixture")
+            .arg("--nocapture")
+            .env("OKX_INHERITED_PIPE_FIXTURE", "1");
+        let started = Instant::now();
+        let error = bounded_native_output(&mut command, Duration::from_secs(15))
+            .expect_err("a descendant still in the Job must block a PASS");
+        assert_eq!(error.code(), "NATIVE_STORAGE_OUTCOME_UNKNOWN");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
