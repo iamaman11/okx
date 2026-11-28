@@ -273,6 +273,20 @@ impl AnalyticsService {
         let execution_plan = query_plan
             .clone()
             .with_resolved_universe(compute_request.instruments.clone(), global_rank)?;
+        // A composed response may also project legacy scalar fields. Bind
+        // their *physical* capture sources before job admission as well;
+        // the composition compiler already binds its reachable graph ports.
+        // Neither path may discover an unsupported instrument after source I/O.
+        if execution_plan.composition.is_some() {
+            use okx_analysis::query_plan::Source;
+            for instrument in &execution_plan.universe {
+                for kind in [Source::Candles, Source::OpenInterest, Source::Funding] {
+                    if execution_plan.sources.contains(&kind) {
+                        capture_source_ports(&execution_plan, instrument, kind)?;
+                    }
+                }
+            }
+        }
         let (job, new, cancel) = self
             .jobs
             .enqueue_async(

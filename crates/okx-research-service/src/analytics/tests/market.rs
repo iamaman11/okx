@@ -188,6 +188,28 @@ fn t02_funding_composition_rejects_non_swap_before_source_reads() {
     assert!(SeriesSource::Close.bind(&spot[1], range, 1).is_ok());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn t02_composed_market_binds_legacy_source_ports_before_job_admission() {
+    let (root, service) = super::super::artifact_job_fixtures::service();
+    let query: MarketRequest = serde_json::from_value(json!({
+        "action":"screen", "instruments":["BTC-USDT"], "fields":["oi_change"],
+        "timeframe_ms":60000, "start_ms":0, "end_ms":6000000,
+        "composition":{"version":"okx.market.composition/v1", "steps":[
+            {"id":"close_return","op":"returns_series","input":"close"}
+        ], "result_steps":["close_return"]}
+    }))
+    .unwrap();
+    let plan = planner::AnalysisPlan::compile_market(&query).unwrap();
+    assert_eq!(plan.bound_series_source_ports().unwrap().len(), 1);
+    assert_eq!(
+        service.market(query, None, None).await.unwrap_err(),
+        "composition.sources.open_interest:UNSUPPORTED_PRODUCT"
+    );
+    assert!(service.jobs.snapshot().is_empty());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn t13_composition_evidence_uses_a_new_namespace_without_invalidating_legacy_results() {
     let fields = vec!["returns".to_owned()];

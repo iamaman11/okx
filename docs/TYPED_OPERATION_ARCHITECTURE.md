@@ -84,6 +84,10 @@ ValueType = (shape, unit, instrument_scope, timeframe_and_range,
   venue publication timestamps. Existing v1 captures remain hash-readable,
   but their missing bound-port proof forces `partial` source integrity and
   `not_verified` semantic replay; no eager migration or second state store.
+  Composed Market requests also preflight the source ports required by any
+  accompanying legacy scalar projections **before** job admission; a source
+  only discovered during provenance publication must never surprise the job
+  with an unsupported instrument/product after the venue read.
 - **Missing data:** unknown is not zero, false or permission to trade. Warmup,
   gaps, zero denominators, incomplete windows and future-horizon outcomes
   retain specific semantics. Any explicit `flat` signal policy is part of the
