@@ -70,6 +70,20 @@ try {
     "../../contracts/trade-semantic-golden.json"),"utf8"));
   const risk=await import(pathToFileURL(join(output,"decimal.js")));
   const semantic=await import(pathToFileURL(join(output,"execution_tools.js")));
+  // Keep the human-readable installed/live evidence register in exact sync
+  // with the code's public action inventory. The test deliberately checks
+  // identities only: CI cannot assert physical Windows or production health.
+  const evidence=readFileSync(resolve("../../docs/acceptance/537/mcp-action-evidence.md"),"utf8");
+  const documented=[...evidence.matchAll(/^\| `([a-z_]+\.[a-z_]+)` \|/gm)]
+    .map(([,action])=>action).sort();
+  const declared=Object.entries(semantic.ACTION_SCHEMAS).flatMap(([tool,schemas])=>
+    schemas.flatMap(schema=>{
+      const discriminator=schema.properties.action;
+      return (discriminator.enum??[discriminator.const]).map(action=>`${tool}.${action}`);
+    })).sort();
+  assert.equal(declared.length,45,"public MCP action baseline changed: update evidence and acceptance scope");
+  assert.deepEqual(documented,declared,"each public MCP action must have exactly one evidence row");
+  console.log("MCP code/CI/installed/live/negative evidence roster PASS",declared.length);
   // T01: fail CI if public MCP and Rust operator lists drift.
   const rustRegistry=readFileSync(resolve("../../crates/okx-strategy-core/src/operators.rs"),"utf8");
   const registryBlock=rustRegistry.match(/pub const SUPPORTED_OPERATORS:[\s\S]*?=\s*&\[([\s\S]*?)\];/);

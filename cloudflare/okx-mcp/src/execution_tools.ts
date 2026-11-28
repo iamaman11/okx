@@ -106,7 +106,9 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  accounts:{description:'Accounts',readOnlyHint:false,destructiveHint:true},
  strategies:{description:'Live trading',readOnlyHint:false,destructiveHint:true},
- market:{description:'Market composition',readOnlyHint:true,destructiveHint:false},
+ // `screen` can persist a Research job. A multi-action descriptor must not
+ // claim that every action is read-only; it still has no destructive effect.
+ market:{description:'Market composition; screen may create job',readOnlyHint:false,destructiveHint:false},
  research:{description:'Research',readOnlyHint:false,destructiveHint:true},
  portfolio:{description:'Portfolio',readOnlyHint:true,destructiveHint:false},
  diagnostics:{description:'Diagnostics',readOnlyHint:true,destructiveHint:false},

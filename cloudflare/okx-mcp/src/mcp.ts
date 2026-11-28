@@ -1,5 +1,5 @@
 import {PUBLIC_TOOLS,isExecutionMutation,validTool} from './execution_tools.js';
-import {dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,TOOL_CONTRACT_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure,workerReleaseSourceTree} from './shared.js';
+import {CONTROL_ATTEST_DEADLINE_MS,dispatchRuntime,type Env,isObject,type Json,jsonRpc,jsonRpcError,MAX_BODY_BYTES,MCP_PROTOCOL_VERSION,MCP_SERVER_VERSION,TOOL_CONTRACT_VERSION,requestId,runtimeFetch,toolResult as baseToolResult,sha256Hex,transportFailure,workerReleaseSourceTree} from './shared.js';
 const NORMAL_RESULT_BYTES=12_288;
 const RESEARCH_OWNER = {target_owner:'research'} as const;
 // An on-demand, read-only operator catalogue includes all versioned type and
@@ -566,13 +566,20 @@ export const mcpApi={async fetch(request:Request,env:Env,ctx:any):Promise<Respon
        attestation={reason_code:'CONTROL_ATTEST_UNAVAILABLE'};
      }
    }
-   const bound=!!(attestation&&attestation.status==='PASS'&&
+   // A challenge may last at most CONTROL_ATTEST_DEADLINE_MS; its host clock
+   // may differ from Edge by the existing 3s protocol allowance. A stale or
+   // internally contradictory PASS is not independent process evidence.
+   const observedAt=attestation?.observed_at_ms;
+   const now=Date.now();
+   const bound=!!(attestation&&attestation.status==='PASS'&&attestation.reason_code===null&&
      attestation.pid===observed.agent_pid&&
      attestation.active_worker_sha256===observed.agent_binary_sha256&&
      attestation.installed_worker_sha256===observed.agent_binary_sha256&&
      attestation.research_connection_generation===observed.connection_generation&&
      Number.isSafeInteger(attestation.process_generation)&&Number(attestation.process_generation)>0&&
-     Number.isSafeInteger(attestation.observed_at_ms));
+     Number.isSafeInteger(observedAt)&&Number(observedAt)>0&&
+     Number(observedAt)>=now-CONTROL_ATTEST_DEADLINE_MS-3_000&&
+     Number(observedAt)<=now+3_000);
    const controlReason=bound?null:!controlConfigured?'CONTROL_EVIDENCE_UNAVAILABLE':
      !edgeFresh?'RESEARCH_EDGE_SESSION_NOT_FRESH':
      typeof attestation?.reason_code==='string'&&/^[A-Z0-9_]{1,128}$/.test(attestation.reason_code)

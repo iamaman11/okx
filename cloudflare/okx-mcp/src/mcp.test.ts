@@ -1,6 +1,6 @@
 import {mcpApi,operationTrace,projectNativeResponse} from './mcp.js';
 import {payloadFixtures} from './execution_tools.test.js';
-import {MAX_BODY_BYTES} from './shared.js';
+import {CONTROL_ATTEST_DEADLINE_MS,MAX_BODY_BYTES} from './shared.js';
 const ctx={auth:{scope:['mcp:use']}};
 const originJob='a'.repeat(64);
 const researchTrace=operationTrace('research','request:req_original_01',{
@@ -241,6 +241,12 @@ for(const action of ['preview','execute','status','cancel','close','capabilities
   throw Error('truthful trade metadata missing '+action);
 }
 if(body.result.tools.some((t:any)=>t.name==='trade'))throw Error('generic trade must not remain model-callable');
+const marketTool=body.result.tools.find((t:any)=>t.name==='market');
+if(!marketTool||marketTool.annotations?.readOnlyHint!==false||
+ marketTool.annotations?.destructiveHint!==false||
+ marketTool.annotations?.openWorldHint!==false||
+ !marketTool.description.includes('screen may create job'))
+ throw Error('market.screen persists Research jobs; mixed market descriptor must not claim read-only');
 
 if(body.result.tools.length!==13||bytes>24576)throw Error(`tools budget ${bytes}`);
 for(const fixture of payloadFixtures){const r:any=await(await call('tools/call',publicArgs(fixture.tool,fixture.negative[0]))).json();if(r.error?.code!==-32602)throw Error('negative dispatched');}
@@ -988,17 +994,20 @@ for(const [transportStatus,connected,sessionFresh] of [
 }
 // P0 independent CONTROL observation: only a fresh challenge bound to the
 // same Research WSS generation/PID/SHA may change partial to completed.
-for(const mode of ['bound','wrong_pid','wrong_sha','stale_generation','unavailable','malformed','unverified'] as const){
+for(const mode of ['bound','wrong_pid','wrong_sha','stale_generation','unavailable','malformed',
+  'unverified','contradictory_reason','stale_observation','future_observation'] as const){
  const contacted:string[]=[];
  const status={schema:'okx.direct-transport.status/v1',owner:'research',status:'PASS',
   connected:true,session_fresh:true,runtime_profile:'research',connection_generation:88,
   agent_pid:32,agent_binary_sha256:'b'.repeat(64)};
  const attestation={schema:'okx.research.attestation/v1',status:mode==='unverified'?'UNVERIFIED':'PASS',
-  reason_code:mode==='unverified'?'CONTROL_ATTEST_OFFLINE':null,
+  reason_code:mode==='unverified'||mode==='contradictory_reason'?'CONTROL_ATTEST_OFFLINE':null,
   pid:mode==='wrong_pid'?99:32,
   active_worker_sha256:mode==='wrong_sha'?'c'.repeat(64):'b'.repeat(64),
   installed_worker_sha256:'b'.repeat(64),process_generation:7,
-  research_connection_generation:mode==='stale_generation'?87:88,observed_at_ms:Date.now()};
+  research_connection_generation:mode==='stale_generation'?87:88,
+  observed_at_ms:mode==='stale_observation'?Date.now()-CONTROL_ATTEST_DEADLINE_MS-10_000:
+    mode==='future_observation'?Date.now()+10_000:Date.now()};
  const env:any={CONTROL_ATTEST_TOKEN_SHA256:'d'.repeat(64),RUNTIME:{idFromName:()=>0,get:()=>({
   fetch:async(url:string)=>{
    contacted.push(url);

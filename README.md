@@ -28,7 +28,7 @@ does not claim that the complete acceptance campaign finishes in seconds.
 | Module | Owns | Does not own |
 | --- | --- | --- |
 | `crates/okx-trading-engine` | One runtime and request orchestration | A second venue execution state machine |
-| `crates/okx-trading-engine/src/research_client.rs` | Typed child communication and verified worker activation | Research calculations or financial decisions |
+| `crates/okx-research-service/src/edge_runtime.rs` | Independently authenticated Research WSS delivery and bounded public-source requests | Financial authority or an Engine-owned Research child |
 | `crates/okx-research-service/src/analytics/market.rs` | Market queries and computations using host-owned public observations | Trading decisions and account SQL |
 | `crates/okx-research-service/src/analytics/result.rs` | Verified immutable result reads, page cursors and export integrity | Research CPU execution or SQL mutations |
 | `crates/okx-research-service/src/analytics/{jobs,executor,budget,benchmark}.rs` | Research catalog, CPU/memory admission and benchmark jobs | Financial storage and live permissions |
@@ -38,13 +38,16 @@ does not claim that the complete acceptance campaign finishes in seconds.
 | `cloudflare/okx-mcp` | Public MCP schema, authorization and routing | Native financial grants or a second trading engine |
 | `crates/okx-host-controller` | Verified GitHub artifact install, lifecycle and Windows diagnostics | Research/strategy calculation or venue execution |
 
-**Market:** `market` MCP → gateway/WSS → Agent `ResearchClient` → local research
-IPC → worker planner and market handler → bounded result and immutable artifact.
+**Market:** `market` MCP → Cloudflare Edge → authenticated Research WSS →
+Research planner and market handler → bounded result; `screen` may also create
+a durable Research job. Engine is not on this path.
 
-**Research:** `research.validate/grid/backtest/benchmark` MCP → Agent
-`ResearchClient` → research worker's catalog and CPU/memory admission → replay →
-verified summary/detail/export. Live strategies use their own source path and
-pure signal kernel. CI microbenchmarks are not installed acceptance.
+**Research:** `research.validate/grid/backtest/benchmark` MCP → Cloudflare Edge →
+authenticated Research WSS → Research-owned catalog and CPU/memory admission →
+replay → verified summary/detail/export. CONTROL owns verified Research process
+installation and lifecycle; Engine is not a Research transport intermediary.
+Live strategies use their own Engine source path and pure signal kernel. CI
+microbenchmarks are not installed acceptance.
 
 **Researcher/operator path:** the user describes a hypothesis to ChatGPT;
 ChatGPT selects existing typed `market` and `research` operations, checks data
