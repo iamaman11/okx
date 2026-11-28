@@ -710,25 +710,45 @@ mod tests {
         // pending nonce/timer remains the authoritative freshness gate.
         assert!(
             challenge
-                .validate(&challenge.session_id, 7, edge_issued_at_ms - MAX_CLOCK_SKEW_MS)
+                .validate(
+                    &challenge.session_id,
+                    7,
+                    edge_issued_at_ms - MAX_CLOCK_SKEW_MS
+                )
                 .is_ok()
         );
         assert!(
             challenge
-                .validate(&challenge.session_id, 7, edge_issued_at_ms + MAX_CLOCK_SKEW_MS)
+                .validate(
+                    &challenge.session_id,
+                    7,
+                    edge_issued_at_ms + MAX_CLOCK_SKEW_MS
+                )
                 .is_ok()
         );
         assert!(
             challenge
-                .validate(&challenge.session_id, 7, challenge.deadline_ms + MAX_CLOCK_SKEW_MS - 1)
+                .validate(
+                    &challenge.session_id,
+                    7,
+                    challenge.deadline_ms + MAX_CLOCK_SKEW_MS - 1
+                )
                 .is_ok()
         );
         assert_eq!(
-            challenge.validate(&challenge.session_id, 7, edge_issued_at_ms - MAX_CLOCK_SKEW_MS - 1),
+            challenge.validate(
+                &challenge.session_id,
+                7,
+                edge_issued_at_ms - MAX_CLOCK_SKEW_MS - 1
+            ),
             Err("ATTESTOR_CHALLENGE_CLOCK_SKEW")
         );
         assert_eq!(
-            challenge.validate(&challenge.session_id, 7, challenge.deadline_ms + MAX_CLOCK_SKEW_MS),
+            challenge.validate(
+                &challenge.session_id,
+                7,
+                challenge.deadline_ms + MAX_CLOCK_SKEW_MS
+            ),
             Err("ATTESTOR_CHALLENGE_EXPIRED")
         );
     }
