@@ -2466,6 +2466,81 @@ pub enum SeriesSourceVerification {
     RequestAlignmentAndBoundedArtifactIntegrity,
 }
 
+/// Denomination is not interchangeable with a numerical unit. In particular,
+/// provider-native volume is not automatically a base-asset quantity, and a
+/// swap contract count needs its own exchange-reference conversion evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesCurrencyBasis {
+    QuotePerBase,
+    NativeVolumeUnresolved,
+    ContractsRequireReference,
+    DimensionlessRate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesInstrumentProduct {
+    Spot,
+    Swap,
+}
+
+/// Derived from the exact request instrument, not a guessed settlement
+/// currency. Inverse swap settlement remains unresolved without a verified
+/// instrument reference; these fields alone confer no economic conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SeriesInstrumentBinding {
+    pub instrument: String,
+    pub base_asset: String,
+    pub quote_currency: String,
+    pub product: SeriesInstrumentProduct,
+}
+
+impl SeriesInstrumentBinding {
+    fn parse(id: &str, index: usize) -> Result<Self, String> {
+        let invalid = || format!("composition.bindings.instruments[{index}]:INVALID_INSTRUMENT");
+        let parts = id.split('-').collect::<Vec<_>>();
+        let product = match parts.as_slice() {
+            [_, _] => SeriesInstrumentProduct::Spot,
+            [_, _, suffix] if *suffix == "SWAP" => SeriesInstrumentProduct::Swap,
+            _ => return Err(invalid()),
+        };
+        let valid_token = |token: &str| {
+            !token.is_empty()
+                && token.len() <= 32
+                && token
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        };
+        if !valid_token(parts[0]) || !valid_token(parts[1]) || parts[0] == parts[1] {
+            return Err(invalid());
+        }
+        Ok(Self {
+            instrument: id.into(),
+            base_asset: parts[0].into(),
+            quote_currency: parts[1].into(),
+            product,
+        })
+    }
+}
+
+/// An ephemeral, checked source-port binding for one instrument and closed
+/// range. No second graph state is persisted; a QueryPlan derives this value
+/// from the existing finite source contracts before admission/source I/O.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BoundSeriesSourcePort {
+    pub source: SeriesSource,
+    pub version: u16,
+    pub instrument: SeriesInstrumentBinding,
+    pub range: ClosedRange,
+    pub unit: Unit,
+    pub currency_basis: SeriesCurrencyBasis,
+    pub time_basis: TimeBasis,
+    pub availability: DataAvailability,
+    pub alignment: SeriesSourceAlignment,
+    pub publication_time_verified: bool,
+}
+
 /// Declarative input-port properties. `availability` is an obligation for
 /// source admission, not proof that data was historically observable. A
 /// single Market query binds one instrument/closed grid; this descriptor does
@@ -2476,6 +2551,7 @@ pub struct SeriesSourceContract {
     pub version: u16,
     pub source: Source,
     pub unit: Unit,
+    pub currency_basis: SeriesCurrencyBasis,
     pub output_shape: OperationShape,
     pub time_basis: TimeBasis,
     pub availability: DataAvailability,
@@ -2547,6 +2623,14 @@ impl SeriesSource {
             version: 1,
             source,
             unit,
+            currency_basis: match self {
+                Self::Open | Self::High | Self::Low | Self::Close => {
+                    SeriesCurrencyBasis::QuotePerBase
+                }
+                Self::Volume => SeriesCurrencyBasis::NativeVolumeUnresolved,
+                Self::OpenInterest => SeriesCurrencyBasis::ContractsRequireReference,
+                Self::FundingRate => SeriesCurrencyBasis::DimensionlessRate,
+            },
             output_shape: OperationShape::Series,
             time_basis,
             availability,
@@ -2561,6 +2645,38 @@ impl SeriesSource {
             // The actual incremental Research interpreter consumes close only.
             graph_backtest_supported: matches!(self, Self::Close),
         }
+    }
+
+    /// Product, currency and temporal identity must all be bound for every
+    /// referenced port. No historical publication claim is inferred here.
+    pub fn bind(
+        self,
+        instrument: &str,
+        range: ClosedRange,
+        instrument_index: usize,
+    ) -> Result<BoundSeriesSourcePort, String> {
+        let identity = SeriesInstrumentBinding::parse(instrument, instrument_index)?;
+        let contract = self.contract();
+        if matches!(contract.scope, SeriesSourceScope::SwapOnlySameInstrument)
+            && identity.product != SeriesInstrumentProduct::Swap
+        {
+            return Err(format!(
+                "composition.sources.{}:UNSUPPORTED_PRODUCT",
+                self.as_str()
+            ));
+        }
+        Ok(BoundSeriesSourcePort {
+            source: self,
+            version: contract.version,
+            instrument: identity,
+            range,
+            unit: contract.unit,
+            currency_basis: contract.currency_basis,
+            time_basis: contract.time_basis,
+            availability: contract.availability,
+            alignment: contract.alignment,
+            publication_time_verified: contract.publication_time_verified,
+        })
     }
 }
 
@@ -2646,6 +2762,106 @@ mod series_source_contract_tests {
         assert_eq!(
             encoded["time_basis"],
             "realized_funding_event_time_not_publication_time"
+        );
+        assert_eq!(encoded["currency_basis"], "dimensionless_rate");
+    }
+
+    #[test]
+    fn source_port_binding_keeps_instrument_currency_units_and_time_explicit() {
+        let range = ClosedRange::strict(0, 180_000, 60_000).unwrap();
+        let spot = SeriesSource::Close.bind("BTC-USDT", range, 0).unwrap();
+        let peer = SeriesSource::Close.bind("ETH-USDC", range, 1).unwrap();
+        assert_eq!(spot.instrument.base_asset, "BTC");
+        assert_eq!(spot.instrument.quote_currency, "USDT");
+        assert_eq!(spot.instrument.product, SeriesInstrumentProduct::Spot);
+        assert_eq!(spot.currency_basis, SeriesCurrencyBasis::QuotePerBase);
+        assert_eq!(spot.time_basis, TimeBasis::ClosedBar);
+        assert_eq!(spot.availability, DataAvailability::CheckedPerRequest);
+        assert!(!spot.publication_time_verified);
+        assert_ne!(spot.instrument, peer.instrument);
+        assert_ne!(spot.instrument.quote_currency, peer.instrument.quote_currency);
+        assert_eq!(spot.range, peer.range);
+
+        let swap = "BTC-USD-SWAP";
+        let volume = SeriesSource::Volume.bind(swap, range, 0).unwrap();
+        let oi = SeriesSource::OpenInterest.bind(swap, range, 0).unwrap();
+        let funding = SeriesSource::FundingRate.bind(swap, range, 0).unwrap();
+        assert_eq!(volume.currency_basis, SeriesCurrencyBasis::NativeVolumeUnresolved);
+        assert_eq!(oi.currency_basis, SeriesCurrencyBasis::ContractsRequireReference);
+        assert_eq!(funding.currency_basis, SeriesCurrencyBasis::DimensionlessRate);
+        assert_eq!(oi.instrument.quote_currency, "USD");
+        assert_eq!(oi.availability, DataAvailability::HistoricalPublicationTimeUnverified);
+        assert!(!oi.publication_time_verified);
+        assert!(!funding.publication_time_verified);
+
+        for source in [SeriesSource::OpenInterest, SeriesSource::FundingRate] {
+            assert_eq!(
+                source.bind("BTC-USDT", range, 0).unwrap_err(),
+                format!("composition.sources.{}:UNSUPPORTED_PRODUCT", source.as_str())
+            );
+        }
+        for invalid in ["btc-usdt", "BTC", "BTC-BTC", "BTC-USDT-DEC", "BTC--SWAP"] {
+            assert_eq!(
+                SeriesSource::Close.bind(invalid, range, 2).unwrap_err(),
+                "composition.bindings.instruments[2]:INVALID_INSTRUMENT"
+            );
+        }
+    }
+
+    #[test]
+    fn query_plan_binds_every_referenced_source_before_io_and_rechecks_snapshots() {
+        let range = ClosedRange::strict(0, 300_000, 60_000).unwrap();
+        let graph: CompositionRequest = serde_json::from_value(json!({
+            "version": COMPOSITION_VERSION,
+            "steps":[
+                {"id":"oi_return","op":"returns_series","input":"open_interest"},
+                {"id":"close_return","op":"returns_series","input":"close"}
+            ],
+            "result_steps":["oi_return","close_return"]
+        }))
+        .unwrap();
+        let base = QueryPlan::compile(
+            vec![], range, vec![Operator::Returns], BTreeMap::new(), vec![], None,
+        )
+        .unwrap()
+        .with_composition(Some(graph.clone()))
+        .unwrap();
+        assert!(base.bound_series_source_ports().unwrap().is_empty());
+        assert_eq!(
+            base.clone()
+                .with_resolved_universe(vec!["BTC-USDT".into()], false)
+                .unwrap_err(),
+            "composition.sources.open_interest:UNSUPPORTED_PRODUCT"
+        );
+        let checked = base
+            .with_resolved_universe(vec!["BTC-USDT-SWAP".into(), "ETH-USDC-SWAP".into()], false)
+            .unwrap();
+        let ports = checked.bound_series_source_ports().unwrap();
+        assert_eq!(ports.len(), 4);
+        assert_eq!(ports[0].source, SeriesSource::Close);
+        assert_eq!(ports[1].source, SeriesSource::OpenInterest);
+        assert_eq!(ports[0].instrument.quote_currency, "USDT");
+        assert_eq!(ports[2].instrument.quote_currency, "USDC");
+        assert_eq!(ports[0].range, range);
+        let mut forged = serde_json::to_value(&checked).unwrap();
+        forged["universe"][0] = json!("BTC-USDT");
+        assert_eq!(
+            serde_json::from_value::<QueryPlan>(forged).unwrap_err(),
+            "composition.sources.open_interest:UNSUPPORTED_PRODUCT"
+        );
+        assert_eq!(
+            QueryPlan::compile(
+                vec!["BTC-USDT".into()],
+                range,
+                vec![Operator::Returns],
+                BTreeMap::new(),
+                vec![],
+                None,
+            )
+            .unwrap()
+            .with_composition(Some(graph))
+            .unwrap_err(),
+            "composition.sources.open_interest:UNSUPPORTED_PRODUCT"
         );
     }
 
@@ -2805,6 +3021,7 @@ impl TryFrom<StoredQueryPlan> for QueryPlan {
                 .checked_mul(plan.universe.len().max(1) as u64)
                 .ok_or("query_plan.composition:GLOBAL_BARS_OVERFLOW")?;
             graph.validate_global_budget(total_bars)?;
+            plan.bound_series_source_ports()?;
         }
         Ok(plan)
     }
@@ -2849,6 +3066,35 @@ fn output_unit(op: Operator) -> Unit {
     }
 }
 impl QueryPlan {
+    /// The single request-bound source-port schema for Market compositions.
+    /// Every operation still runs in the existing per-instrument Rust owner;
+    /// unlike a cross-instrument join, these independent bindings cannot
+    /// silently exchange units, instruments or quote currencies.
+    pub fn bound_series_source_ports(&self) -> Result<Vec<BoundSeriesSourcePort>, String> {
+        let Some(composition) = &self.composition else {
+            return Ok(Vec::new());
+        };
+        let sources = composition
+            .steps()
+            .iter()
+            .flat_map(|checked| {
+                [
+                    Some(checked.step.input.as_str()),
+                    checked.step.other.as_deref(),
+                ]
+            })
+            .flatten()
+            .filter_map(SeriesSource::parse)
+            .collect::<BTreeSet<_>>();
+        let mut result = Vec::with_capacity(self.universe.len().saturating_mul(sources.len()));
+        for (index, instrument) in self.universe.iter().enumerate() {
+            for source in &sources {
+                result.push(source.bind(instrument, self.range, index)?);
+            }
+        }
+        Ok(result)
+    }
+
     pub fn compile(
         universe: Vec<String>,
         range: ClosedRange,
@@ -2969,6 +3215,9 @@ impl QueryPlan {
             }
             self.sources.sort();
             self.composition = Some(checked);
+            // Explicit instruments must fail before any external universe or
+            // market data read. Global universes are checked when resolved.
+            self.bound_series_source_ports()?;
         }
         Ok(self)
     }
@@ -3010,6 +3259,7 @@ impl QueryPlan {
             composition.validate_global_budget(total_bars)?;
         }
         self.universe = instruments;
+        self.bound_series_source_ports()?;
         Ok(self)
     }
 }

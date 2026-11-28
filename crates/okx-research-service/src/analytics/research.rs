@@ -134,6 +134,7 @@ impl AnalyticsService {
         // venue data. The same pure preflight is repeated against actual bars.
         if let ResearchRequest::GraphBacktest {
             graph_signal,
+            instruments,
             timeframe_ms,
             start_ms,
             end_ms,
@@ -155,6 +156,18 @@ impl AnalyticsService {
                 .checked_add(policy.split_index as u64)
                 .ok_or("graph_oos.range:RESOURCE_LIMIT")?;
             okx_research::graph_signal::preflight_graph(graph_signal, replay_bars)?;
+            // Research's current graph consumes close only. Bind that exact
+            // source to each independent instrument and its closed grid using
+            // the same typed port contract as Market, before job/source I/O.
+            let range = okx_analysis::time_series::ClosedRange::normalize(
+                *start_ms,
+                *end_ms,
+                *timeframe_ms,
+            )
+            .map_err(|reason| format!("graph_signal.range:{reason}"))?;
+            for (index, instrument) in instruments.iter().enumerate() {
+                okx_analysis::query_plan::SeriesSource::Close.bind(instrument, range, index)?;
+            }
         }
         // Estimate the complete batch before SQL admission or fetching candles.
         // Large requests are rejected before any allocation or source I/O.
