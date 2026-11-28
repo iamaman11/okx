@@ -340,12 +340,17 @@ fn decision_rejects_foreign_unreachable_corrupt_expired_and_incomplete_results()
     // A recorded decision now pins its verified source automatically. The
     // retention CAS must refuse to tombstone either immutable reference.
     assert_eq!(
-        service.jobs.expire_terminal_artifact(&a, &result)
+        service
+            .jobs
+            .expire_terminal_artifact(&a, &result)
             .unwrap_err(),
         "RESEARCH_RETENTION_CONFLICT"
     );
     assert_eq!(service.research_decision(read(&a, None)).unwrap(), first);
-    assert_eq!(service.jobs.get(&a).unwrap().decision_artifact.as_deref(), Some(first_id));
+    assert_eq!(
+        service.jobs.get(&a).unwrap().decision_artifact.as_deref(),
+        Some(first_id)
+    );
     drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
