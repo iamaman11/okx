@@ -896,6 +896,11 @@
       "description": "Research",
       "inputSchema": {
         "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
           "idempotency_key": {
             "type": "string",
             "minLength": 8,
@@ -973,6 +978,12 @@
             ],
             "additionalProperties": false
           },
+          "data_mode": {
+            "enum": [
+              "counterfactual",
+              "historical_observed"
+            ]
+          },
           "seed": {
             "$ref": "#/$defs/i"
           },
@@ -980,6 +991,9 @@
             "$ref": "#/$defs/q"
           }
         },
+        "required": [
+          "action"
+        ],
         "oneOf": [
           {
             "properties": {
@@ -1022,7 +1036,6 @@
               }
             },
             "required": [
-              "action",
               "job_id",
               "result_id",
               "name",
@@ -1045,8 +1058,22 @@
               }
             },
             "required": [
-              "action",
               "job_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "list"
+              },
+              "limit": {},
+              "cursor": {
+                "$ref": "#/$defs/j"
+              }
+            },
+            "required": [
+              "limit"
             ],
             "additionalProperties": false
           },
@@ -1065,12 +1092,7 @@
               "end_ms": {},
               "strategy_id": {},
               "costs": {},
-              "data_mode": {
-                "enum": [
-                  "historical_observed",
-                  "counterfactual"
-                ]
-              },
+              "data_mode": {},
               "seed": {},
               "parameters": {},
               "variants": {
@@ -1083,7 +1105,6 @@
               }
             },
             "required": [
-              "action",
               "idempotency_key",
               "instruments",
               "timeframe_ms",
@@ -1150,19 +1171,13 @@
               "start_ms": {},
               "end_ms": {},
               "costs": {},
-              "data_mode": {
-                "enum": [
-                  "historical_observed",
-                  "counterfactual"
-                ]
-              },
+              "data_mode": {},
               "seed": {},
               "graph_signal": {
                 "type": "object"
               }
             },
             "required": [
-              "action",
               "idempotency_key",
               "instruments",
               "timeframe_ms",
@@ -1182,7 +1197,6 @@
               "idempotency_key": {}
             },
             "required": [
-              "action",
               "idempotency_key"
             ],
             "additionalProperties": false
@@ -1197,7 +1211,6 @@
               }
             },
             "required": [
-              "action",
               "job_id"
             ],
             "additionalProperties": false
@@ -1213,7 +1226,6 @@
               "idempotency_key": {}
             },
             "required": [
-              "action",
               "job_id",
               "idempotency_key"
             ],
@@ -1232,11 +1244,7 @@
                 "minLength": 1,
                 "maxLength": 512
               },
-              "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 50
-              },
+              "limit": {},
               "view": {
                 "enum": [
                   "summary",
@@ -1248,7 +1256,6 @@
               }
             },
             "required": [
-              "action",
               "job_id",
               "limit"
             ],
@@ -1260,9 +1267,7 @@
                 "const": "capabilities"
               }
             },
-            "required": [
-              "action"
-            ],
+            "required": [],
             "additionalProperties": false
           },
           {
@@ -1340,12 +1345,9 @@
                 "minItems": 1,
                 "maxItems": 8
               },
-              "data_mode": {
-                "$ref": "#/$defs/v"
-              }
+              "data_mode": {}
             },
             "required": [
-              "action",
               "cases",
               "data_mode"
             ],
@@ -1369,12 +1371,9 @@
               "strategy_id": {},
               "parameters": {},
               "costs": {},
-              "data_mode": {
-                "$ref": "#/$defs/v"
-              }
+              "data_mode": {}
             },
             "required": [
-              "action",
               "instruments",
               "timeframe_ms",
               "start_ms",
@@ -1471,12 +1470,6 @@
               "amount"
             ],
             "additionalProperties": false
-          },
-          "v": {
-            "enum": [
-              "counterfactual",
-              "historical_observed"
-            ]
           }
         }
       },

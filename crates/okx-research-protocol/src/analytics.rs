@@ -406,6 +406,13 @@ pub enum ResearchRequest {
     Status {
         job_id: String,
     },
+    /// Bounded read-only catalog page. Cursor is the last seen job ID from
+    /// the previous page; it is never a directory path or SQL expression.
+    List {
+        limit: u16,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
     Cancel {
         job_id: String,
         idempotency_key: String,
@@ -680,6 +687,13 @@ impl ResearchRequest {
                 decision_id,
             } => valid_job(job_id) && decision_id.as_deref().is_none_or(valid_artifact),
             Self::Status { job_id } => valid_job(job_id),
+            Self::List { limit, cursor } => {
+                (1..=50).contains(limit)
+                    && cursor.as_deref().is_none_or(|id| {
+                        id.len() == 64
+                            && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    })
+            }
             Self::Cancel {
                 job_id,
                 idempotency_key,
@@ -696,6 +710,40 @@ fn valid_annotation(value: &str, max: usize) -> bool {
 }
 fn valid_job(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod list_contract_tests {
+    use super::ResearchRequest;
+
+    #[test]
+    fn list_is_strict_bounded_and_cursor_is_lowercase_job_id() {
+        let request = serde_json::json!({"action":"list","limit":50,"cursor":"a".repeat(64)});
+        let parsed: ResearchRequest = serde_json::from_value(request.clone()).unwrap();
+        assert!(parsed.valid());
+        assert_eq!(serde_json::to_value(parsed).unwrap(), request);
+        assert!(serde_json::from_value::<ResearchRequest>(serde_json::json!({
+            "action":"list","limit":1
+        })).unwrap().valid());
+
+        for (limit, cursor) in [
+            (0, "a".repeat(64)),
+            (51, "a".repeat(64)),
+            (1, "A".repeat(64)),
+            (1, "a".repeat(63)),
+            (1, "z".repeat(64)),
+            (1, "".into()),
+        ] {
+            let input = serde_json::json!({"action":"list","limit":limit,"cursor":cursor});
+            assert!(!serde_json::from_value::<ResearchRequest>(input).unwrap().valid());
+        }
+        for extra in [
+            serde_json::json!({"action":"list","limit":1,"account":"demo"}),
+            serde_json::json!({"action":"list","limit":1,"sort":"created_ms"}),
+        ] {
+            assert!(serde_json::from_value::<ResearchRequest>(extra).is_err());
+        }
+    }
 }
 
 #[cfg(test)]

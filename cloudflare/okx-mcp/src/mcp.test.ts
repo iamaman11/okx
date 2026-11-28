@@ -509,6 +509,42 @@ if(inconsistentGraphResponse.diagnostic!==undefined||
  throw Error('retryable native error was promoted to a deterministic graph preflight');
 console.log('mcp_research_graph_preflight_safe_diagnostic PASS');
 
+// A parent batch summary is an instrument index; its detailed views need the
+// exact cursor returned by summary. Native exposes no instrument-specific data
+// on this failure, and Edge supplies only a fixed, bounded navigation hint.
+const batchSelectionFixture={action:'result',job_id:'a'.repeat(64),limit:50,view:'variants'};
+const batchSelectionFailure={schema:'okx.agent.response/v1',request_id:'req_batch_selection',
+ status:'failed',quality:'NOT_READY',warnings:[],result:null,
+ failure:{code:'BATCH_INSTRUMENT_SELECTION_REQUIRED',message:'Research request unavailable',retryable:false}};
+const selectedBatchRejection=await mcpResponse('research',batchSelectionFixture,batchSelectionFailure);
+if(selectedBatchRejection.status!=='failed'||
+ selectedBatchRejection.reason_code!=='BATCH_INSTRUMENT_SELECTION_REQUIRED'||
+ selectedBatchRejection.retryable!==false||selectedBatchRejection.data!==null||
+ selectedBatchRejection.next_action!=='research.result'||
+ selectedBatchRejection.diagnostic?.stage!=='result_selection'||
+ selectedBatchRejection.diagnostic?.hint!=='use_instrument_cursor_from_summary'||
+ selectedBatchRejection.diagnostic?.cursor_format!=='instrument:<index>:0'||
+ selectedBatchRejection.job_id!==undefined||
+ JSON.stringify(selectedBatchRejection).includes('Research request unavailable'))
+ throw Error('batch selection refusal lost its bounded public navigation hint');
+for(const altered of [
+ {code:'BATCH_INSTRUMENT_SELECTION_REQUIRED',message:'Research request unavailable\ninternal'},
+ {code:'BATCH_INSTRUMENT_SELECTION_REQUIRED',message:'secret native message'},
+ {code:'RESEARCH_REQUEST_FAILED',message:'Research request unavailable'},
+ {code:'BATCH_INSTRUMENT_SELECTION_REQUIRED',message:'Research request unavailable',retryable:true},
+ ] as const){
+ const rejected:any=projectNativeResponse({...batchSelectionFailure,
+   failure:{...batchSelectionFailure.failure,...altered}});
+ if(rejected.diagnostic!==undefined||rejected.next_action!=='inspect_diagnostics'||
+   JSON.stringify(rejected).includes('internal')||JSON.stringify(rejected).includes('secret native'))
+  throw Error('untrusted batch selection failure was promoted to navigable evidence');
+}
+const inconsistentBatchResponse:any=projectNativeResponse({...batchSelectionFailure,result:{rows:[]}});
+if(inconsistentBatchResponse.diagnostic!==undefined||
+ inconsistentBatchResponse.next_action!=='inspect_diagnostics')
+ throw Error('contradictory native batch result was promoted to selection guidance');
+console.log('mcp_research_batch_selection_safe_diagnostic PASS');
+
 // A configured Research bearer is the public routing cutover. Verify every
 // Research operation family, and ensure trading/portfolio financial ownership
 // is unchanged even with the independent owner enabled.

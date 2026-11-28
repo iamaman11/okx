@@ -8,6 +8,178 @@ fn path(label: &str) -> PathBuf {
         ))
         .join("catalog.sqlite")
 }
+
+#[test]
+fn research_catalog_lists_bounded_keyset_pages_with_tied_times_and_existing_index() {
+    let jobs = Jobs::open(path("analyst-list-keyset")).unwrap();
+    let ids: Vec<String> = (0..7).map(|i| format!("{i:064x}")).collect();
+    for (i, id) in ids.iter().enumerate() {
+        jobs.enqueue(format!("list-key-{i}"), id.clone()).unwrap();
+    }
+    {
+        let db = jobs.db.lock().unwrap();
+        // Identical timestamps force deterministic ID tie-breaking.
+        db.execute("UPDATE research_jobs SET created_ms=1000", []).unwrap();
+        db.execute(
+            "UPDATE research_jobs SET state='completed',artifact=?2 WHERE id=?1",
+            params![&ids[3], format!("sha256:{}", "c".repeat(64))],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE research_jobs SET state='completed',error='RESULT_EXPIRED_BY_7_DAY_RETENTION' WHERE id=?1",
+            [&ids[1]],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE research_jobs SET state='failed',error='VENUE_DETAIL_UNSAFE' WHERE id=?1",
+            [&ids[0]],
+        ).unwrap();
+        let plan: Vec<String> = db
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT id,state,created_ms,artifact,decision_artifact,pinned,error
+                 FROM research_jobs WHERE (created_ms,id) < (?1,?2)
+                 ORDER BY created_ms DESC,id DESC LIMIT ?3",
+            )
+            .unwrap()
+            .query_map(params![1000, &ids[5], 3], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|line| line.contains("idx_research_jobs_diagnostics_recent")),
+            "unexpected SQLite plan: {plan:?}"
+        );
+    }
+    let mut cursor: Option<String> = None;
+    let mut seen = Vec::new();
+    for page_index in 0..4 {
+        let page = jobs.list(2, cursor.as_deref()).unwrap();
+        assert_eq!(page["schema"], "okx.research.jobs/v1");
+        let rows = page["jobs"].as_array().unwrap();
+        assert_eq!(rows.len(), if page_index == 3 { 1 } else { 2 });
+        for row in rows {
+            assert_eq!(row["created_ms"], 1000);
+            assert!(row["pinned"].is_boolean());
+            seen.push(row["job_id"].as_str().unwrap().to_owned());
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+    }
+    assert_eq!(seen, ids.iter().rev().cloned().collect::<Vec<_>>());
+    assert_eq!(cursor, None);
+    let complete = jobs.list(50, None).unwrap();
+    assert_eq!(complete["jobs"][3]["state"], "completed");
+    assert!(complete["jobs"][3]["result_id"].is_string());
+    assert_eq!(complete["jobs"][5]["state"], "completed");
+    assert!(complete["jobs"][5]["result_id"].is_null());
+    assert_eq!(complete["jobs"][5]["reason_code"], "RESULT_EXPIRED");
+    assert_eq!(complete["jobs"][6]["state"], "failed");
+    assert!(complete["jobs"][6].get("reason_code").is_none());
+    assert_eq!(jobs.list(0, None).unwrap_err(), "RESEARCH_LIST_LIMIT:1..50");
+    assert_eq!(jobs.list(51, None).unwrap_err(), "RESEARCH_LIST_LIMIT:1..50");
+    assert_eq!(jobs.list(2, Some(&"f".repeat(64))).unwrap_err(), "INVALID_CURSOR");
+    assert_eq!(jobs.list(2, Some(&"A".repeat(64))).unwrap_err(), "INVALID_CURSOR");
+}
+
+#[test]
+fn annotated_catalog_fifty_row_request_stays_under_edge_budget_without_skipping_jobs() {
+    let jobs = Jobs::open(path("analyst-list-bounded-bytes")).unwrap();
+    let mut expected = std::collections::BTreeSet::new();
+    for i in 0..55 {
+        let id = format!("{i:064x}");
+        jobs.enqueue(format!("dense-key-{i}"), id.clone()).unwrap();
+        jobs.update(&id, State::Completed, Some(format!("sha256:{}", "a".repeat(64))), None)
+            .unwrap();
+        expected.insert(id);
+    }
+    jobs.db.lock().unwrap().execute(
+        "UPDATE research_jobs SET created_ms=1234,pinned=1,decision_artifact=?1",
+        [format!("sha256:{}", "b".repeat(64))],
+    ).unwrap();
+    let mut cursor = None;
+    let mut observed = std::collections::BTreeSet::new();
+    for _ in 0..6 {
+        let page = jobs.list(50, cursor.as_deref()).unwrap();
+        let bytes = serde_json::to_vec(&page).unwrap();
+        assert!(bytes.len() <= MAX_LIST_JSON_BYTES, "{} bytes", bytes.len());
+        let rows = page["jobs"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        for row in rows {
+            assert!(observed.insert(row["job_id"].as_str().unwrap().to_owned()));
+            assert!(row["decision_id"].is_string());
+            assert!(row["result_id"].is_string());
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(observed, expected);
+    assert!(cursor.is_none());
+}
+
+#[test]
+fn catalog_open_rescues_existing_nonexpired_decisions_without_reviving_expired_rows() {
+    let file = path("decision-backfill");
+    let jobs = Jobs::open(file.clone()).unwrap();
+    let now = jiff::Timestamp::now().as_millisecond().max(0);
+    let recent = "a".repeat(64);
+    let expired = "b".repeat(64);
+    let tombstone = "c".repeat(64);
+    for (i, id) in [&recent, &expired, &tombstone].into_iter().enumerate() {
+        jobs.enqueue(format!("backfill-{i}"), id.clone()).unwrap();
+    }
+    {
+        let db = jobs.db.lock().unwrap();
+        for (id, time, result) in [
+            (&recent, now - 1_000, Some("sha256:recent")),
+            (&expired, now - 8 * 86_400_000, Some("sha256:expired")),
+            (&tombstone, now - 1_000, None),
+        ] {
+            db.execute(
+                "UPDATE research_jobs SET state='completed',artifact=?2,decision_artifact=?3,
+                 created_ms=?4,pinned=0 WHERE id=?1",
+                params![id, result, "sha256:older-decision", time],
+            )
+            .unwrap();
+        }
+    }
+    drop(jobs);
+    let reopened = Jobs::open(file).unwrap();
+    assert!(reopened.get(&recent).unwrap().pinned);
+    assert_eq!(reopened.get(&recent).unwrap().expires_at_ms, None);
+    assert!(!reopened.get(&expired).unwrap().pinned);
+    assert!(!reopened.get(&tombstone).unwrap().pinned);
+    drop(reopened);
+}
+
+#[test]
+fn decision_backfill_has_exact_seven_day_boundary_and_is_idempotent() {
+    let jobs = Jobs::open(path("decision-backfill-boundary")).unwrap();
+    let cutoff = 20 * 86_400_000_i64;
+    let at = "d".repeat(64);
+    let before = "e".repeat(64);
+    let after = "f".repeat(64);
+    for (i, id) in [&at, &before, &after].into_iter().enumerate() {
+        jobs.enqueue(format!("boundary-{i}"), id.clone()).unwrap();
+    }
+    {
+        let db = jobs.db.lock().unwrap();
+        for (id, instant) in [(&at, cutoff), (&before, cutoff - 1), (&after, cutoff + 1)] {
+            db.execute(
+                "UPDATE research_jobs SET state='completed',artifact='sha256:result',
+                 decision_artifact='sha256:decision',created_ms=?2,pinned=0 WHERE id=?1",
+                params![id, instant],
+            ).unwrap();
+        }
+        let fixed_now = cutoff + 7 * 86_400_000;
+        // Equality is expired: require_decision_result rejects expiry <= now.
+        assert_eq!(Jobs::pin_existing_decisions(&db, fixed_now).unwrap(), 1);
+        assert_eq!(Jobs::pin_existing_decisions(&db, fixed_now).unwrap(), 0);
+    }
+    assert!(!jobs.get(&at).unwrap().pinned);
+    assert!(!jobs.get(&before).unwrap().pinned);
+    assert!(jobs.get(&after).unwrap().pinned);
+}
 #[test]
 fn admission_accepts_public_utf8_keys_and_rejects_invalid_durable_job_ids() {
     assert!(IdempotencyKey::new(String::new()).is_err());

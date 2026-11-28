@@ -295,6 +295,12 @@ impl AnalyticsService {
             ResearchRequest::Status { job_id } => {
                 serde_json::to_value(self.jobs.get_async(job_id).await?).map_err(|e| e.to_string())
             }
+            ResearchRequest::List { limit, cursor } => {
+                let catalog = self.jobs.clone();
+                tokio::task::spawn_blocking(move || catalog.list(limit, cursor.as_deref()))
+                    .await
+                    .map_err(|_| "RESEARCH_CATALOG_READ_FAILED".to_owned())?
+            }
             ResearchRequest::Cancel {
                 job_id,
                 idempotency_key,

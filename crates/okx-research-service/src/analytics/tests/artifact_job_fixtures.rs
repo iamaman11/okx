@@ -782,45 +782,57 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
     .await
     .unwrap();
     assert_eq!(s.research(request).await.unwrap()["id"], id);
-    let result = s
+    // The parent batch is a summary index; detailed views require an explicit
+    // instrument cursor from that summary, never a guessed aggregate page.
+    for view in [
+        ResearchResultView::Trades,
+        ResearchResultView::Variants,
+        ResearchResultView::Equity,
+    ] {
+        let error = s
+            .research(ResearchRequest::Result {
+                job_id: id.clone(),
+                cursor: None,
+                limit: 50,
+                view,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error, "BATCH_INSTRUMENT_SELECTION_REQUIRED");
+    }
+    let aggregate_export = s
         .research(ResearchRequest::Result {
             job_id: id.clone(),
             cursor: None,
             limit: 50,
-            view: ResearchResultView::Trades,
+            view: ResearchResultView::Export,
         })
         .await
         .unwrap();
-    assert_eq!(result["total_rows"], 2);
-    // The public bounded Trades response may split two independently large
-    // grid rows at its byte cap; follow its authenticated cursor to compare
-    // both original instrument summaries without weakening that limit.
-    let mut batch_rows = result["rows"].as_array().unwrap().clone();
-    let mut next = result["next_cursor"].as_str().map(str::to_owned);
-    while let Some(cursor) = next {
-        let page = s
-            .research(ResearchRequest::Result {
-                job_id: id.clone(),
-                cursor: Some(cursor),
-                limit: 50,
-                view: ResearchResultView::Trades,
-            })
-            .await
-            .unwrap();
-        batch_rows.extend(page["rows"].as_array().unwrap().iter().cloned());
-        assert!(batch_rows.len() <= 2);
-        next = page["next_cursor"].as_str().map(str::to_owned);
-    }
-    assert_eq!(batch_rows.len(), 2);
-    assert_eq!(result["summary"]["semantics"], "independent_instruments");
+    assert_eq!(aggregate_export["view"], "export");
+    assert_eq!(aggregate_export["integrity"]["quality"], "partial");
+    let summary = s
+        .research(ResearchRequest::Result {
+            job_id: id.clone(),
+            cursor: None,
+            limit: 50,
+            view: ResearchResultView::Summary,
+        })
+        .await
+        .unwrap();
+    assert_eq!(summary["total_rows"], 2);
+    assert_eq!(summary["rows"][0]["trades_cursor"], "instrument:0:0");
+    assert_eq!(summary["rows"][1]["trades_cursor"], "instrument:1:0");
+    let totals = &summary["metadata"]["summary"];
+    assert_eq!(totals["semantics"], "independent_instruments");
     assert_eq!(
-        result["summary"]["economic_totals"]["fx_conversion"],
+        totals["economic_totals"]["fx_conversion"],
         "not_performed"
     );
-    assert!(result["summary"]["economic_totals"]["cross_currency_total"].is_null());
-    assert!(result["summary"]["economic_totals"]["portfolio_sharpe"].is_null());
+    assert!(totals["economic_totals"]["cross_currency_total"].is_null());
+    assert!(totals["economic_totals"]["portfolio_sharpe"].is_null());
     assert_eq!(
-        result["summary"]["economic_totals"]["by_quote_currency"]
+        totals["economic_totals"]["by_quote_currency"]
             .as_array()
             .unwrap()
             .iter()
@@ -828,7 +840,7 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
             .collect::<Vec<_>>(),
         vec!["USD", "USDT"]
     );
-    for bucket in result["summary"]["economic_totals"]["by_quote_currency"]
+    for bucket in totals["economic_totals"]["by_quote_currency"]
         .as_array()
         .unwrap()
     {
@@ -836,10 +848,10 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
         assert!(bucket["net_pnl_exact"].is_string());
     }
     assert_eq!(
-        result["summary"]["economic_totals"]["cashflow_quality"],
+        totals["economic_totals"]["cashflow_quality"],
         "reconciled_from_replay_ledger"
     );
-    let cashflows = result["summary"]["economic_totals"]["cashflow_by_settlement_currency"]
+    let cashflows = totals["economic_totals"]["cashflow_by_settlement_currency"]
         .as_array()
         .unwrap();
     assert_eq!(cashflows.len(), 2);
@@ -854,19 +866,20 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
         .map(|field| rust_decimal::Decimal::from_str(row[field].as_str().unwrap()).unwrap());
         assert_eq!(money[0] - money[1] - money[2], money[3]);
     }
-    let summary = s
-        .research(ResearchRequest::Result {
-            job_id: id.clone(),
-            cursor: None,
-            limit: 50,
-            view: ResearchResultView::Summary,
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        summary["metadata"]["summary"]["economic_totals"],
-        result["summary"]["economic_totals"]
-    );
+    let mut instrument_results = Vec::new();
+    for index in 0..2 {
+        let result = s
+            .research(ResearchRequest::Result {
+                job_id: id.clone(),
+                cursor: Some(format!("instrument:{index}:0")),
+                limit: 50,
+                view: ResearchResultView::Variants,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result["total_rows"], 2);
+        instrument_results.push(result);
+    }
     assert_eq!(summary["rows"][0]["quote_currency"], "USDT");
     assert_eq!(summary["rows"][1]["quote_currency"], "USD");
     assert_eq!(
@@ -880,14 +893,17 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
     assert_eq!(summary["rows"][0]["product"], "spot");
     assert_eq!(
         summary["rows"][1]["net_pnl_exact"],
-        batch_rows[1]["summary"]["pnl_exact"]
+        instrument_results[1]["metadata"]["summary"]["pnl_exact"]
     );
-    assert_ne!(batch_rows[0]["dataset_hash"], batch_rows[1]["dataset_hash"]);
     assert_ne!(
-        batch_rows[0]["summary"]["pnl"],
-        batch_rows[1]["summary"]["pnl"]
+        instrument_results[0]["metadata"]["dataset_hash"],
+        instrument_results[1]["metadata"]["dataset_hash"]
     );
-    assert!(batch_rows[0]["grid"]["selected"].is_object());
+    assert_ne!(
+        instrument_results[0]["metadata"]["summary"]["pnl"],
+        instrument_results[1]["metadata"]["summary"]["pnl"]
+    );
+    assert!(instrument_results[0]["metadata"]["grid"]["selected"].is_object());
     let trades = s
         .research(ResearchRequest::Result {
             job_id: id.clone(),
@@ -898,6 +914,27 @@ async fn two_asset_batch_grid_has_independent_artifacts_and_cursors() {
         .await
         .unwrap();
     assert_eq!(trades["returned_rows"], 1);
+    let equity = s
+        .research(ResearchRequest::Result {
+            job_id: id.clone(),
+            cursor: Some("instrument:0:0".into()),
+            limit: 2,
+            view: ResearchResultView::Equity,
+        })
+        .await
+        .unwrap();
+    assert_eq!(equity["returned_rows"], 2);
+    let export = s
+        .research(ResearchRequest::Result {
+            job_id: id.clone(),
+            cursor: Some("instrument:0:0".into()),
+            limit: 2,
+            view: ResearchResultView::Export,
+        })
+        .await
+        .unwrap();
+    assert_eq!(export["view"], "export");
+    assert_eq!(export["integrity"]["checksums_verified"], true);
     let experiment_id = trades["metadata"]["experiment_artifact"].as_str().unwrap();
     let experiment: Value = s.artifacts.read_evidence_json(experiment_id).unwrap();
     assert_eq!(experiment["schema"], "okx.research.experiment-inputs/v1");

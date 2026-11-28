@@ -145,7 +145,9 @@ impl ResearchCommand {
             Self::Explain { .. }
             | Self::Capabilities
             | Self::Research {
-                request: ResearchRequest::Status { .. } | ResearchRequest::Capabilities {},
+                request: ResearchRequest::Status { .. }
+                    | ResearchRequest::List { .. }
+                    | ResearchRequest::Capabilities {},
             } => ResearchLane::Observation,
             _ => ResearchLane::Work,
         }
@@ -192,6 +194,14 @@ mod priority_lane_tests {
         );
         assert_eq!(
             research(ResearchRequest::Capabilities {}).lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            research(ResearchRequest::List {
+                limit: 10,
+                cursor: None,
+            })
+            .lane(),
             ResearchLane::Observation
         );
         assert_eq!(

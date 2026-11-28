@@ -922,6 +922,28 @@
   },
   {
     "tool": "research",
+    "action": "list",
+    "positive": {
+      "action": "list",
+      "limit": 1
+    },
+    "negative": [
+      {
+        "action": "list",
+        "limit": 1,
+        "raw_rpc": "forbidden"
+      },
+      {
+        "limit": 1
+      },
+      {
+        "action": 12,
+        "limit": 1
+      }
+    ]
+  },
+  {
+    "tool": "research",
     "action": "backtest",
     "positive": {
       "action": "backtest",
@@ -939,7 +961,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "parameters": {
         "fast": 9,
         "slow": 21
@@ -962,7 +984,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 9,
           "slow": 21
@@ -984,7 +1006,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 9,
           "slow": 21
@@ -1006,7 +1028,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 9,
           "slow": 21
@@ -1032,7 +1054,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "graph_signal": {
         "version": "okx.graph-signal/v1",
         "graph": {
@@ -1070,7 +1092,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -1107,7 +1129,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -1144,7 +1166,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -1933,7 +1955,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "variants": [
         {
           "fast": 9,
@@ -1958,7 +1980,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "fast": 9,
@@ -1987,7 +2009,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "graph_signal": {
         "version": "okx.graph-signal/v1",
         "graph": {
@@ -2031,7 +2053,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -2075,7 +2097,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "unknown",
           "graph": {
@@ -2118,7 +2140,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -2161,7 +2183,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -2204,7 +2226,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -2247,7 +2269,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -2291,7 +2313,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -2341,7 +2363,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -2385,7 +2407,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "graph_signal": {
           "version": "okx.graph-signal/v1",
           "graph": {
@@ -2436,7 +2458,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "parameters": {
         "fast": 9,
         "slow": 21
@@ -2467,7 +2489,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 9,
           "slow": 21
@@ -2490,7 +2512,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 9,
           "slow": 21
@@ -2510,7 +2532,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 9,
           "slow": 21
@@ -2538,7 +2560,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "variants": [
         {
           "fast": 9,
@@ -2571,7 +2593,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "fast": 9,
@@ -2596,7 +2618,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "fast": 9,
@@ -2618,7 +2640,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "fast": 9,
@@ -2647,7 +2669,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "parameters": {
         "fast": 9,
         "slow": 21
@@ -2670,7 +2692,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 9,
           "slow": 21
@@ -2697,7 +2719,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "variants": [
         {
           "fast": 9,
@@ -2722,7 +2744,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "fast": 9,
@@ -2799,7 +2821,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "parameters": {
         "lookback": 20
       }
@@ -2821,7 +2843,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "lookback": 1
         }
@@ -2842,7 +2864,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "lookback": 1001
         }
@@ -2863,7 +2885,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 9,
           "slow": 21
@@ -2885,7 +2907,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "lookback": 20
         }
@@ -2911,7 +2933,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "variants": [
         {
           "lookback": 20
@@ -2935,7 +2957,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "lookback": 1
@@ -2958,7 +2980,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "lookback": 1001
@@ -2981,7 +3003,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "fast": 9,
@@ -3005,7 +3027,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "lookback": 20
@@ -3140,7 +3162,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "parameters": {
         "fast": 999,
         "slow": 1000
@@ -3163,7 +3185,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 999,
           "slow": 1001
@@ -3185,7 +3207,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "parameters": {
           "fast": 1000,
           "slow": 1000
@@ -3212,7 +3234,7 @@
         "slippage_bps": 0,
         "funding_mode": "observed"
       },
-      "data_mode": "historical_observed",
+      "data_mode": "counterfactual",
       "variants": [
         {
           "fast": 999,
@@ -3237,7 +3259,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "fast": 999,
@@ -3261,7 +3283,7 @@
           "slippage_bps": 0,
           "funding_mode": "observed"
         },
-        "data_mode": "historical_observed",
+        "data_mode": "counterfactual",
         "variants": [
           {
             "fast": 1000,

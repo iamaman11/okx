@@ -45,6 +45,17 @@ request/queue/delivery history. Consequently the separate `operation_trace`
 still correctly reports `quality: "partial"`, `history: "UNKNOWN"` and
 `first_unproven_fact: "FULL_CAUSAL_HISTORY"`.
 
+If the job ID was not saved, first call the existing `research` tool with
+`{"action":"list","limit":20}`. Its read-only `okx.research.jobs/v1`
+catalog page lists retained jobs with `job_id`, state, creation time,
+result/decision artifact IDs, pin state and expiration time. Follow
+`next_cursor` using `{"action":"list","limit":20,"cursor":"<next_cursor>"}`;
+it is the exact 64-character lowercase ID of the last returned job, not a
+page number or arbitrary filter. Pages are ordered by creation time and ID,
+newest first; an unknown/stale cursor fails explicitly. The list has no
+account selection, trading authority or market/source read. Select a job ID
+before requesting its result, decision or bounded explanation.
+
 Research graph preflight failures retain `data: null` and do not create a job.
 For native code `GRAPH_OPERATOR_NOT_INCREMENTAL`, Edge adds a bounded
 `diagnostic: {stage: "graph_preflight", step_id, operator}` and
