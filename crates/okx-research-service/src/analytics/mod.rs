@@ -295,6 +295,12 @@ impl AnalyticsService {
             ResearchRequest::Status { job_id } => {
                 serde_json::to_value(self.jobs.get_async(job_id).await?).map_err(|e| e.to_string())
             }
+            ResearchRequest::List { limit, cursor } => {
+                let catalog = self.jobs.clone();
+                tokio::task::spawn_blocking(move || catalog.list(limit, cursor.as_deref()))
+                    .await
+                    .map_err(|_| "RESEARCH_CATALOG_READ_FAILED".to_owned())?
+            }
             ResearchRequest::Cancel {
                 job_id,
                 idempotency_key,
@@ -669,7 +675,7 @@ fn research_capabilities() -> Value {
             "observation_in_flight":okx_research_protocol::research_ipc::OBSERVATION_IN_FLIGHT,
             "work_in_flight":okx_research_protocol::research_ipc::MAX_IN_FLIGHT,
             "critical_commands":["cancel","drain","shutdown"],
-            "observation_commands":["explain","capabilities","status"],
+            "observation_commands":["explain","capabilities","status","list"],
             "read_only_observation":"no_venue_trade_or_finance_authority",
             "worker_ipc_under_saturated_work":"covered_by_real_child_process_test",
             "engine_and_finance_slo_under_load":"not_evaluated"},

@@ -133,6 +133,13 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
    failure.code==='GRAPH_OPERATOR_NOT_INCREMENTAL'&&typeof failure.message==='string'&&failure.message.length<=96
    ?/^graph_preflight:steps\[([a-z0-9_]{1,32})\]\.op=(rolling_pearson|rolling_stddev|rolling_zscore)$/.exec(failure.message)
    :null;
+ // A batch wrapper has no leaf trades/equity/variants without an instrument
+ // selector; aggregate export remains partial. Expose a fixed navigation hint
+ // only for the exact native, non-retryable refusal.
+ const batchSelectionRequired=native&&frame.status==='failed'&&status==='failed'&&
+   frame.result===null&&failure?.retryable===false&&
+   failure.code==='BATCH_INSTRUMENT_SELECTION_REQUIRED'&&
+   failure.message==='Research request unavailable';
  const job=jobState(result??{});
  const reason=stringField(failure??{},'code')??stringField(result??{},'reason_code')??
    stringField(result??{},'reason')??stringField(frame,'reason_code')??stringField(frame,'reason')??
@@ -155,6 +162,11 @@ export function projectNativeResponse(value:Json):Record<string,Json>{
    if(graphRejection){
      projected.diagnostic={stage:'graph_preflight',step_id:graphRejection[1],operator:graphRejection[2]};
      projected.next_action='choose_supported_graph_operator';
+   }
+   if(batchSelectionRequired){
+     projected.diagnostic={stage:'result_selection',hint:'use_instrument_cursor_from_summary',
+       cursor_format:'instrument:<index>:0'};
+     projected.next_action='research.result';
    }
  }
  const jobId=stringField(result??{},'job_id')??(job?stringField(result??{},'id'):undefined)??stringField(frame,'job_id');

@@ -40,7 +40,7 @@ const researchParameters={oneOf:[ema,object({lookback:integer(2,1000)})]};
 const costs=object({maker_fee_bps:{type:'number',minimum:0,maximum:1000},taker_fee_bps:{type:'number',minimum:0,maximum:1000},slippage_bps:{type:'number',minimum:0,maximum:1000},funding_mode:choice('observed','zero_assumption')});
 const range={instruments:array(text(64),100),timeframe_ms:timeframe,start_ms:integer(0),end_ms:integer(1)};
 const researchStrategies=choice('ema_cross_v1','ema_momentum_confirm_v1','close_breakout_v1');
-const research={...mutation,...range,instruments:{...array(text(64),8),minItems:1},strategy_id:researchStrategies,costs,data_mode:choice('historical_observed','counterfactual'),seed:integer()};
+const research={...mutation,...range,instruments:{...array(text(64),8),minItems:1},strategy_id:researchStrategies,costs,data_mode:choice('counterfactual','historical_observed'),seed:integer()};
 const instance={instance_id:text(64)};
 const number=(minimum=0,maximum=Number.MAX_SAFE_INTEGER)=>({type:'number',minimum,maximum});
 export const MARKET_OPERATORS=["returns","log_returns","realized_volatility","downside_volatility","max_drawdown","pearson_correlation","ema","rolling_mean","atr","rsi","spread_bps","volume_change","oi_change","funding_sum","position_size","cost_estimate"] as const;
@@ -94,7 +94,7 @@ export const ACTION_SCHEMAS:Record<string,Schema[]>={
   action('capital_assign',{account,...mutation,...instance,direction:choice('assign','release'),amount_usd:money,expected_authority_revision:integer(1)},['account','idempotency_key','instance_id','direction','amount_usd','expected_authority_revision']),
  ],
  market:[screenCompare,action('instruments',{asset:text(16),settle_currency:text(16)},['asset']),action('snapshot',{instrument:text(64)}),action('microstructure',{instrument:text(64),size_contracts:money},['instrument']),action('capabilities')],
- research:[action('record_decision',{job_id:decisionJob,result_id:artifactId,expected_decision_id:artifactId,name:annotationText(128),hypothesis:annotationText(4096),status:choice('accepted','rejected','deferred'),reason:annotationText(2048)},['job_id','result_id','name','hypothesis','status','reason']),action('decision',{job_id:decisionJob,decision_id:artifactId},['job_id']),researchRun,graphBacktest,action('benchmark',{idempotency_key:token}),action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50),view:choice('summary','trades','equity','variants','export')},['job_id','limit']),action('capabilities'),action('economics',{cases:{type:'array',items:economicCase,minItems:1,maxItems:8},data_mode:choice('counterfactual','historical_observed')}),action('validate',{...range,range_mode:choice('strict','normalize'),instruments:{...array(text(64),8),minItems:1},strategy_id:researchStrategies,parameters:researchParameters,costs,data_mode:choice('counterfactual','historical_observed')},['instruments','timeframe_ms','start_ms','end_ms','strategy_id','parameters','costs','data_mode'])],
+ research:[action('record_decision',{job_id:decisionJob,result_id:artifactId,expected_decision_id:artifactId,name:annotationText(128),hypothesis:annotationText(4096),status:choice('accepted','rejected','deferred'),reason:annotationText(2048)},['job_id','result_id','name','hypothesis','status','reason']),action('decision',{job_id:decisionJob,decision_id:artifactId},['job_id']),action('list',{limit:integer(1,50),cursor:decisionJob},['limit']),researchRun,graphBacktest,action('benchmark',{idempotency_key:token}),action('status',{job_id:text()}),action('cancel',{job_id:text(),...mutation}),action('result',{job_id:text(),cursor:text(512),limit:integer(1,50),view:choice('summary','trades','equity','variants','export')},['job_id','limit']),action('capabilities'),action('economics',{cases:{type:'array',items:economicCase,minItems:1,maxItems:8},data_mode:choice('counterfactual','historical_observed')}),action('validate',{...range,range_mode:choice('strict','normalize'),instruments:{...array(text(64),8),minItems:1},strategy_id:researchStrategies,parameters:researchParameters,costs,data_mode:choice('counterfactual','historical_observed')},['instruments','timeframe_ms','start_ms','end_ms','strategy_id','parameters','costs','data_mode'])],
  trade:[action('preview',{account,...trade},['account','operation','strategy_instance','instrument','side','sizing','order']),action('execute',{account,...mutation,...trade,expires_in_ms:integer(1,30000)},['account','idempotency_key','operation','strategy_instance','instrument','side','sizing','order','expires_in_ms']),action('status',{account,reference:text()}),action('cancel',{account,...mutation,reference:text()}),action('close',{account,...mutation,reference:text(),expires_in_ms:integer(1,30000)}),action('capabilities',{account}),action('preflight',{account})],
  portfolio:[portfolioHistory,action('scenario',{equity_usd:money,positions:array(object({instrument:text(64),side:choice('long','short'),notional_usd:money,margin_usd:money,price_shock_bps:integer(-10000,10000),volatility_bps:integer(0,10000),liquidity_cost_bps:integer(0,10000)}),8),correlations:array(object({left:integer(0,7),right:integer(0,7),rho:number(-1,1)}),28)},['equity_usd','positions','correlations'])],
  diagnostics:[action('explain',{reference:text(),account,view:choice('finance','operation','research','storage'),cycle_id:integer(1),limit:integer(1,4)},[]),action('runtime')],
@@ -195,7 +195,10 @@ function publicStrategiesSchema():Schema {
 // but avoids repeating long nested Research schemas in the 24 KiB tool list.
 function publicResearchSchema():Schema {
  const actions=ACTION_SCHEMAS.research;
- const common:Schema={};
+ // Status/result/cancel use the same bounded text job identifier; decisions
+ // impose an additional exact digest. Put the shared outer bound at the root
+ // while keeping the decision-specific pattern in its branch.
+ const common:Schema={job_id:text()};
  const differing=new Set<string>();
  const counts=new Map<string,number>();
  for(const schema of actions)for(const [field,value]of Object.entries(schema.properties)){
@@ -212,14 +215,19 @@ function publicResearchSchema():Schema {
  for(const field of Object.keys(common))if((counts.get(field)??0)<2||differing.has(field))delete common[field];
  const branches=actions.map(schema=>{
    const properties=Object.fromEntries(Object.entries(schema.properties).map(([field,value])=>[
-     field,field==='action'||field==='job_id'||!(field in common)||differing.has(field)||
+     field,field==='action'||(field==='job_id'&&['record_decision','decision'].includes(schema.properties.action.const))||!(field in common)||differing.has(field)||
        (schema.properties.action.const==='result'&&field==='view')?value:{}
    ]));
    if(schema.properties.action.const==='graph_backtest')properties.graph_signal={type:'object'};
    const {properties:_properties,...rest}=schema;
-   return {properties,...rest};
+   // Every action discriminator is required exactly once at the root. The
+   // branch retains its exact const/enum and independent field requirements.
+   // The existing product-acceptance proof also requires the no-argument
+   // capabilities branch to spell out that same discriminator explicitly.
+   const required=(rest.required as string[]).filter(field=>field!=='action');
+   return {properties,...rest,required:schema.properties.action.const==='capabilities'?['action']:required};
  });
- return publicSchema({properties:common,oneOf:branches});
+ return publicSchema({properties:common,required:['action'],oneOf:branches});
 }
 export const PUBLIC_TOOLS:Json[]=[
  ...Object.entries(ACTION_SCHEMAS).filter(([name])=>name!=='trade')

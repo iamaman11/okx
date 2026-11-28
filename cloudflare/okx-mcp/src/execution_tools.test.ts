@@ -344,6 +344,17 @@ for(const [action,valid]of [['create',liveCreate],['update',liveUpdate]] as cons
 }
 fail(!validTool('strategies',{...liveCreate,version:2}),'only live strategy definition v1 supported');
 const researchResult=payloadFixtures.find(x=>x.tool==='research'&&x.action==='result')!.positive;
+const catalogPage={action:'list',limit:50,cursor:'a'.repeat(64)};
+fail(validTool('research',catalogPage),'research list accepts last-seen job ID cursor');
+fail(validTool('research',{action:'list',limit:1}),'research list accepts first page without cursor');
+fail(!isExecutionMutation('research','list'),'listing research jobs has no mutation authority');
+for(const invalid of [
+ {...catalogPage,limit:0},{...catalogPage,limit:51},{...catalogPage,limit:1.5},
+ {...catalogPage,cursor:'A'.repeat(64)}, {...catalogPage,cursor:'a'.repeat(63)},
+ {...catalogPage,cursor:'z'.repeat(64)}, {...catalogPage,cursor:'../catalog'},
+ {...catalogPage,cursor:''}, {...catalogPage,account:'foreign'},
+ {action:'list',cursor:'a'.repeat(64)},
+])fail(!validTool('research',invalid),'research list strict bounds, cursor, no account or extra fields');
 for(const view of ['summary','trades','equity','variants'])
  fail(validTool('research',{...researchResult,view}),`research result view ${view} accepted`);
 fail(!validTool('research',{...researchResult,view:'unsupported'}),'research view strictly enumerated');
@@ -454,7 +465,11 @@ for(const tool of PUBLIC_TOOLS as any[]){
       [field,field==='graph_signal'?
         ACTION_SCHEMAS.research.find((s:any)=>s.properties.action.const==='graph_backtest')!.properties.graph_signal:
         (Object.keys(rule as object).length===0?expanded.properties[field]:rule)])),
-    ...Object.fromEntries(Object.entries(branch).filter(([key])=>key!=='properties')),
+    // Restore the discriminator requirement factored to the public root;
+    // compare the reconstructed strict branch byte-for-byte to its source.
+    ...Object.fromEntries(Object.entries(branch).filter(([key])=>key!=='properties')
+      .map(([key,value])=>[key,key==='required'?
+        ['action',...(value as string[]).filter(field=>field!=='action')]:value])),
   })):expanded.oneOf;
   if(tool.name==='strategies')
     fail(expanded.type==='object' && expanded.unevaluatedProperties===false

@@ -184,7 +184,11 @@ impl ResearchCommand {
     pub fn lane(&self) -> ResearchLane {
         match self {
             Self::Research(ResearchRequest::Cancel { .. }) => ResearchLane::Critical,
-            Self::Research(ResearchRequest::Status { .. } | ResearchRequest::Capabilities {})
+            Self::Research(
+                ResearchRequest::Status { .. }
+                | ResearchRequest::List { .. }
+                | ResearchRequest::Capabilities {},
+            )
             | Self::MarketCapabilities
             | Self::ExplainJob(_) => ResearchLane::Observation,
             _ => ResearchLane::Work,
@@ -209,6 +213,14 @@ mod edge_lanes_tests {
         assert_eq!(
             ResearchCommand::Research(ResearchRequest::Status {
                 job_id: "job".into()
+            })
+            .lane(),
+            ResearchLane::Observation
+        );
+        assert_eq!(
+            ResearchCommand::Research(ResearchRequest::List {
+                limit: 10,
+                cursor: None,
             })
             .lane(),
             ResearchLane::Observation

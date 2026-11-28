@@ -15,6 +15,9 @@ use std::{
 // Retry request IDs may legitimately differ after a lost Edge response. Keep
 // only a bounded, durable alias window for each independently owned job.
 const MAX_ORIGIN_ALIASES_PER_JOB: i64 = 16;
+// The public MCP result envelope has a 12-KiB budget. Keep the native page
+// comfortably below it even when all 50 jobs have both immutable references.
+const MAX_LIST_JSON_BYTES: usize = 9_500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -269,6 +272,11 @@ impl Jobs {
                 .map_err(|e| e.to_string())?;
         }
         migration.execute("CREATE INDEX IF NOT EXISTS idx_research_jobs_decision_artifact ON research_jobs(decision_artifact) WHERE decision_artifact IS NOT NULL", []).map_err(|e| e.to_string())?;
+        // Previously recorded decisions predate atomic pinning. Rescue only
+        // verified-in-time catalog heads that have not reached the original
+        // seven-day deadline; expired/tombstoned records stay expired. The
+        // partial index visits annotated rows, with no evidence-file scan.
+        Self::pin_existing_decisions(&migration, jiff::Timestamp::now().as_millisecond().max(0))?;
         let has_progress = migration
             .prepare("PRAGMA table_info(research_jobs)")
             .map_err(|e| e.to_string())?
@@ -331,6 +339,19 @@ impl Jobs {
             diagnostic,
             draining: Arc::new(AtomicBool::new(false)),
         })
+    }
+    /// Existing nonexpired annotations gain the same retention guarantee as
+    /// newly committed decisions. The predicate uses the partial decision
+    /// index and never attempts to reconstruct or read evidence files.
+    fn pin_existing_decisions(db: &Connection, now_ms: i64) -> Result<usize, String> {
+        let retention_cutoff = now_ms.saturating_sub(7 * 86_400_000);
+        db.execute(
+            "UPDATE research_jobs SET pinned=1 WHERE decision_artifact IS NOT NULL
+             AND artifact IS NOT NULL AND state='completed' AND pinned=0
+             AND created_ms>?1",
+            [retention_cutoff],
+        )
+        .map_err(|e| e.to_string())
     }
     pub(super) fn with_producer(mut self, producer: Option<crate::producer::Producer>) -> Self {
         self.producer = producer;
@@ -587,13 +608,17 @@ impl Jobs {
             return Err("DECISION_REVISION_CONFLICT".into());
         }
         let changed = tx.execute(
-            "UPDATE research_jobs SET decision_artifact=?2 WHERE id=?1 AND artifact=?3 AND decision_artifact IS ?4 AND state='completed'",
+            // The annotation and its immutable result must outlive ordinary
+            // seven-day cleanup together. A separate pin would leave a race
+            // between the decision CAS and retention.
+            "UPDATE research_jobs SET decision_artifact=?2,pinned=1 WHERE id=?1 AND artifact=?3 AND decision_artifact IS ?4 AND state='completed'",
             params![id, next, result, observed_head],
         ).map_err(|e| e.to_string())?;
         if changed != 1 {
             return Err("DECISION_REVISION_CONFLICT".into());
         }
         tx.commit().map_err(|e| e.to_string())?;
+        self.diagnostic.publish_id(&db, id);
         Ok(())
     }
     pub(super) fn require_decision_result(job: &Job) -> Result<(), String> {
@@ -621,6 +646,133 @@ impl Jobs {
     pub fn get(&self, id: &str) -> Result<Job, String> {
         let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
         Self::read(&db, id)?.ok_or("JOB_NOT_FOUND".into())
+    }
+    #[cfg(test)]
+    pub(crate) fn set_created_ms_for_test(&self, id: &str, created_ms: i64) -> Result<(), String> {
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        let changed = db
+            .execute(
+                "UPDATE research_jobs SET created_ms=?2 WHERE id=?1",
+                params![id, created_ms],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("JOB_NOT_FOUND".into());
+        }
+        Ok(())
+    }
+    /// Bounded, read-only catalog page. An exact existing job ID identifies
+    /// the exclusive continuation point in (created_ms, id) order. Both SQL
+    /// branches use the existing idx_research_jobs_diagnostics_recent index.
+    pub fn list(&self, limit: u16, cursor: Option<&str>) -> Result<serde_json::Value, String> {
+        if !(1..=50).contains(&limit) {
+            return Err("RESEARCH_LIST_LIMIT:1..50".into());
+        }
+        if cursor.is_some_and(|id| {
+            id.len() != 64
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) {
+            return Err("INVALID_CURSOR".into());
+        }
+        let db = self.db.lock().map_err(|_| "CATALOG_LOCK_POISONED")?;
+        let boundary = cursor
+            .map(|id| {
+                db.query_row(
+                    "SELECT created_ms FROM research_jobs WHERE id=?1",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "INVALID_CURSOR".to_string())
+            })
+            .transpose()?;
+        fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<serde_json::Value> {
+            let job_id: String = row.get(0)?;
+            let state: String = row.get(1)?;
+            State::parse(&state)?;
+            let created_ms =
+                u64::try_from(row.get::<_, i64>(2)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let result_id: Option<String> = row.get(3)?;
+            let decision_id: Option<String> = row.get(4)?;
+            let pinned = row.get::<_, i64>(5)? != 0;
+            let error: Option<String> = row.get(6)?;
+            let expired = result_id.is_none()
+                && error.as_deref() == Some("RESULT_EXPIRED_BY_7_DAY_RETENTION");
+            let expires_at_ms = if result_id.is_some()
+                && !pinned
+                && !matches!(state.as_str(), "queued" | "running")
+            {
+                Some(created_ms.saturating_add(7 * 86_400_000))
+            } else {
+                None
+            };
+            let mut value = serde_json::json!({
+                "job_id":job_id,"state":state,"created_ms":created_ms,
+                "result_id":result_id,"decision_id":decision_id,
+                "pinned":pinned,"expires_at_ms":expires_at_ms
+            });
+            // The durable terminal state remains completed. Identify an
+            // expired result without exposing arbitrary native error strings.
+            if expired {
+                value["reason_code"] = serde_json::json!("RESULT_EXPIRED");
+            }
+            Ok(value)
+        }
+        let size = i64::from(limit) + 1;
+        let mut rows = if let Some(at) = boundary {
+            let mut statement = db
+                .prepare(
+                    "SELECT id,state,created_ms,artifact,decision_artifact,pinned,error
+                     FROM research_jobs WHERE (created_ms,id) < (?1,?2)
+                     ORDER BY created_ms DESC,id DESC LIMIT ?3",
+                )
+                .map_err(|e| e.to_string())?;
+            let mapped = statement
+                .query_map(params![at, cursor, size], row)
+                .map_err(|e| e.to_string())?;
+            mapped
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        } else {
+            let mut statement = db
+                .prepare(
+                    "SELECT id,state,created_ms,artifact,decision_artifact,pinned,error
+                     FROM research_jobs ORDER BY created_ms DESC,id DESC LIMIT ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let mapped = statement
+                .query_map([size], row)
+                .map_err(|e| e.to_string())?;
+            mapped
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        };
+        let extra_row = rows.len() > usize::from(limit);
+        rows.truncate(usize::from(limit));
+        let mut count = rows.len();
+        loop {
+            let has_more = extra_row || count < rows.len();
+            let next_cursor = if has_more {
+                rows.get(count.saturating_sub(1))
+                    .and_then(|item| item["job_id"].as_str())
+            } else {
+                None
+            };
+            // Keep the exact final returned ID as the continuation point.
+            // Cutting a full page without adjusting its cursor loses jobs.
+            let page = serde_json::json!({"schema":"okx.research.jobs/v1",
+                "jobs":&rows[..count],"next_cursor":next_cursor});
+            if serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() <= MAX_LIST_JSON_BYTES {
+                return Ok(page);
+            }
+            if count <= 1 {
+                return Err("RESEARCH_LIST_RESPONSE_LIMIT".into());
+            }
+            count -= 1;
+        }
     }
     /// Bounded read-only observation; does not acquire the catalog/SQL mutex.
     pub fn diagnostic_readback(&self, id: &str) -> serde_json::Value {

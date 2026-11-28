@@ -50,6 +50,59 @@ fn read(job: &str, decision: Option<&str>) -> ResearchRequest {
     }
 }
 
+#[test]
+fn recording_decision_pins_result_through_retention_and_replay_is_stable() {
+    let (root, service) = super::super::artifact_job_fixtures::service();
+    let (saved_job, saved_result) = fixture(&service, 'a');
+    let (unsaved_job, _) = fixture(&service, 'b');
+    let request = record(&saved_job, &saved_result, None, "Persistent hypothesis");
+    let first = service.research_decision(request.clone()).unwrap();
+    let pinned = service.jobs.get(&saved_job).unwrap();
+    assert!(pinned.pinned);
+    assert!(pinned.expires_at_ms.is_none());
+    assert_eq!(
+        pinned.decision_artifact.as_deref(),
+        first["decision_id"].as_str()
+    );
+    assert_eq!(service.research_decision(request).unwrap(), first);
+    assert!(service.jobs.get(&saved_job).unwrap().pinned);
+
+    let future = jiff::Timestamp::now().as_millisecond().max(0) as u64 + 8 * 86_400_000;
+    assert_eq!(service.apply_retention(future).unwrap(), 1);
+    assert_eq!(
+        service.research_decision(read(&saved_job, None)).unwrap(),
+        first
+    );
+    assert_eq!(service.jobs.get(&unsaved_job).unwrap().artifact, None);
+    assert_eq!(
+        service
+            .research_decision(read(&unsaved_job, None))
+            .unwrap_err(),
+        "RESULT_EXPIRED"
+    );
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn expired_result_cannot_commit_decision_or_pin_job() {
+    let (root, service) = super::super::artifact_job_fixtures::service();
+    let (job, result) = fixture(&service, 'c');
+    let old = (jiff::Timestamp::now().as_millisecond() - 8 * 86_400_000).max(0);
+    service.jobs.set_created_ms_for_test(&job, old).unwrap();
+    assert_eq!(
+        service
+            .research_decision(record(&job, &result, None, "Expired case"))
+            .unwrap_err(),
+        "RESULT_EXPIRED"
+    );
+    let observed = service.jobs.get(&job).unwrap();
+    assert!(!observed.pinned);
+    assert!(observed.decision_artifact.is_none());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn service_decision_replay_revision_and_real_catalog_reopen_preserve_original_bytes() {
     let (root, service) = super::super::artifact_job_fixtures::service();
@@ -176,6 +229,13 @@ fn concurrent_decision_cas_commits_only_one_revision_and_replay_keeps_id() {
     );
     let winner = outcomes.into_iter().find_map(Result::ok).unwrap();
     assert_eq!(winner["decision"]["revision"], 1);
+    let observed = service.jobs.get(&job).unwrap();
+    assert!(observed.pinned);
+    assert!(observed.expires_at_ms.is_none());
+    assert_eq!(
+        observed.decision_artifact.as_deref(),
+        winner["decision_id"].as_str()
+    );
     let request = record(
         &job,
         &result,
@@ -183,6 +243,7 @@ fn concurrent_decision_cas_commits_only_one_revision_and_replay_keeps_id() {
         winner["decision"]["hypothesis"].as_str().unwrap(),
     );
     assert_eq!(service.research_decision(request).unwrap(), winner);
+    assert!(service.jobs.get(&job).unwrap().pinned);
     drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -276,18 +337,20 @@ fn decision_rejects_foreign_unreachable_corrupt_expired_and_incomplete_results()
         "ARTIFACT_CORRUPT"
     );
     std::fs::write(&result_path, bytes).unwrap();
-    service.jobs.expire_terminal_artifact(&a, &result).unwrap();
-    assert_eq!(
-        service.research_decision(read(&a, None)).unwrap_err(),
-        "RESULT_EXPIRED"
-    );
+    // A recorded decision now pins its verified source automatically. The
+    // retention CAS must refuse to tombstone either immutable reference.
     assert_eq!(
         service
-            .research_decision(record(&a, &result, None, "Expired"))
+            .jobs
+            .expire_terminal_artifact(&a, &result)
             .unwrap_err(),
-        "RESULT_EXPIRED"
+        "RESEARCH_RETENTION_CONFLICT"
     );
-    assert!(service.jobs.get(&a).unwrap().decision_artifact.is_none());
+    assert_eq!(service.research_decision(read(&a, None)).unwrap(), first);
+    assert_eq!(
+        service.jobs.get(&a).unwrap().decision_artifact.as_deref(),
+        Some(first_id)
+    );
     drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -354,8 +417,13 @@ fn pinned_decision_chain_survives_shared_result_retention_then_expires() {
         .research_decision(record(&b, &result, None, "Other job"))
         .unwrap();
     let other_id = other["decision_id"].as_str().unwrap();
-    service.pin_job(&a, true).unwrap();
+    assert!(service.jobs.get(&a).unwrap().pinned);
+    assert!(service.jobs.get(&b).unwrap().pinned);
     let future = jiff::Timestamp::now().as_millisecond().max(0) as u64 + 8 * 86_400_000;
+    assert_eq!(service.apply_retention(future).unwrap(), 0);
+    // Explicitly unpin only B to test shared evidence ownership: A's
+    // automatically pinned decision must continue protecting its result.
+    service.pin_job(&b, false).unwrap();
     assert_eq!(service.apply_retention(future).unwrap(), 1);
     assert!(service.artifacts.read_evidence(other_id).is_err());
     assert!(service.artifacts.read_evidence(&result).is_ok());

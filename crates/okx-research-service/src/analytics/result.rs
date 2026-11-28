@@ -454,6 +454,7 @@ impl AnalyticsService {
             leaf_artifact = id.to_owned();
             value = read_verified_result(&self.artifacts, id)?;
         }
+        let batch = value.get("instruments").and_then(Value::as_array).is_some();
         let instrument_index = signed.as_ref().and_then(|s| s.instrument).or(selector);
         if let Some(index) = instrument_index {
             let row = value
@@ -469,6 +470,21 @@ impl AnalyticsService {
         }
         if let Some(signed) = &signed {
             signed.matches(&job_id, &artifact, &leaf_artifact, view)?;
+        }
+        // A batch is an index of independent instrument results, not a single
+        // trades/equity/variants artifact. Read summary and select its explicit
+        // instrument:<index>:0 cursor. Unselected export remains a truthful
+        // aggregate/root diagnostic; signed cursors still validate first.
+        if batch
+            && matches!(
+                view,
+                ResearchResultView::Trades
+                    | ResearchResultView::Variants
+                    | ResearchResultView::Equity
+            )
+            && instrument_index.is_none()
+        {
+            return Err("BATCH_INSTRUMENT_SELECTION_REQUIRED".into());
         }
         let offset = signed.as_ref().map_or(0, |s| s.offset);
         if matches!(view, ResearchResultView::Export) {
