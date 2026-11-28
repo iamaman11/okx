@@ -497,7 +497,7 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
                             continue;
                         }
                         let command = if operator_governance.is_some() {
-                            Err("RESEARCH_OPERATION_FORBIDDEN")
+                            Err("RESEARCH_OPERATION_FORBIDDEN".to_owned())
                         } else {
                             ResearchCommand::try_from(*request)
                         };
@@ -506,7 +506,7 @@ async fn run_session<S: AsyncRead + AsyncWrite + Unpin>(
                             Err(reason) => {
                                 send(&mut sink, OutgoingFrame::Response {
                                     schema: SCHEMA.into(), session_id: session_id.clone(), connection_generation,
-                                    response: rejected(&id, reason),
+                                    response: rejected(&id, &reason),
                                 }).await?;
                                 continue;
                             }
@@ -735,6 +735,61 @@ fn graph_preflight_detail(reason: &str) -> Option<(&str, &str)> {
     Some((step_id, operator))
 }
 
+/// Project only field paths from the bounded Rust admission/compiler contract.
+/// The public message never contains a source name, raw value or native error.
+fn graph_field_failure(reason: &str) -> Option<(&str, &str)> {
+    let (path, detail) = reason.split_once(':')?;
+    let code = detail.split(':').next()?;
+    if path.len() > 128
+        || (detail.contains(':') && !path.starts_with("composition.steps["))
+        || !path.bytes().all(|b| {
+            b.is_ascii_lowercase()
+                || b.is_ascii_digit()
+                || matches!(b, b'_' | b'.' | b'[' | b']')
+        })
+        || !(path.starts_with("graph_signal.")
+            || path == "graph_signal"
+            || path.starts_with("research.graph_backtest.")
+            || path.starts_with("composition.steps[")
+            || path == "composition"
+            || path == "composition.version"
+            || path == "composition.steps"
+            || path == "composition.result_steps")
+        || !matches!(
+            code,
+            "UNSUPPORTED"
+                | "INVALID"
+                | "INVALID_COUNT"
+                | "COUNT_LIMIT"
+                | "INVALID_ID"
+                | "INVALID_REFERENCE"
+                | "INVALID_LENGTH"
+                | "INVALID_POSITION"
+                | "INVALID_TARGET_POSITION"
+                | "DUPLICATE"
+                | "UNPROJECTED"
+                | "UNPROJECTED_SIGNAL"
+                | "UNKNOWN_SIGNAL_STEP"
+                | "OUT_OF_RANGE"
+                | "NONFINITE"
+                | "FORWARD_LABEL_FORBIDDEN"
+                | "UNIT_MISMATCH"
+                | "SIGNAL_MUST_BE_BOOLEAN_OR_EVENT"
+                | "UNKNOWN_OR_FORWARD_STEP"
+                | "DEPTH_LIMIT"
+                | "REQUIRED"
+                | "UNEXPECTED"
+                | "CELLS_LIMIT"
+                | "CELLS_OVERFLOW"
+                | "RESOURCE_LIMIT"
+                | "INSUFFICIENT_BARS_FOR_WARMUP"
+        )
+    {
+        return None;
+    }
+    Some((path, code))
+}
+
 fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentResponse {
     let quality = match &result {
         Ok(value)
@@ -752,6 +807,7 @@ fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentRes
         Ok(value) => (AgentResponseStatus::Completed, Some(value), None),
         Err(code) => {
             let graph_detail = graph_preflight_detail(&code);
+            let graph_field = graph_field_failure(&code);
             let source_deferred =
                 okx_research_protocol::research_ipc::is_retryable_source_defer(&code);
             let retryable = source_deferred
@@ -761,6 +817,8 @@ fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentRes
                 "MARKET_SOURCE_RETRYABLE".into()
             } else if graph_detail.is_some() {
                 "GRAPH_OPERATOR_NOT_INCREMENTAL".into()
+            } else if let Some((_, reason)) = graph_field {
+                format!("GRAPH_PREFLIGHT_{reason}")
             } else if code == "GLOBAL_RANK_UNIVERSE_LIMIT:512"
                 || (code.len() <= 96
                     && code
@@ -773,6 +831,8 @@ fn response_for(id: &str, result: Result<serde_json::Value, String>) -> AgentRes
             };
             let message = if let Some((step_id, operator)) = graph_detail {
                 format!("graph_preflight:steps[{step_id}].op={operator}")
+            } else if let Some((path, _)) = graph_field {
+                path.into()
             } else {
                 "Research request unavailable".into()
             };
@@ -946,7 +1006,7 @@ mod tests {
         ] {
             assert!(matches!(
                 ResearchCommand::try_from(request(operation)),
-                Err("RESEARCH_OPERATION_FORBIDDEN")
+                Err(code) if code == "RESEARCH_OPERATION_FORBIDDEN"
             ));
         }
         assert!(matches!(
@@ -963,7 +1023,7 @@ mod tests {
         with_account.account = Some("okx:real:account".into());
         assert!(matches!(
             ResearchCommand::try_from(with_account),
-            Err("RESEARCH_OPERATION_FORBIDDEN")
+            Err(code) if code == "RESEARCH_OPERATION_FORBIDDEN"
         ));
         let diagnostics = |account| {
             request(json!({"type":"diagnostics","request":{
@@ -983,13 +1043,13 @@ mod tests {
         ));
         assert!(matches!(
             ResearchCommand::try_from(diagnostics(Some("account"))),
-            Err("RESEARCH_OPERATION_FORBIDDEN")
+            Err(code) if code == "RESEARCH_OPERATION_FORBIDDEN"
         ));
         let mut malformed = request(json!({"type":"market_capabilities"}));
         malformed.schema = "unsupported".into();
         assert!(matches!(
             ResearchCommand::try_from(malformed),
-            Err("INVALID_RESEARCH_REQUEST")
+            Err(code) if code == "INVALID_RESEARCH_REQUEST"
         ));
     }
 
@@ -1077,6 +1137,36 @@ mod tests {
             assert_eq!(failure.code, "RESEARCH_REQUEST_FAILED", "{raw}");
             assert_eq!(failure.message, "Research request unavailable");
             assert!(!failure.retryable);
+        }
+    }
+
+    #[test]
+    fn graph_admission_fields_are_typed_at_edge_without_raw_error_disclosure() {
+        for (raw, reason, path) in [
+            ("graph_signal.graph.steps[1].input:INVALID_REFERENCE", "GRAPH_PREFLIGHT_INVALID_REFERENCE", "graph_signal.graph.steps[1].input"),
+            ("research.graph_backtest.costs.taker_fee_bps:OUT_OF_RANGE", "GRAPH_PREFLIGHT_OUT_OF_RANGE", "research.graph_backtest.costs.taker_fee_bps"),
+            ("composition.steps[0].input:UNIT_MISMATCH:expected=boolean:actual=price", "GRAPH_PREFLIGHT_UNIT_MISMATCH", "composition.steps[0].input"),
+            ("graph_signal:SIGNAL_MUST_BE_BOOLEAN_OR_EVENT", "GRAPH_PREFLIGHT_SIGNAL_MUST_BE_BOOLEAN_OR_EVENT", "graph_signal"),
+            ("composition:CELLS_LIMIT", "GRAPH_PREFLIGHT_CELLS_LIMIT", "composition"),
+        ] {
+            let response = rejected("research_request_0123456789", raw);
+            assert_eq!(response.status, AgentResponseStatus::Rejected);
+            let failure = response.failure.unwrap();
+            assert_eq!(failure.code, reason, "{raw}");
+            assert_eq!(failure.message, path, "{raw}");
+            assert!(!failure.retryable);
+        }
+        for raw in [
+            "graph_signal.graph.steps[1].input:INVALID_REFERENCE:private\nsecret",
+            "graph_signal.graph.steps[1].input:SECRET",
+            "research.graph_backtest.costs.key/value:OUT_OF_RANGE",
+            "composition.stream:SOURCE_NOT_SUPPORTED:volume",
+        ] {
+            let failure = rejected("research_request_0123456789", raw)
+                .failure
+                .unwrap();
+            assert_eq!(failure.code, "RESEARCH_REQUEST_FAILED", "{raw}");
+            assert_eq!(failure.message, "Research request unavailable", "{raw}");
         }
     }
 
