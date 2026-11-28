@@ -468,7 +468,8 @@ for(const tool of PUBLIC_TOOLS as any[]){
     // Restore the discriminator requirement factored to the public root;
     // compare the reconstructed strict branch byte-for-byte to its source.
     ...Object.fromEntries(Object.entries(branch).filter(([key])=>key!=='properties')
-      .map(([key,value])=>[key,key==='required'?['action',...(value as string[])]:value])),
+      .map(([key,value])=>[key,key==='required'?
+        ['action',...(value as string[]).filter(field=>field!=='action')]:value])),
   })):expanded.oneOf;
   if(tool.name==='strategies')
     fail(expanded.type==='object' && expanded.unevaluatedProperties===false

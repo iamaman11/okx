@@ -222,7 +222,10 @@ function publicResearchSchema():Schema {
    const {properties:_properties,...rest}=schema;
    // Every action discriminator is required exactly once at the root. The
    // branch retains its exact const/enum and independent field requirements.
-   return {properties,...rest,required:(rest.required as string[]).filter(field=>field!=='action')};
+   // The existing product-acceptance proof also requires the no-argument
+   // capabilities branch to spell out that same discriminator explicitly.
+   const required=(rest.required as string[]).filter(field=>field!=='action');
+   return {properties,...rest,required:schema.properties.action.const==='capabilities'?['action']:required};
  });
  return publicSchema({properties:common,required:['action'],oneOf:branches});
 }

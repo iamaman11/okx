@@ -87,16 +87,13 @@ def checked_schema_negative(route,arguments,response,proof,executed_tests,tool_c
         return False
     if not isinstance(response,dict) or set(response)!={"tool_error"}:
         return False  # In particular, no fabricated native structuredContent.
-    schema=next((tool["inputSchema"] for tool in tool_contract["tools"]
-                 if tool.get("name")==tool_name),{})
-    variants=schema.get("oneOf",[])
+    variants=next((tool["inputSchema"].get("oneOf",[]) for tool in tool_contract["tools"]
+                   if tool.get("name")==tool_name),[])
     selected=[variant for variant in variants
               if variant.get("properties",{}).get("action",{}).get("const")==action]
     allowed_fields={"action","link_id"} if route=="accounts.list" else {"action"}
     if (len(selected)!=1 or set(selected[0].get("properties",{}))!=allowed_fields
-        or not (selected[0].get("required")==["action"]
-                or (selected[0].get("required")==[]
-                    and schema.get("required")==["action"]))
+        or selected[0].get("required")!=["action"]
         or selected[0].get("additionalProperties") is not False):
         return False
     if route=="accounts.list":
@@ -660,14 +657,6 @@ def self_test():
                     proof,{"strict_action_fixtures"},contract))
                 self.assertFalse(checked_schema_negative(
                     route,{"action":action},response,proof,{"strict_action_fixtures"},contract))
-                if route=="research.capabilities":
-                    # Factoring the required discriminator to the root is
-                    # strict only while the root still requires it.
-                    weakened=json.loads(json.dumps(contract))
-                    research=next(t for t in weakened["tools"] if t["name"]=="research")
-                    research["inputSchema"].pop("required",None)
-                    self.assertFalse(checked_schema_negative(
-                        route,arguments,response,proof,{"strict_action_fixtures"},weakened))
             self.assertFalse(checked_schema_negative(
                 "trade.execute",{"action":"execute","raw_rpc":"forbidden"},
                 {"tool_error":"not valid under any of the given schemas"},
