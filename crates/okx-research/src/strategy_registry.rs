@@ -915,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_replay_rejects_unavailable_sources_and_non_incremental_ops() {
+    fn graph_replay_rejects_unavailable_sources_and_future_labels() {
         let series = bars();
         let mut graph = graph_spec();
         graph.graph.graph.steps[0].input = "volume".into();
@@ -926,10 +926,7 @@ mod tests {
         graph.graph.graph.steps[0].input = "close".into();
         graph.graph.graph.steps[0].op = okx_analysis::query_plan::SeriesOp::RollingStddev;
         graph.graph.graph.steps[0].period = Some(2);
-        assert_eq!(
-            replay_graph(&series, &graph, 3, series.len(), &|| false).unwrap_err(),
-            "composition.stream:OPERATOR_NOT_INCREMENTAL"
-        );
+        assert!(replay_graph(&series, &graph, 3, series.len(), &|| false).is_ok());
         graph = graph_spec();
         graph.graph.graph.steps.push(
             serde_json::from_value(serde_json::json!({

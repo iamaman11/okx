@@ -116,25 +116,7 @@ pub(crate) fn compiled_graph(
 /// Validate the complete causal graph without reading market data or creating
 /// a research job. Returns the minimum valid score_start index.
 pub fn preflight_graph(spec: &GraphSignalSpec, total_bars: u64) -> Result<usize, String> {
-    let (checked, _) = compiled_graph(spec, total_bars).map_err(|reason| {
-        if reason == "composition.stream:OPERATOR_NOT_INCREMENTAL" {
-            // CheckedComposition validated these bounded step identifiers first.
-            // Preserve the rejected step and typed operator for the public
-            // failure boundary, without exposing arbitrary compiler strings.
-            for step in &spec.graph.steps {
-                let op = match step.op {
-                    SeriesOp::RollingPearson => Some("rolling_pearson"),
-                    SeriesOp::RollingStddev => Some("rolling_stddev"),
-                    SeriesOp::RollingZscore => Some("rolling_zscore"),
-                    _ => None,
-                };
-                if let Some(op) = op {
-                    return format!("GRAPH_OPERATOR_NOT_INCREMENTAL:{}:{op}", step.id);
-                }
-            }
-        }
-        reason
-    })?;
+    let (checked, _) = compiled_graph(spec, total_bars)?;
     Ok(checked.warmup_bars())
 }
 
@@ -333,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_rejects_unavailable_source_or_operator_without_market_reads() {
+    fn preflight_rejects_unavailable_source_and_accepts_incremental_dispersion() {
         let mut unavailable = spec();
         unavailable.graph.steps[0].input = "volume".into();
         assert_eq!(
@@ -343,19 +325,12 @@ mod tests {
         unavailable.graph.steps[0].input = "close".into();
         unavailable.graph.steps[0].op = SeriesOp::RollingStddev;
         unavailable.graph.steps[0].period = Some(2);
-        assert_eq!(
-            preflight_graph(&unavailable, 100).unwrap_err(),
-            "GRAPH_OPERATOR_NOT_INCREMENTAL:return:rolling_stddev"
-        );
+        assert_eq!(preflight_graph(&unavailable, 100).unwrap(), 2);
     }
 
     #[test]
-    fn preflight_names_each_unavailable_incremental_operator_and_exact_step() {
-        for (operator, expected) in [
-            (SeriesOp::RollingPearson, "rolling_pearson"),
-            (SeriesOp::RollingStddev, "rolling_stddev"),
-            (SeriesOp::RollingZscore, "rolling_zscore"),
-        ] {
+    fn preflight_accepts_each_existing_causal_statistical_operator() {
+        for operator in [SeriesOp::RollingPearson, SeriesOp::RollingStddev, SeriesOp::RollingZscore] {
             let mut graph = spec();
             // Pearson requires two ratio inputs and period >=30; the same
             // valid causal shape also exercises stddev and zscore.
@@ -370,10 +345,7 @@ mod tests {
             graph.graph.steps[1].other =
                 (operator == SeriesOp::RollingPearson).then(|| "return".into());
             graph.graph.steps[2].input = "risk_1".into();
-            assert_eq!(
-                preflight_graph(&graph, 100).unwrap_err(),
-                format!("GRAPH_OPERATOR_NOT_INCREMENTAL:risk_1:{expected}")
-            );
+            assert!(preflight_graph(&graph, 100).is_ok(), "{operator:?}");
         }
     }
 }
