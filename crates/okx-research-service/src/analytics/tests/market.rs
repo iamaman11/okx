@@ -168,7 +168,7 @@ async fn t14_market_retry_and_cursor_never_publish_cancelled_or_interrupted_part
 
 #[test]
 fn t02_funding_composition_rejects_non_swap_before_source_reads() {
-    let spot = vec!["BTC-USDT-SWAP".to_owned(), "ETH-USDT".to_owned()];
+    let spot = ["BTC-USDT-SWAP".to_owned(), "ETH-USDT".to_owned()];
     let range = okx_analysis::time_series::ClosedRange::strict(0, 180_000, 60_000).unwrap();
     use okx_analysis::query_plan::SeriesSource;
     assert_eq!(
