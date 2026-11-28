@@ -72,6 +72,22 @@ ValueType = (shape, unit, instrument_scope, timeframe_and_range,
   Quote currency parsed from an instrument is *not* proof of a swap's actual
   settlement currency. The current Research graph also preflights the same
   `close` binding before any job admission or source request.
+- **Immutable Market source provenance:** normalized source manifests use
+  `okx.market.normalized-source/v2` and record the source-port bindings
+  re-derived from the checked `QueryPlan` both when captured and when replayed.
+  Candle captures bind five distinct `open/high/low/close/volume` ports;
+  OI and funding bind their corresponding single ports. These are physical
+  input-capture descriptors, not additional graph operators or permission to
+  join instruments. The bindings cover instrument/base/quote/product, closed
+  range, contract version, unit, currency basis, time basis, availability and
+  alignment. Hashes identify normalized observations, **not** historical
+  venue publication timestamps. Existing v1 captures remain hash-readable,
+  but their missing bound-port proof forces `partial` source integrity and
+  `not_verified` semantic replay; no eager migration or second state store.
+  Composed Market requests also preflight the source ports required by any
+  accompanying legacy scalar projections **before** job admission; a source
+  only discovered during provenance publication must never surprise the job
+  with an unsupported instrument/product after the venue read.
 - **Missing data:** unknown is not zero, false or permission to trade. Warmup,
   gaps, zero denominators, incomplete windows and future-horizon outcomes
   retain specific semantics. Any explicit `flat` signal policy is part of the

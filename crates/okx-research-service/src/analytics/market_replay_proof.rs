@@ -76,6 +76,9 @@ pub(super) fn verify_persisted_market_metrics(
     need_candles: bool,
     cancel: &super::super::cpu_executor::Cancel,
 ) -> Result<Value, String> {
+    if linked["source_integrity"]["quality"] == "partial_legacy_source_bindings" {
+        return Ok(not_verified("LEGACY_SOURCE_PORT_BINDING_UNVERIFIED"));
+    }
     if linked["source_integrity"]["quality"] != "verified_normalized_sources" {
         return Ok(not_verified("SOURCE_UNAVAILABLE"));
     }
