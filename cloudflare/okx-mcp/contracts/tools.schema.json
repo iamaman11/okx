@@ -491,7 +491,7 @@
     },
     {
       "name": "market",
-      "description": "Market composition",
+      "description": "Market composition; screen may create job",
       "inputSchema": {
         "oneOf": [
           {
@@ -886,7 +886,7 @@
         }
       },
       "annotations": {
-        "readOnlyHint": true,
+        "readOnlyHint": false,
         "destructiveHint": false,
         "openWorldHint": false
       }
