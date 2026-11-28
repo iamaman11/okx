@@ -32,8 +32,8 @@ Source baseline: [`main` `16888173684e`](https://github.com/iamaman11/okx/commit
 | `market.snapshot` | Y | S | R | — | S |
 | `market.microstructure` | Y | S | R | — | S |
 | `market.capabilities` | Y | S | R | Y | S |
-| `research.record_decision` | Y | S | R | — | S |
-| `research.decision` | Y | S | R | Y | S |
+| `research.record_decision` | Y | S | R | Y | S |
+| `research.decision` | Y | S | R | Y | S+L |
 | `research.list` | Y | S | R | Y | S+L |
 | `research.backtest` | Y | S | R | — | S |
 | `research.grid` | Y | S | R | — | S |
@@ -65,7 +65,9 @@ Source baseline: [`main` `16888173684e`](https://github.com/iamaman11/okx/commit
 - Through the production MCP Edge and running Research binary SHA-256 `9cb8628fd354636143ff3f6c776c64e2a676052f7d8ac77b4ac75c172b2e34a7`, a new `graph_backtest` created job `bba934e93f3c48ee8ff0ce1e96b9c2f722b0bee747804b332da3dd8b773e4924` and reached `completed/100%`. No Engine trading action was invoked.
 - `research.validate` observed 312/312 closed 1h candles for `BTC-USDT-SWAP`; the live negative `historical_observed` validation returned `blocked`, `HISTORICAL_RULES_AND_FEES_UNAVAILABLE`, and `job_created:false`.
 - The graph used closed-price returns and a positive-return comparator for a causal long/flat signal. It produced 156 simulated trades, net PnL `-214.84790052299515968 USDT`, and fees `97.20127852299999968 USDT`. Its export reported `integrity:COMPLETE` and `reexecution:VERIFIED` with matching result hash, including 312 bars, 156 trades and 310 equity points. Trades pagination returned two consecutive 50-row pages using opaque cursors.
+- Before writing a decision, the new job returned `DECISION_NOT_FOUND`. A subsequent non-trading `record_decision(rejected)` published decision artifact `sha256:cfb4a7c101ae60c150551c1d2ed26358b46bea67b08e89cfe43b78f7fc631d57`, and an independent readback confirmed `revision:1`, `rejected`, `trading_authority:false`. Re-submitting the exact graph request with the same idempotency key returned the same original job and result without a second execution.
 - `diagnostics.runtime` returned PASS. Several successive `diagnostics.explain(view=research, reference=deployment)` probes returned `fresh/PASS` and matched the Research PID/SHA. However, job-specific `diagnostics.explain` reported `history:UNKNOWN`, `reason_code:JOB_SNAPSHOT` and `first_unproven_fact:FULL_CAUSAL_HISTORY`. This is the declared bounded diagnostic contract, not proof of a full durable causal trace or stress stability.
+- Eight concurrent read-only calls (four Research status and four deployment explanations) passed, including four fresh CONTROL proofs, but total wall time was about 19.8 seconds; this does **not** establish a latency SLO or stable attestation under heavy load.
 - This is a positive **installed Research** and MCP proof for one new graph backtest. It is not acceptance of all 45 actions, `historical_observed` execution, research cancellation/restart, high-load T10, financial cutover, or parity of older installed Engine/CONTROL with `main`.
 
 Installed baseline: [CONTROL issue #12](https://github.com/iamaman11/okx/issues/12) established running Research executable tree `9652f03674790ade9f1d3f6dfffc71d4b9fa31cb`; Engine tree `ed0884d1402565378a7c61265700eeeb42be1ad0`, CONTROL tree `dad0fb6dfb26ebe62d662a1e8a95413704327880`. Production Edge [deploy #125](https://github.com/iamaman11/okx/actions/runs/46093524489) is the source tree above. Version drift is **not** equivalent to a proven failure of an old installed action.
