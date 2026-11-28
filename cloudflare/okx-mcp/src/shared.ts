@@ -5,8 +5,10 @@ export const FRAME_SCHEMA = "okx.direct-transport.frame/v2";
 export const CONTROL_ATTEST_FRAME_SCHEMA = "okx.control-attestor.frame/v1";
 export const CONTROL_ATTEST_DEADLINE_MS = 2_500;
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
-export const MCP_SERVER_VERSION = "0.8.0";
-export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-10-26.398";
+// Human-facing API release labels; exact deployed code is independently
+// identified by RELEASE_SOURCE_TREE in diagnostics and installation readback.
+export const MCP_SERVER_VERSION = "0.8.1";
+export const TOOL_CONTRACT_VERSION = "okx.mcp.tools/2026-11-28.399";
 export const MAX_BODY_BYTES = 64 * 1024;
 export const MAX_INFLIGHT = 8;
 // Bounded admission: read-only requests wait, while mutation/status stays free.
