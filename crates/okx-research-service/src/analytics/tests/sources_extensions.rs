@@ -59,7 +59,7 @@ async fn unavailable_historical_mode_rejects_all_executions_before_sql_or_market
 }
 
 #[tokio::test]
-async fn graph_preflight_rejects_unsupported_operator_without_job_or_venue_get() {
+async fn graph_preflight_rejects_unsupported_source_without_job_or_venue_get() {
     let transport = RecordedGet::new(vec![]);
     let (root, service) = service_with_source(transport.client());
     let request: ResearchRequest = serde_json::from_value(json!({
@@ -69,7 +69,7 @@ async fn graph_preflight_rejects_unsupported_operator_without_job_or_venue_get()
         "graph_signal":{
             "version":"okx.graph-signal/v1",
             "graph":{"version":"okx.market.composition/v1","steps":[
-                {"id":"vol","op":"rolling_stddev","input":"close","period":2},
+                {"id":"vol","op":"rolling_stddev","input":"volume","period":2},
                 {"id":"signal","op":"greater_than","input":"vol","threshold":0}
             ],"result_steps":["signal"]},
             "signal_step":"signal","target_if_true":1,"target_if_false":0,
@@ -83,7 +83,7 @@ async fn graph_preflight_rejects_unsupported_operator_without_job_or_venue_get()
     assert!(request.valid());
     assert_eq!(
         service.research(request).await.unwrap_err(),
-        "GRAPH_OPERATOR_NOT_INCREMENTAL:vol:rolling_stddev"
+        "composition.stream:SOURCE_NOT_SUPPORTED:volume"
     );
     assert!(service.jobs.snapshot().is_empty());
     assert!(transport.routes.lock().unwrap().is_empty());

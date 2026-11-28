@@ -7,7 +7,7 @@ pub use okx_research_protocol::strategy_contract::{
     SeriesStep,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const QUERY_PLAN_VERSION: &str = "okx.query-plan/448.1";
 pub const COMPOSITION_VERSION: &str = "okx.market.composition/v1";
@@ -1556,7 +1556,7 @@ fn series_cost_per_bar(op: SeriesOp) -> u64 {
 
 /// Online centered covariance with O(1) insertion and removal. This avoids
 /// catastrophic cancellation of raw sums of squares for near-constant data.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct SlidingPearson {
     n: usize,
     mean_x: f64,
@@ -1615,42 +1615,75 @@ impl SlidingPearson {
 /// the specified window must be present; no as-of filling, future values or
 /// exclusion of missing pairs. Periodic bounded rebasing limits numeric drift
 /// without making the per-bar cost depend on window size.
-fn rolling_pearson(left: &[Option<f64>], right: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
-    let mut output = vec![None; left.len()];
-    let mut stats = SlidingPearson::default();
-    let mut missing = 0usize;
-    let pair = |index: usize| match (left[index], right[index]) {
-        (Some(a), Some(b)) if a.is_finite() && b.is_finite() => Some((a, b)),
-        _ => None,
-    };
-    for (i, projected) in output.iter_mut().enumerate() {
-        if i >= period {
-            match pair(i - period) {
-                Some((a, b)) => stats.remove(a, b),
-                None => missing -= 1,
+#[derive(Debug)]
+pub(crate) struct RollingPearsonWindow {
+    period: usize,
+    history: VecDeque<Option<(f64, f64)>>,
+    stats: SlidingPearson,
+    missing: usize,
+    seen: usize,
+}
+
+impl RollingPearsonWindow {
+    pub(crate) fn new(period: usize) -> Self {
+        Self {
+            period,
+            history: VecDeque::with_capacity(period),
+            stats: SlidingPearson::default(),
+            missing: 0,
+            seen: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, left: Option<f64>, right: Option<f64>) -> Option<f64> {
+        let pair = match (left, right) {
+            (Some(a), Some(b)) if a.is_finite() && b.is_finite() => Some((a, b)),
+            _ => None,
+        };
+        if self.history.len() == self.period {
+            match self.history.pop_front().expect("full correlation window") {
+                Some((a, b)) => self.stats.remove(a, b),
+                None => self.missing -= 1,
             }
         }
-        // Exactly O(period) once per 4096 observations: the amortized number
-        // of operations remains bounded independently of the window size.
-        if i > 0 && i.is_multiple_of(4096) {
-            stats = SlidingPearson::default();
-            missing = 0;
-            for old in i.saturating_sub(period - 1)..i {
-                match pair(old) {
-                    Some((a, b)) => stats.add(a, b),
-                    None => missing += 1,
+        // Rebase the finite sliding state once every 4096 observations. This
+        // is O(1) amortized, and the same implementation serves batch/stream.
+        if self.seen > 0 && self.seen.is_multiple_of(4096) {
+            self.stats = SlidingPearson::default();
+            self.missing = 0;
+            for sample in &self.history {
+                match *sample {
+                    Some((a, b)) => self.stats.add(a, b),
+                    None => self.missing += 1,
                 }
             }
         }
-        match pair(i) {
-            Some((a, b)) => stats.add(a, b),
-            None => missing += 1,
+        match pair {
+            Some((a, b)) => self.stats.add(a, b),
+            None => self.missing += 1,
         }
-        if i + 1 >= period && missing == 0 {
-            *projected = stats.coefficient();
+        self.history.push_back(pair);
+        self.seen += 1;
+        if self.history.len() == self.period && self.missing == 0 {
+            self.stats.coefficient()
+        } else {
+            None
         }
     }
-    output
+
+    #[cfg(test)]
+    pub(crate) fn buffered(&self) -> usize {
+        self.history.len()
+    }
+}
+
+fn rolling_pearson(left: &[Option<f64>], right: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
+    let mut window = RollingPearsonWindow::new(period);
+    left.iter()
+        .copied()
+        .zip(right.iter().copied())
+        .map(|(a, b)| window.push(a, b))
+        .collect()
 }
 
 /// Causal population dispersion over an inclusive complete window. Standard
@@ -1658,63 +1691,90 @@ fn rolling_pearson(left: &[Option<f64>], right: &[Option<f64>], period: usize) -
 /// window; z-score is dimensionless and marks zero variance as unknown.
 /// Online centered variance avoids cancellation from raw squared sums;
 /// periodic rebasing caps drift without an O(window) per-bar rescan.
-fn rolling_dispersion(input: &[Option<f64>], period: usize, zscore: bool) -> Vec<Option<f64>> {
-    let mut output = vec![None; input.len()];
-    let mut stats = SlidingPearson::default();
-    let mut missing = 0usize;
-    // Exact flatness is structural, not a floating-point epsilon guess.
-    // Welford removal can leave a tiny positive M2 after the last changing
-    // sample exits the window; identical closed observations must yield
-    // stddev=0 and zscore=None regardless of that residual.
-    let mut identical_run = 0usize;
-    for i in 0..input.len() {
-        identical_run = match (i.checked_sub(1).and_then(|prior| input[prior]), input[i]) {
-            (Some(previous), Some(current)) if previous == current => identical_run + 1,
+#[derive(Debug)]
+pub(crate) struct RollingDispersionWindow {
+    period: usize,
+    zscore: bool,
+    history: VecDeque<Option<f64>>,
+    stats: SlidingPearson,
+    missing: usize,
+    identical_run: usize,
+    seen: usize,
+}
+
+impl RollingDispersionWindow {
+    pub(crate) fn new(period: usize, zscore: bool) -> Self {
+        Self {
+            period,
+            zscore,
+            history: VecDeque::with_capacity(period),
+            stats: SlidingPearson::default(),
+            missing: 0,
+            identical_run: 0,
+            seen: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, input: Option<f64>) -> Option<f64> {
+        let input = input.filter(|value| value.is_finite());
+        self.identical_run = match (self.history.back().copied().flatten(), input) {
+            (Some(previous), Some(current)) if previous == current => self.identical_run + 1,
             (_, Some(_)) => 1,
             _ => 0,
         };
-        if i >= period {
-            match input[i - period] {
-                Some(value) => stats.remove(value, value),
-                None => missing -= 1,
+        if self.history.len() == self.period {
+            match self.history.pop_front().expect("full dispersion window") {
+                Some(value) => self.stats.remove(value, value),
+                None => self.missing -= 1,
             }
         }
-        if i > 0 && i.is_multiple_of(4096) {
-            stats = SlidingPearson::default();
-            missing = 0;
-            for sample in input.iter().take(i).skip(i.saturating_sub(period - 1)) {
+        if self.seen > 0 && self.seen.is_multiple_of(4096) {
+            self.stats = SlidingPearson::default();
+            self.missing = 0;
+            for sample in &self.history {
                 match *sample {
-                    Some(value) => stats.add(value, value),
-                    None => missing += 1,
+                    Some(value) => self.stats.add(value, value),
+                    None => self.missing += 1,
                 }
             }
         }
-        match input[i] {
-            Some(value) => stats.add(value, value),
-            None => missing += 1,
+        match input {
+            Some(value) => self.stats.add(value, value),
+            None => self.missing += 1,
         }
-        if i + 1 >= period && missing == 0 {
-            if identical_run >= period {
-                if !zscore {
-                    output[i] = Some(0.0);
-                }
-                continue;
-            }
-            // Nonconstant windows with unresolvable variance stay unknown;
-            // never report a synthetic zero for a genuine price movement.
-            if stats.m2_x <= 0.0 || !stats.m2_x.is_finite() {
-                continue;
-            }
-            let deviation = (stats.m2_x / period as f64).sqrt();
-            let projected = if zscore {
-                (input[i].expect("complete window") - stats.mean_x) / deviation
-            } else {
-                deviation
-            };
-            output[i] = projected.is_finite().then_some(projected);
+        self.history.push_back(input);
+        self.seen += 1;
+        if self.history.len() != self.period || self.missing != 0 {
+            return None;
         }
+        if self.identical_run >= self.period {
+            return (!self.zscore).then_some(0.0);
+        }
+        if self.stats.m2_x <= 0.0 || !self.stats.m2_x.is_finite() {
+            return None;
+        }
+        let deviation = (self.stats.m2_x / self.period as f64).sqrt();
+        let projected = if self.zscore {
+            (input.expect("complete window") - self.stats.mean_x) / deviation
+        } else {
+            deviation
+        };
+        projected.is_finite().then_some(projected)
     }
-    output
+
+    #[cfg(test)]
+    pub(crate) fn buffered(&self) -> usize {
+        self.history.len()
+    }
+}
+
+fn rolling_dispersion(input: &[Option<f64>], period: usize, zscore: bool) -> Vec<Option<f64>> {
+    let mut window = RollingDispersionWindow::new(period, zscore);
+    input
+        .iter()
+        .copied()
+        .map(|value| window.push(value))
+        .collect()
 }
 
 fn rolling_zscore(input: &[Option<f64>], period: usize) -> Vec<Option<f64>> {

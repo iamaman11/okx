@@ -3,7 +3,9 @@
 //! This module is pure: event-time admission, persistence, cancellation and
 //! trading authority remain with the caller. Restoring means replaying closed
 //! observations once, **without** replaying previously emitted orders.
-use crate::query_plan::{CheckedComposition, CompositionValues, SeriesOp};
+use crate::query_plan::{
+    CheckedComposition, CompositionValues, RollingDispersionWindow, RollingPearsonWindow, SeriesOp,
+};
 use std::collections::{BTreeMap, VecDeque};
 
 /// One finalised observation. The timestamp identifies the closed candle,
@@ -36,6 +38,8 @@ enum Memory {
     Mean(RollingMean),
     Extremum(MonotoneWindow),
     Range(MonotoneWindow, MonotoneWindow),
+    Dispersion(RollingDispersionWindow),
+    Pearson(RollingPearsonWindow),
     Lag(VecDeque<Option<f64>>),
 }
 
@@ -77,8 +81,14 @@ impl CausalGraphStream {
                 SeriesOp::ForwardReturnLabel => {
                     return Err("composition.stream:NON_CAUSAL_OPERATOR".into());
                 }
-                SeriesOp::RollingPearson | SeriesOp::RollingStddev | SeriesOp::RollingZscore => {
-                    return Err("composition.stream:OPERATOR_NOT_INCREMENTAL".into());
+                SeriesOp::RollingPearson => Memory::Pearson(RollingPearsonWindow::new(
+                    step.period.expect("checked correlation period") as usize,
+                )),
+                SeriesOp::RollingStddev | SeriesOp::RollingZscore => {
+                    Memory::Dispersion(RollingDispersionWindow::new(
+                        step.period.expect("checked dispersion period") as usize,
+                        step.op == SeriesOp::RollingZscore,
+                    ))
                 }
                 SeriesOp::RollingMean => Memory::Mean(RollingMean::new(
                     step.period.expect("checked period") as usize,
@@ -150,6 +160,8 @@ impl CausalGraphStream {
                 .and_then(|binding| binding.value(close, &columns));
             columns[index] = match &mut node.memory {
                 Memory::Mean(window) => window.push(input),
+                Memory::Dispersion(window) => window.push(input),
+                Memory::Pearson(window) => window.push(input, other),
                 Memory::Extremum(window) => window.push(input),
                 Memory::Range(maximum, minimum) => {
                     match (maximum.push(input), minimum.push(input)) {
@@ -505,6 +517,8 @@ mod tests {
                 for node in &runner.nodes {
                     match &node.memory {
                         Memory::Mean(window) => assert!(window.history.len() <= window.period),
+                        Memory::Dispersion(window) => assert!(window.buffered() <= 1000),
+                        Memory::Pearson(window) => assert!(window.buffered() <= 1000),
                         Memory::Extremum(window) => {
                             assert!(window.deque.len() <= window.period);
                             assert!(window.gaps.len() <= window.period);
@@ -524,6 +538,56 @@ mod tests {
         }
         assert_eq!(counts[1], 2 * counts[0]);
         assert_eq!(counts[2], 2 * counts[1]);
+    }
+
+    #[test]
+    fn three_causal_statistics_match_batch_across_gaps_rebases_and_restoration() {
+        let request: CompositionRequest = serde_json::from_value(json!({
+            "version": COMPOSITION_VERSION,
+            "steps": [
+                {"id":"returns","op":"returns_series","input":"close"},
+                {"id":"delayed","op":"lag","input":"returns","period":1},
+                {"id":"correlation","op":"rolling_pearson","input":"returns","other":"delayed","period":30},
+                {"id":"deviation","op":"rolling_stddev","input":"close","period":20},
+                {"id":"normalized","op":"rolling_zscore","input":"close","period":20},
+                {"id":"positive","op":"greater_than","input":"correlation","threshold":0.0}
+            ],
+            "result_steps":["correlation","deviation","normalized","positive"]
+        }))
+        .unwrap();
+        let plan = CheckedComposition::compile(request, 4300).unwrap();
+        let closes = (0..4300)
+            .map(|index| match index {
+                0 | 38 | 2000 | 4095 => f64::NAN,
+                128..=160 => 100.0,
+                _ => 100.0 + ((index * 31) % 47) as f64 / 10.0,
+            })
+            .collect::<Vec<_>>();
+        let mut stream = CausalGraphStream::new(&plan).unwrap();
+        let mut history = Vec::new();
+        for (index, &close) in closes.iter().enumerate() {
+            let bar = ClosedBar {
+                timestamp_ms: index as i64 * 60_000,
+                close: Some(close),
+            };
+            let observed = stream.on_closed_bar(bar).unwrap();
+            if index < 50
+                || [100, 128, 160, 161, 2000, 2029, 4095, 4096, 4097, 4299].contains(&index)
+            {
+                assert_eq!(observed, plan.evaluate_at(&closes, index), "bar={index}");
+            }
+            history.push(bar);
+        }
+        let restored = CausalGraphStream::restore_from_history(&plan, history).unwrap();
+        assert_eq!(restored.processed_bars(), stream.processed_bars());
+        assert_eq!(restored.operation_count(), stream.operation_count());
+        for node in &stream.nodes {
+            match &node.memory {
+                Memory::Dispersion(window) => assert!(window.buffered() <= 20),
+                Memory::Pearson(window) => assert!(window.buffered() <= 30),
+                _ => {}
+            }
+        }
     }
 
     #[test]
@@ -557,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_external_sources_lookahead_and_nonincremental_math_before_running() {
+    fn rejects_external_sources_and_lookahead_before_running() {
         let request = |op: &str, input: &str| {
             serde_json::from_value::<CompositionRequest>(json!({
                 "version": COMPOSITION_VERSION,
@@ -571,12 +635,9 @@ mod tests {
             CausalGraphStream::new(&external).unwrap_err(),
             "composition.stream:SOURCE_NOT_SUPPORTED:volume"
         );
-        let nonincremental =
+        let incremental =
             CheckedComposition::compile(request("rolling_stddev", "close"), 10).unwrap();
-        assert_eq!(
-            CausalGraphStream::new(&nonincremental).unwrap_err(),
-            "composition.stream:OPERATOR_NOT_INCREMENTAL"
-        );
+        assert!(CausalGraphStream::new(&incremental).is_ok());
         let lookahead: CompositionRequest = serde_json::from_value(json!({
             "version": COMPOSITION_VERSION,
             "steps": [
