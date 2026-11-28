@@ -1,7 +1,9 @@
 //! Typed K7 analysis plan, independent of storage, transport and venue.
 pub use crate::operation_contract::{DataAvailability, OperationEffect, OperationShape, TimeBasis};
 use crate::operators::{Operator, registry};
-use crate::stream::{MonotoneWindow, RollingEma, RollingMean, scalar_value, scale_value};
+use crate::stream::{
+    CooldownGate, MonotoneWindow, RollingEma, RollingMean, if_else_value, scalar_value, scale_value,
+};
 use crate::time_series::ClosedRange;
 pub use okx_research_protocol::strategy_contract::{
     CompositionRequest, GRAPH_SIGNAL_VERSION, GraphSignalSpec, MissingSignalPolicy, SeriesOp,
@@ -298,6 +300,7 @@ pub enum SeriesUnitRule {
     Boolean,
     PriceOrContractsOrNativeVolume,
     PriceOrRatioOrContractsOrNativeVolumeOrCoefficient,
+    NumericOrBoolean,
     PriceOrRatioOrNativeVolumeOrCoefficient,
     CausalSeries,
     SameAsInput,
@@ -325,6 +328,15 @@ impl SeriesUnitRule {
                     | Unit::Contracts
                     | Unit::NativeVolume
                     | Unit::Coefficient
+            ),
+            Self::NumericOrBoolean => matches!(
+                actual,
+                Unit::Price
+                    | Unit::Ratio
+                    | Unit::Contracts
+                    | Unit::NativeVolume
+                    | Unit::Coefficient
+                    | Unit::Boolean
             ),
             Self::PriceOrRatioOrNativeVolumeOrCoefficient => matches!(
                 actual,
@@ -373,6 +385,8 @@ pub enum NullPolicy {
     UnconfirmedWithoutFutureBars,
     PropagateMissing,
     ExponentialWarmupResetOnMissing,
+    SelectedBranchOrUnknownCondition,
+    EventCooldownResetOnMissing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -393,6 +407,7 @@ pub enum ParameterRequirement {
     FiniteThreshold,
     FiniteScaleFactor,
     PriorEventStepInWhen,
+    BooleanConditionInWhen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -470,19 +485,21 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
     use SeriesUnitRule as U;
     let input_unit = match op {
         ReturnsSeries => U::PriceOrContractsOrNativeVolume,
-        RollingMean | RollingMax | RollingMin | RollingRange | RollingZscore | RollingStddev
+        RollingMean | RollingRange | RollingZscore | RollingStddev
         | EmaSeries | ScaleSeries | GreaterThanSeries | LessThanSeries => {
             U::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient
         }
+        RollingMax | RollingMin => U::NumericOrBoolean,
         AddSeries => U::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient,
         RollingPearson | SubtractSeries | DivideSeries => U::Ratio,
-        And | Or | RisingEdge | FallingEdge => U::Boolean,
-        Lag => U::CausalSeries,
+        And | Or | Not | RisingEdge | FallingEdge => U::Boolean,
+        Lag | IfElse => U::CausalSeries,
+        Cooldown => U::Event,
         GreaterThan | LessThan => U::PriceOrRatioOrNativeVolumeOrCoefficient,
         ForwardReturnLabel => U::Price,
     };
     let other_unit = match op {
-        AddSeries => Some(U::SameAsInput),
+        AddSeries | IfElse => Some(U::SameAsInput),
         RollingPearson | SubtractSeries | DivideSeries => Some(U::Ratio),
         And | Or => Some(U::Boolean),
         GreaterThanSeries | LessThanSeries => Some(U::SameAsInput),
@@ -493,12 +510,14 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         RollingMean | RollingMax | RollingMin | RollingRange | RollingStddev | EmaSeries
         | ScaleSeries | AddSeries | Lag => U::SameAsInput,
         RollingPearson | RollingZscore => U::Coefficient,
-        And | Or | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries => U::Boolean,
-        RisingEdge | FallingEdge => U::Event,
+        And | Or | Not | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries => U::Boolean,
+        RisingEdge | FallingEdge | Cooldown => U::Event,
+        IfElse => U::SameAsInput,
         ForwardReturnLabel => U::OutcomeRatio,
     };
     let period = match op {
-        RollingMean | RollingMax | RollingMin | EmaSeries | Lag | ForwardReturnLabel => {
+        RollingMean | RollingMax | RollingMin | EmaSeries | Lag | Cooldown
+        | ForwardReturnLabel => {
             Some((1, 1000))
         }
         RollingRange | RollingStddev | RollingZscore => Some((2, 1000)),
@@ -513,10 +532,12 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         RollingZscore => NullPolicy::StrictWindowOrZeroVariance,
         RollingStddev => NullPolicy::StrictWindowZeroForConstant,
         EmaSeries => NullPolicy::ExponentialWarmupResetOnMissing,
+        IfElse => NullPolicy::SelectedBranchOrUnknownCondition,
+        Cooldown => NullPolicy::EventCooldownResetOnMissing,
         ScaleSeries => NullPolicy::PropagateMissing,
         DivideSeries => NullPolicy::PropagateMissingOrZeroDenominator,
-        And | Or | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries | RisingEdge
-        | FallingEdge => NullPolicy::PropagateUnknown,
+        And | Or | Not | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries
+        | RisingEdge | FallingEdge => NullPolicy::PropagateUnknown,
         ForwardReturnLabel => NullPolicy::UnconfirmedWithoutFutureBars,
         AddSeries | SubtractSeries | Lag => NullPolicy::PropagateMissing,
     };
@@ -526,7 +547,7 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         RollingRange => 4,
         RollingPearson => 8,
         EmaSeries | AddSeries | SubtractSeries | DivideSeries | GreaterThanSeries
-        | LessThanSeries | And | Or => 2,
+        | LessThanSeries | And | Or | IfElse => 2,
         _ => 1,
     };
     let causal = op != ForwardReturnLabel;
@@ -534,7 +555,11 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         op,
         // AddSeries/v2 admits equal price/volume/etc. dimensions while
         // preserving all previously valid ratio+ratio graphs byte-for-byte.
-        version: if op == AddSeries { 2 } else { 1 },
+        version: if matches!(op, AddSeries | RollingMax | RollingMin) {
+            2
+        } else {
+            1
+        },
         input_unit,
         other_unit,
         output_unit,
@@ -544,10 +569,11 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         requires: match op {
             GreaterThan | LessThan => Some(ParameterRequirement::FiniteThreshold),
             ScaleSeries => Some(ParameterRequirement::FiniteScaleFactor),
+            IfElse => Some(ParameterRequirement::BooleanConditionInWhen),
             ForwardReturnLabel => Some(ParameterRequirement::PriorEventStepInWhen),
             _ => None,
         },
-        warmup: if period.is_some() {
+        warmup: if period.is_some() && op != Cooldown {
             WarmupPolicy::PeriodClosedBars
         } else if matches!(op, ReturnsSeries | RisingEdge | FallingEdge) {
             WarmupPolicy::OnePriorClosedBar
@@ -596,7 +622,7 @@ mod typed_operation_catalog_tests {
     #[test]
     fn all_protocol_operations_have_unique_versioned_pure_contracts() {
         let contracts = series_operation_contracts();
-        assert_eq!(contracts.len(), 23);
+        assert_eq!(contracts.len(), 26);
         assert_eq!(contracts.len(), SeriesOp::ALL.len());
         let mut ids = BTreeSet::new();
         for contract in contracts {
@@ -604,7 +630,10 @@ mod typed_operation_catalog_tests {
             assert!(ids.insert(id), "duplicate operation id");
             assert_eq!(
                 contract.version,
-                if contract.op == SeriesOp::AddSeries {
+                if matches!(
+                    contract.op,
+                    SeriesOp::AddSeries | SeriesOp::RollingMax | SeriesOp::RollingMin
+                ) {
                     2
                 } else {
                     1
@@ -624,7 +653,7 @@ mod typed_operation_catalog_tests {
                 assert!(max <= 1000);
             }
         }
-        assert_eq!(ids.len(), 23);
+        assert_eq!(ids.len(), 26);
     }
 
     #[test]
@@ -645,6 +674,8 @@ mod typed_operation_catalog_tests {
             ("divide_series", "propagate_missing_or_zero_denominator"),
             ("and", "propagate_unknown"),
             ("or", "propagate_unknown"),
+            ("not", "propagate_unknown"),
+            ("if_else", "selected_branch_or_unknown_condition"),
             ("lag", "propagate_missing"),
             ("greater_than", "propagate_unknown"),
             ("greater_than_series", "propagate_unknown"),
@@ -652,6 +683,7 @@ mod typed_operation_catalog_tests {
             ("less_than_series", "propagate_unknown"),
             ("rising_edge", "propagate_unknown"),
             ("falling_edge", "propagate_unknown"),
+            ("cooldown", "event_cooldown_reset_on_missing"),
             ("forward_return_label", "unconfirmed_without_future_bars"),
         ];
         for (contract, (id, null_policy)) in
@@ -738,6 +770,8 @@ mod typed_operation_catalog_tests {
                 }
                 if op == SeriesOp::ForwardReturnLabel {
                     probe["when"] = json!("event");
+                } else if op == SeriesOp::IfElse {
+                    probe["when"] = json!("condition");
                 }
                 let request = serde_json::from_value(json!({
                     "version":COMPOSITION_VERSION,
@@ -980,7 +1014,9 @@ impl CheckedComposition {
                     format!("{path}.input:UNKNOWN_OR_FORWARD_STEP:{}", step.input)
                 })?,
             };
-            if step.when.is_some() && step.op != SeriesOp::ForwardReturnLabel {
+            if step.when.is_some()
+                && !matches!(step.op, SeriesOp::ForwardReturnLabel | SeriesOp::IfElse)
+            {
                 return Err(format!("{path}.when:UNEXPECTED"));
             }
             if step.op == SeriesOp::ScaleSeries {
@@ -1001,6 +1037,7 @@ impl CheckedComposition {
                         | SeriesOp::LessThanSeries
                         | SeriesOp::And
                         | SeriesOp::Or
+                        | SeriesOp::IfElse
                 )
             {
                 return Err(format!("{path}.other:UNEXPECTED"));
@@ -1015,6 +1052,7 @@ impl CheckedComposition {
                     | SeriesOp::LessThanSeries
                     | SeriesOp::And
                     | SeriesOp::Or
+                    | SeriesOp::IfElse
             ) {
                 let name = step
                     .other
@@ -1035,9 +1073,15 @@ impl CheckedComposition {
                     .get(id)
                     .copied()
                     .ok_or_else(|| format!("{path}.when:UNKNOWN_OR_FORWARD_STEP:{id}"))?;
-                if unit != Unit::Event {
+                let expected = if step.op == SeriesOp::IfElse {
+                    Unit::Boolean
+                } else {
+                    Unit::Event
+                };
+                if unit != expected {
                     return Err(format!(
-                        "{path}.when:UNIT_MISMATCH:expected=event:actual={}",
+                        "{path}.when:UNIT_MISMATCH:expected={}:actual={}",
+                        composition_unit_name(expected),
                         composition_unit_name(unit)
                     ));
                 }
@@ -1186,6 +1230,51 @@ impl CheckedComposition {
                     }
                     Unit::Boolean
                 }
+                SeriesOp::Not => {
+                    if !contract.input_unit.accepts(input_unit, None) {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=boolean:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    if step.period.is_some() {
+                        return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    Unit::Boolean
+                }
+                SeriesOp::IfElse => {
+                    if !contract.input_unit.accepts(input_unit, None) {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=causal_series:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    let other_unit = other.expect("validated false branch").0;
+                    if !contract
+                        .other_unit
+                        .expect("typed false branch")
+                        .accepts(other_unit, Some(input_unit))
+                    {
+                        return Err(format!(
+                            "{path}.other:UNIT_MISMATCH:expected={}:actual={}",
+                            composition_unit_name(input_unit),
+                            composition_unit_name(other_unit)
+                        ));
+                    }
+                    if step.when.is_none() {
+                        return Err(format!("{path}.when:REQUIRED_BOOLEAN"));
+                    }
+                    if step.period.is_some() {
+                        return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    input_unit
+                }
                 SeriesOp::ReturnsSeries => {
                     if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
@@ -1271,6 +1360,21 @@ impl CheckedComposition {
                     }
                     if step.period.is_some() {
                         return Err(format!("{path}.period:UNEXPECTED"));
+                    }
+                    if step.threshold.is_some() {
+                        return Err(format!("{path}.threshold:UNEXPECTED"));
+                    }
+                    Unit::Event
+                }
+                SeriesOp::Cooldown => {
+                    if !contract.input_unit.accepts(input_unit, None) {
+                        return Err(format!(
+                            "{path}.input:UNIT_MISMATCH:expected=event:actual={}",
+                            composition_unit_name(input_unit)
+                        ));
+                    }
+                    if !valid_period {
+                        return Err(format!("{path}.period:INVALID:1..1000"));
                     }
                     if step.threshold.is_some() {
                         return Err(format!("{path}.threshold:UNEXPECTED"));
@@ -1686,6 +1790,28 @@ impl CheckedComposition {
                         })
                         .collect()
                 }
+                SeriesOp::Not => input
+                    .iter()
+                    .map(|&value| scalar_value(SeriesOp::Not, value, None, None, None))
+                    .collect(),
+                SeriesOp::IfElse => {
+                    let other = &values[checked.step.other.as_ref().expect("validated false arm")];
+                    let condition = &values[checked.step.when.as_ref().expect("validated condition")];
+                    input
+                        .iter()
+                        .zip(other)
+                        .zip(condition)
+                        .map(|((&true_value, &false_value), &when)| {
+                            if_else_value(when, true_value, false_value)
+                        })
+                        .collect()
+                }
+                SeriesOp::Cooldown => {
+                    let mut gate = CooldownGate::new(
+                        checked.step.period.expect("validated cooldown period") as usize,
+                    );
+                    input.iter().copied().map(|event| gate.push(event)).collect()
+                }
                 SeriesOp::ReturnsSeries => {
                     let mut result = vec![None; input.len()];
                     for i in 1..input.len() {
@@ -1815,6 +1941,21 @@ impl CheckedComposition {
                 .then(|| self.null_cause_at(values, name, index))
         };
         match step.op {
+            SeriesOp::Not | SeriesOp::Cooldown => {
+                trace(&step.input, at).unwrap_or_else(|| cause("NON_FINITE_RESULT"))
+            }
+            SeriesOp::IfElse => {
+                let condition = step.when.as_deref().expect("validated Boolean condition");
+                if let Some(upstream) = trace(condition, at) {
+                    return upstream;
+                }
+                let selected = if value(condition, at) == Some(1.0) {
+                    &step.input
+                } else {
+                    step.other.as_ref().expect("validated false arm")
+                };
+                trace(selected, at).unwrap_or_else(|| cause("NON_FINITE_RESULT"))
+            }
             SeriesOp::ScaleSeries => {
                 trace(&step.input, at).unwrap_or_else(|| cause("NON_FINITE_RESULT"))
             }
@@ -2018,6 +2159,10 @@ fn series_cost_per_bar(op: SeriesOp) -> u64 {
 #[cfg(test)]
 #[path = "tests/typed_series_algebra.rs"]
 mod typed_series_algebra_tests;
+
+#[cfg(test)]
+#[path = "tests/typed_logic_composition.rs"]
+mod typed_logic_composition_tests;
 
 /// Online centered covariance with O(1) insertion and removal. This avoids
 /// catastrophic cancellation of raw sums of squares for near-constant data.

@@ -72,6 +72,11 @@ fn required_score_start(graph: &CheckedComposition, signal_step: &str) -> Result
             .as_deref()
             .and_then(|input| first_known.get(input).copied())
             .unwrap_or(0);
+        let condition = step
+            .when
+            .as_deref()
+            .and_then(|input| first_known.get(input).copied())
+            .unwrap_or(0);
         let delay = match step.op {
             SeriesOp::ReturnsSeries | SeriesOp::RisingEdge | SeriesOp::FallingEdge => 1,
             SeriesOp::Lag => usize::from(step.period.expect("checked lag period")),
@@ -87,6 +92,7 @@ fn required_score_start(graph: &CheckedComposition, signal_step: &str) -> Result
         };
         let start = from
             .max(other)
+            .max(condition)
             .checked_add(delay)
             .ok_or("graph_signal:WARMUP_OVERFLOW")?;
         first_known.insert(&step.id, start);

@@ -57,6 +57,7 @@ enum Memory {
     Previous(Option<f64>),
     Mean(RollingMean),
     Ema(RollingEma),
+    Cooldown(CooldownGate),
     Extremum(MonotoneWindow),
     Range(MonotoneWindow, MonotoneWindow),
     Dispersion(RollingDispersionWindow),
@@ -68,6 +69,7 @@ enum Memory {
 struct CompiledNode {
     input: Input,
     other: Option<Input>,
+    when: Option<Input>,
     memory: Memory,
 }
 
@@ -99,6 +101,16 @@ impl CausalGraphStream {
                 .as_deref()
                 .map(|name| resolve_input(&bindings, name))
                 .transpose()?;
+            // `when` is the Boolean selector of `if_else` (it remains the
+            // Event selector of the non-streamable forward label elsewhere).
+            let when = if step.op == SeriesOp::IfElse {
+                Some(resolve_input(
+                    &bindings,
+                    step.when.as_deref().expect("checked if_else condition"),
+                )?)
+            } else {
+                None
+            };
             let memory = match step.op {
                 SeriesOp::ForwardReturnLabel => {
                     return Err("composition.stream:NON_CAUSAL_OPERATOR".into());
@@ -117,6 +129,9 @@ impl CausalGraphStream {
                 )),
                 SeriesOp::EmaSeries => Memory::Ema(RollingEma::new(
                     step.period.expect("checked EMA period") as usize,
+                )),
+                SeriesOp::Cooldown => Memory::Cooldown(CooldownGate::new(
+                    step.period.expect("checked cooldown period") as usize,
                 )),
                 SeriesOp::RollingMax | SeriesOp::RollingMin => {
                     Memory::Extremum(MonotoneWindow::new(
@@ -142,6 +157,7 @@ impl CausalGraphStream {
             nodes.push(CompiledNode {
                 input,
                 other,
+                when,
                 memory,
             });
             bindings.insert(&step.id, index);
@@ -190,9 +206,11 @@ impl CausalGraphStream {
             let step = &self.plan.steps()[index].step;
             let input = node.input.value(bar, &columns);
             let other = node.other.and_then(|binding| binding.value(bar, &columns));
+            let when = node.when.and_then(|binding| binding.value(bar, &columns));
             columns[index] = match &mut node.memory {
                 Memory::Mean(window) => window.push(input),
                 Memory::Ema(window) => window.push(input),
+                Memory::Cooldown(gate) => gate.push(input),
                 Memory::Dispersion(window) => window.push(input),
                 Memory::Pearson(window) => window.push(input, other),
                 Memory::Extremum(window) => window.push(input),
@@ -220,6 +238,9 @@ impl CausalGraphStream {
                 }
                 Memory::Stateless if step.op == SeriesOp::ScaleSeries => {
                     scale_value(input, step.factor.expect("checked scale factor"))
+                }
+                Memory::Stateless if step.op == SeriesOp::IfElse => {
+                    if_else_value(when, input, other)
                 }
                 Memory::Stateless => scalar_value(step.op, input, other, None, step.threshold),
             };
@@ -287,6 +308,57 @@ pub(crate) fn scale_value(value: Option<f64>, factor: f64) -> Option<f64> {
         let product = number * factor;
         product.is_finite().then_some(product)
     })
+}
+
+/// Select exactly one already typed branch; the unselected branch may be
+/// missing. An unknown selector never falls through to either branch.
+pub(crate) fn if_else_value(
+    when: Option<f64>,
+    if_true: Option<f64>,
+    if_false: Option<f64>,
+) -> Option<f64> {
+    let selected = match when {
+        Some(value) if value == 1.0 => if_true,
+        Some(value) if value == 0.0 => if_false,
+        _ => None,
+    };
+    selected.filter(|value| value.is_finite())
+}
+
+/// A bounded gate for Event values: after an accepted event, the next N-1
+/// closed observations suppress additional events. Missing is not false: it
+/// remains unknown and resets the gate rather than bridging an absent bar.
+#[derive(Debug)]
+pub(crate) struct CooldownGate {
+    period: usize,
+    remaining: usize,
+}
+
+impl CooldownGate {
+    pub(crate) fn new(period: usize) -> Self {
+        debug_assert!(period > 0);
+        Self {
+            period,
+            remaining: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, event: Option<f64>) -> Option<f64> {
+        match event {
+            Some(value) if value == 1.0 && self.remaining == 0 => {
+                self.remaining = self.period - 1;
+                Some(1.0)
+            }
+            Some(value) if value == 0.0 || value == 1.0 => {
+                self.remaining = self.remaining.saturating_sub(1);
+                Some(0.0)
+            }
+            _ => {
+                self.remaining = 0;
+                None
+            }
+        }
+    }
 }
 
 /// The registered strategy's first-value EMA seed, with strict graph warmup.
@@ -357,6 +429,11 @@ pub(crate) fn scalar_value(
                 value < threshold.expect("checked threshold")
             })
         }),
+        SeriesOp::Not => match input {
+            Some(value) if value == 1.0 => Some(0.0),
+            Some(value) if value == 0.0 => Some(1.0),
+            _ => None,
+        },
         SeriesOp::AddSeries
         | SeriesOp::SubtractSeries
         | SeriesOp::DivideSeries
@@ -498,6 +575,54 @@ mod tests {
     use super::*;
     use crate::query_plan::{COMPOSITION_VERSION, CompositionRequest};
     use serde_json::json;
+
+    #[test]
+    fn strict_boolean_negation_and_conditional_do_not_impute_unknown() {
+        assert_eq!(scalar_value(SeriesOp::Not, Some(0.0), None, None, None), Some(1.0));
+        assert_eq!(scalar_value(SeriesOp::Not, Some(1.0), None, None, None), Some(0.0));
+        assert_eq!(scalar_value(SeriesOp::Not, None, None, None, None), None);
+        assert_eq!(if_else_value(Some(1.0), Some(42.0), None), Some(42.0));
+        assert_eq!(if_else_value(Some(0.0), None, Some(-42.0)), Some(-42.0));
+        assert_eq!(if_else_value(None, Some(1.0), Some(2.0)), None);
+        assert_eq!(if_else_value(Some(1.0), None, Some(2.0)), None);
+        assert_eq!(if_else_value(Some(0.0), Some(1.0), None), None);
+    }
+
+    #[test]
+    fn cooldown_suppresses_only_known_events_and_resets_on_unknown() {
+        let mut gate = CooldownGate::new(3);
+        let inputs = [
+            Some(1.0),
+            Some(1.0),
+            Some(1.0),
+            Some(1.0),
+            Some(0.0),
+            None,
+            Some(1.0),
+            Some(1.0),
+            Some(1.0),
+            Some(1.0),
+        ];
+        let actual = inputs.map(|value| gate.push(value));
+        assert_eq!(
+            actual,
+            [
+                Some(1.0),
+                Some(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.0),
+                None,
+                Some(1.0),
+                Some(0.0),
+                Some(0.0),
+                Some(1.0),
+            ]
+        );
+        let mut every_event = CooldownGate::new(1);
+        assert_eq!(every_event.push(Some(1.0)), Some(1.0));
+        assert_eq!(every_event.push(Some(1.0)), Some(1.0));
+    }
 
     fn graph(bars: u64) -> CheckedComposition {
         let request: CompositionRequest = serde_json::from_value(json!({

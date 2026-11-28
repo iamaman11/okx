@@ -264,6 +264,8 @@ pub enum SeriesOp {
     DivideSeries,
     And,
     Or,
+    Not,
+    IfElse,
     Lag,
     GreaterThan,
     GreaterThanSeries,
@@ -271,6 +273,7 @@ pub enum SeriesOp {
     LessThanSeries,
     RisingEdge,
     FallingEdge,
+    Cooldown,
     ForwardReturnLabel,
 }
 
@@ -278,7 +281,7 @@ impl SeriesOp {
     /// The finite protocol catalog. Both Research capabilities and the
     /// compiled operator contracts enumerate this list; there is no worker-
     /// maintained second inventory of spellings or supported operations.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 26] = [
         Self::ReturnsSeries,
         Self::RollingMean,
         Self::RollingMax,
@@ -294,6 +297,8 @@ impl SeriesOp {
         Self::DivideSeries,
         Self::And,
         Self::Or,
+        Self::Not,
+        Self::IfElse,
         Self::Lag,
         Self::GreaterThan,
         Self::GreaterThanSeries,
@@ -301,6 +306,7 @@ impl SeriesOp {
         Self::LessThanSeries,
         Self::RisingEdge,
         Self::FallingEdge,
+        Self::Cooldown,
         Self::ForwardReturnLabel,
     ];
 }

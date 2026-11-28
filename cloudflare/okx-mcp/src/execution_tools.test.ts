@@ -104,6 +104,34 @@ fail(validTool('market',{...marketScreen,composition:bollinger}),'typed series a
 fail(!validTool('market',{...marketScreen,composition:{...bollinger,steps:bollinger.steps.map(s=>s.id==='twice'?{id:s.id,op:s.op,input:s.input}:s)}}),'scale requires an explicit multiplier');
 fail(!validTool('market',{...marketScreen,composition:{...bollinger,steps:bollinger.steps.map(s=>s.id==='twice'?{...s,factor:'2'}:s)}}),'scale rejects a non-numeric multiplier');
 fail(!validTool('market',{...marketScreen,composition:{...bollinger,steps:bollinger.steps.map(s=>s.id==='mean'?{...s,factor:2}:s)}}),'other operations reject unexpected multiplier');
+// P0-C reuses the existing step ports: input, other and when. The Rust
+// compiler proves their units and requires the operation-specific operands.
+const logicGraph={version:'okx.market.composition/v1',steps:[
+ {id:'level',op:'greater_than',input:'close',threshold:100},
+ {id:'negated',op:'not',input:'level'},
+ {id:'chosen',op:'if_else',input:'close',other:'open',when:'negated'},
+ {id:'edge',op:'rising_edge',input:'level'},
+ {id:'gated',op:'cooldown',input:'edge',period:3},
+],result_steps:['chosen','gated']};
+fail(validTool('market',{...marketScreen,composition:logicGraph}),'P0-C typed logic has one strict public graph contract');
+for(const [index,field] of [[2,'other'],[2,'when'],[4,'period']] as const){
+ const steps=logicGraph.steps.map((step,at)=>{
+  if(at!==index)return step;
+  const copy:Record<string,unknown>={...step};delete copy[field];return copy;
+ });
+ fail(!validTool('market',{...marketScreen,composition:{...logicGraph,steps}}),
+  `P0-C required ${field} must fail before Research dispatch`);
+}
+for(const [index,change] of [
+ [1,{op:'unsupported_not'}],
+ [2,{when:42}],
+ [3,{condition:'level'}],
+ [4,{period:0}],
+] as const){
+ const steps=logicGraph.steps.map((step,at)=>at===index?{...step,...change}:step);
+ fail(!validTool('market',{...marketScreen,composition:{...logicGraph,steps}}),
+   'P0-C rejects unregistered operators, invalid port values and extra fields');
+}
 fail(!validTool('market',{...marketScreen,action:'compare',composition:composed}), 'composition limited to screen');
 fail(!validTool('market',{...marketScreen,composition:{...composed,version:'unknown'}}), 'composition version rejected');
 fail(!validTool('market',{...marketScreen,composition:{...composed,steps:[{id:'r1',op:'rolling_mean',input:'close'}]}}), 'window must specify period');
@@ -332,6 +360,8 @@ const graphSignal={version:'okx.graph-signal/v1',graph:{version:'okx.market.comp
 ],result_steps:['up']},signal_step:'up',target_if_true:1,target_if_false:0,missing:'hold'};
 const graphPayload={...graphBase,action:'graph_backtest',graph_signal:graphSignal};
 fail(validTool('research',graphPayload),'research graph backtest is a typed causal operation');
+fail(validTool('research',{...graphPayload,graph_signal:{...graphSignal,graph:logicGraph,signal_step:'gated'}}),
+ 'P0-C event logic uses the existing Research graph-backtest request');
 fail(isExecutionMutation('research','graph_backtest'),'graph research jobs are correctly marked mutations');
 const graphInvalid=[
  {...graphPayload,strategy_id:'ema_cross_v1'},

@@ -18,6 +18,12 @@ Research owns pure strategy mathematics. Engine owns live trading decisions, the
 
 The contract version of `add_series` advances to `2` for same-unit algebra, while all previous `Ratio + Ratio` graphs retain the same numeric semantics and the unchanged `okx.market.composition/v1` wire version. New operators start at contract version `1`.
 
+## Composable logic (P0-C)
+
+`not(Boolean)` inverts a known condition and keeps unknown unknown. `if_else(input=true_arm, other=false_arm, when=Boolean)` requires two branches with exactly the same causal unit; a missing *unused* arm does not invalidate the selected result. `rolling_min(Boolean, period=N)` already expresses N consecutive true closed bars, so it is not a separate operator. Its strict complete window returns unknown until warmup ends and whenever any input in the window is missing. `rolling_max(Boolean,N)` similarly expresses any true observation in a fully known window. Their wider Boolean contracts are version `2`.
+
+`rising_edge(Boolean)` converts a level into an event; `cooldown(Event, period=N)` permits events at least N observed closed bars apart. An unknown event remains unknown and resets the gate. The original `and`/`or` keep their v1 strict-null semantics (one unknown operand yields unknown); changing this truth table would require an explicitly versioned wire contract. Timestamp monotonicity alone does not prove that every expected time slot was observed: the graph never invents missing bars.
+
 ## One diagnostic chain
 
 Keep the existing `request_id → Research invocation → job_id → source/graph step → persisted result` identities. Preserve `reason_code`, `first_unproven_fact`, `quality`, `next_action`, owner and provenance where observed. A read-only explanation must not fetch market data, start a process or write financial state. Missing retained evidence stays `UNKNOWN` / `NOT_EVALUATED`, never a fabricated historical success.

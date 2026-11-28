@@ -609,6 +609,8 @@
                             "divide_series",
                             "and",
                             "or",
+                            "not",
+                            "if_else",
                             "lag",
                             "greater_than",
                             "greater_than_series",
@@ -616,6 +618,7 @@
                             "less_than_series",
                             "rising_edge",
                             "falling_edge",
+                            "cooldown",
                             "forward_return_label"
                           ]
                         },
@@ -677,14 +680,10 @@
                     "$ref": "#/$defs/y"
                   },
                   "budget": {
-                    "type": "number",
-                    "minimum": 1e-9,
-                    "maximum": 9007199254740991
+                    "$ref": "#/$defs/m"
                   },
                   "price": {
-                    "type": "number",
-                    "minimum": 1e-9,
-                    "maximum": 9007199254740991
+                    "$ref": "#/$defs/m"
                   },
                   "stop_distance": {
                     "type": "number",
@@ -719,14 +718,10 @@
                       "$ref": "#/$defs/s"
                     },
                     "min": {
-                      "type": "number",
-                      "minimum": -9007199254740991,
-                      "maximum": 9007199254740991
+                      "$ref": "#/$defs/g"
                     },
                     "max": {
-                      "type": "number",
-                      "minimum": -9007199254740991,
-                      "maximum": 9007199254740991
+                      "$ref": "#/$defs/g"
                     }
                   },
                   "required": [
@@ -887,6 +882,16 @@
           "x": {
             "type": "string",
             "pattern": "^[a-z0-9_]{1,32}$"
+          },
+          "g": {
+            "type": "number",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "m": {
+            "type": "number",
+            "minimum": 1e-9,
+            "maximum": 9007199254740991
           }
         }
       },
@@ -954,19 +959,13 @@
             "type": "object",
             "properties": {
               "maker_fee_bps": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1000
+                "$ref": "#/$defs/o"
               },
               "taker_fee_bps": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1000
+                "$ref": "#/$defs/o"
               },
               "slippage_bps": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1000
+                "$ref": "#/$defs/o"
               },
               "funding_mode": {
                 "enum": [
@@ -1477,6 +1476,11 @@
               "amount"
             ],
             "additionalProperties": false
+          },
+          "o": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000
           }
         }
       },
