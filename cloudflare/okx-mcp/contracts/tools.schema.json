@@ -959,13 +959,19 @@
             "type": "object",
             "properties": {
               "maker_fee_bps": {
-                "$ref": "#/$defs/o"
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
               },
               "taker_fee_bps": {
-                "$ref": "#/$defs/o"
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
               },
               "slippage_bps": {
-                "$ref": "#/$defs/o"
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
               },
               "funding_mode": {
                 "enum": [
@@ -1476,11 +1482,6 @@
               "amount"
             ],
             "additionalProperties": false
-          },
-          "o": {
-            "type": "number",
-            "minimum": 0,
-            "maximum": 1000
           }
         }
       },

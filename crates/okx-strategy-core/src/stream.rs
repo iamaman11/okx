@@ -318,8 +318,8 @@ pub(crate) fn if_else_value(
     if_false: Option<f64>,
 ) -> Option<f64> {
     let selected = match when {
-        Some(value) if value == 1.0 => if_true,
-        Some(value) if value == 0.0 => if_false,
+        Some(1.0) => if_true,
+        Some(0.0) => if_false,
         _ => None,
     };
     selected.filter(|value| value.is_finite())
@@ -430,8 +430,8 @@ pub(crate) fn scalar_value(
             })
         }),
         SeriesOp::Not => match input {
-            Some(value) if value == 1.0 => Some(0.0),
-            Some(value) if value == 0.0 => Some(1.0),
+            Some(1.0) => Some(0.0),
+            Some(0.0) => Some(1.0),
             _ => None,
         },
         SeriesOp::AddSeries
