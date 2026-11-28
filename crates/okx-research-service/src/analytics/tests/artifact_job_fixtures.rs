@@ -556,7 +556,10 @@ async fn t13_export_with_verified_sources_but_unverified_budget_is_partial() {
         "EXPORT_REPLAY_COUNT_MISMATCH"
     );
     drop(service);
-    std::fs::remove_dir_all(root).unwrap();
+    // Windows may retain a transient handle from the completed background
+    // worker. The assertions above are the test; temporary cleanup is best
+    // effort and must not turn a verified proof into an unrelated failure.
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test(flavor = "current_thread")]
