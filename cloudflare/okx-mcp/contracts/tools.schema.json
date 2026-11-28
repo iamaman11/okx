@@ -223,7 +223,7 @@
     },
     {
       "name": "strategies",
-      "description": "Live trading",
+      "description": "Trade",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -491,7 +491,7 @@
     },
     {
       "name": "market",
-      "description": "Market composition; screen may create job",
+      "description": "composition; screen may create job",
       "inputSchema": {
         "oneOf": [
           {
@@ -602,6 +602,8 @@
                             "rolling_pearson",
                             "rolling_zscore",
                             "rolling_stddev",
+                            "ema_series",
+                            "scale_series",
                             "add_series",
                             "subtract_series",
                             "divide_series",
@@ -627,6 +629,9 @@
                           "$ref": "#/$defs/y"
                         },
                         "threshold": {
+                          "type": "number"
+                        },
+                        "factor": {
                           "type": "number"
                         },
                         "when": {
@@ -893,7 +898,7 @@
     },
     {
       "name": "research",
-      "description": "Research",
+      "description": "Study",
       "inputSchema": {
         "properties": {
           "limit": {
@@ -1667,7 +1672,7 @@
     },
     {
       "name": "diagnostics",
-      "description": "Diagnostics",
+      "description": "Trace",
       "inputSchema": {
         "oneOf": [
           {
@@ -1937,7 +1942,7 @@
     },
     {
       "name": "trade.execute",
-      "description": "Real order; loss risk; approval/limits/STOP",
+      "description": "Real order; loss; approval/limits/STOP",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2138,7 +2143,7 @@
     },
     {
       "name": "trade.status",
-      "description": "Status",
+      "description": "State",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2254,7 +2259,7 @@
     },
     {
       "name": "trade.capabilities",
-      "description": "Rights",
+      "description": "Caps",
       "inputSchema": {
         "properties": {
           "account": {
@@ -2277,7 +2282,7 @@
     },
     {
       "name": "trade.preflight",
-      "description": "Ready?",
+      "description": "Gate",
       "inputSchema": {
         "properties": {
           "account": {

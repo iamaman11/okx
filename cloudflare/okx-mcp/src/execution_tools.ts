@@ -105,7 +105,7 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 // with real order submission under a single model-callable descriptor.
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  accounts:{description:'Accounts',readOnlyHint:false,destructiveHint:true},
- strategies:{description:'Trading',readOnlyHint:false,destructiveHint:true},
+ strategies:{description:'Trade',readOnlyHint:false,destructiveHint:true},
  // `screen` can persist a Research job. A multi-action descriptor must not
  // claim that every action is read-only; it still has no destructive effect.
  market:{description:'composition; screen may create job',readOnlyHint:false,destructiveHint:false},
@@ -120,7 +120,7 @@ const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destruc
  cancel:{description:'Cancel',readOnlyHint:false,destructiveHint:true},
  close:{description:'Close',readOnlyHint:false,destructiveHint:true},
  capabilities:{description:'Caps',readOnlyHint:true,destructiveHint:false},
- preflight:{description:'Check',readOnlyHint:true,destructiveHint:false},
+ preflight:{description:'Gate',readOnlyHint:true,destructiveHint:false},
 };
 const annotation=(meta:{readOnlyHint:boolean;destructiveHint:boolean})=>({
  readOnlyHint:meta.readOnlyHint,destructiveHint:meta.destructiveHint,openWorldHint:false
