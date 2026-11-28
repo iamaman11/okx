@@ -101,16 +101,20 @@ pub(super) fn verify(
             return Err(mismatch());
         }
         if let Some(recorded_policy) = graph_oos {
-            let oos = replay::graph_oos(&bars, &spec, &|| false)
-                .map_err(|_| mismatch())?;
+            let oos = replay::graph_oos(&bars, &spec, &|| false).map_err(|_| mismatch())?;
             let split = oos.policy.split_index;
             let stored = &manifest["graph_oos"];
             let currency = inputs["economic_basis"]["quote_currency"]
                 .as_str()
                 .ok_or_else(mismatch)?;
             let train_audit = audit_graph_replay(
-                &bars[..split], &spec.execution, &oos.train,
-                currency, start, split, &|| false,
+                &bars[..split],
+                &spec.execution,
+                &oos.train,
+                currency,
+                start,
+                split,
+                &|| false,
             )
             .map_err(|_| mismatch())?;
             if recorded_policy != &json!(oos.policy)
@@ -123,13 +127,15 @@ pub(super) fn verify(
                 || stored["holdout"]["summary"] != json!(oos.test.summary)
                 || stored["holdout"]["result_hash"] != oos.test.hash
                 || stored["holdout"]["dataset_hash"] != oos.test.dataset_hash
-                || stored["train_range"] != json!({
-                    "start_ms":bars[start].time,"end_ms":bars[split].time
-                })
-                || stored["holdout_range"] != json!({
-                    "start_ms":bars[split].time,
-                    "end_ms":inputs["requested_range"]["end_ms"]
-                })
+                || stored["train_range"]
+                    != json!({
+                        "start_ms":bars[start].time,"end_ms":bars[split].time
+                    })
+                || stored["holdout_range"]
+                    != json!({
+                        "start_ms":bars[split].time,
+                        "end_ms":inputs["requested_range"]["end_ms"]
+                    })
                 || stored["selection"] != "predeclared_graph_no_optimization"
                 || stored["historical_observed"] != false
             {

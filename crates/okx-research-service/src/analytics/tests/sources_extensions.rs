@@ -884,7 +884,10 @@ async fn c20_actual_sources_normalize_fake_http_then_run_registered_composition_
     assert_eq!(oos["policy"]["test_score_start_index"], 14);
     assert_eq!(oos["policy"]["selection"], "fixed_graph_no_model_fitting");
     assert_eq!(oos["selection"], "predeclared_graph_no_optimization");
-    assert_eq!(oos["holdout"]["summary"], graph_result["metadata"]["summary"]);
+    assert_eq!(
+        oos["holdout"]["summary"],
+        graph_result["metadata"]["summary"]
+    );
     assert_eq!(
         oos["train"]["economic_audit"]["net_exact"],
         oos["train"]["summary"]["pnl_exact"]

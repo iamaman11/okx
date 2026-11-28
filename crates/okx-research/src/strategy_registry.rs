@@ -245,7 +245,11 @@ pub fn graph_oos(
         return Err("CANCELLED".into());
     }
     let test = replay_graph(bars, spec, split, bars.len(), cancel)?;
-    Ok(GraphOosResult { policy, train, test })
+    Ok(GraphOosResult {
+        policy,
+        train,
+        test,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -970,9 +974,18 @@ mod tests {
         assert_eq!(first.policy.split_index, 70);
         assert_eq!(first.policy.train_score_start_index, 2);
         assert_eq!(first.policy.test_score_start_index, 70);
-        assert_eq!(first.policy.selection, GraphOosSelection::FixedGraphNoModelFitting);
-        assert_eq!(first.train.dataset_hash, hash_chunks(&series[..70], &|| false).unwrap());
-        assert_eq!(first.test.dataset_hash, hash_chunks(&series, &|| false).unwrap());
+        assert_eq!(
+            first.policy.selection,
+            GraphOosSelection::FixedGraphNoModelFitting
+        );
+        assert_eq!(
+            first.train.dataset_hash,
+            hash_chunks(&series[..70], &|| false).unwrap()
+        );
+        assert_eq!(
+            first.test.dataset_hash,
+            hash_chunks(&series, &|| false).unwrap()
+        );
         assert_eq!(first.train.equity.first().unwrap().0, series[2].time);
         assert_eq!(first.test.equity.first().unwrap().0, series[70].time);
         let mut mutated = series.clone();
@@ -989,7 +1002,10 @@ mod tests {
         assert_eq!(first.train.dataset_hash, after.train.dataset_hash);
         assert_ne!(first.test.dataset_hash, after.test.dataset_hash);
         assert_ne!(first.test.hash, after.test.hash);
-        assert_eq!(first.test.summary.assumptions, after.test.summary.assumptions);
+        assert_eq!(
+            first.test.summary.assumptions,
+            after.test.summary.assumptions
+        );
     }
 
     #[test]
@@ -999,10 +1015,13 @@ mod tests {
             "graph_oos.range:INSUFFICIENT_TRAIN_OR_HOLDOUT"
         );
         assert_eq!(
-            graph_oos_policy(6, 2).unwrap_err(),
+            graph_oos_policy(6, 3).unwrap_err(),
             "graph_oos.range:INSUFFICIENT_TRAIN_OR_HOLDOUT"
         );
-        assert_eq!(graph_oos(&bars(), &graph_spec(), &|| true).err().unwrap(), "CANCELLED");
+        assert_eq!(
+            graph_oos(&bars(), &graph_spec(), &|| true).err().unwrap(),
+            "CANCELLED"
+        );
     }
 
     #[test]
