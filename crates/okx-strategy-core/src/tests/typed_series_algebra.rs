@@ -47,16 +47,25 @@ fn price_plus_ratio_and_invalid_factors_fail_before_source_reads() {
         .unwrap();
         CheckedComposition::compile(request, 100).unwrap_err()
     };
-    assert!(parse(json!([
-        {"id":"returns","op":"returns_series","input":"close"},
-        {"id":"bad","op":"add_series","input":"close","other":"returns"}
-    ])).contains("other:UNIT_MISMATCH:expected=price:actual=ratio"));
-    assert!(parse(json!([
-        {"id":"bad","op":"scale_series","input":"close"}
-    ])).contains("factor:FINITE_REQUIRED"));
-    assert!(parse(json!([
-        {"id":"bad","op":"rolling_mean","input":"close","period":3,"factor":2.0}
-    ])).contains("factor:UNEXPECTED"));
+    assert!(
+        parse(json!([
+            {"id":"returns","op":"returns_series","input":"close"},
+            {"id":"bad","op":"add_series","input":"close","other":"returns"}
+        ]))
+        .contains("other:UNIT_MISMATCH:expected=price:actual=ratio")
+    );
+    assert!(
+        parse(json!([
+            {"id":"bad","op":"scale_series","input":"close"}
+        ]))
+        .contains("factor:FINITE_REQUIRED")
+    );
+    assert!(
+        parse(json!([
+            {"id":"bad","op":"rolling_mean","input":"close","period":3,"factor":2.0}
+        ]))
+        .contains("factor:UNEXPECTED")
+    );
 }
 
 #[test]
@@ -76,14 +85,22 @@ fn independent_ema_nodes_match_registered_cross_and_stream_after_warmup() {
     for (index, price) in prices.into_iter().enumerate() {
         let signal = registered.push_closed(price).unwrap();
         let batch = plan.evaluate_at(&prices[..=index], index);
-        let streamed = streaming.on_closed_bar(ClosedBar {
-            timestamp_ms: index as i64 * 60_000,
-            close: Some(price),
-            ..Default::default()
-        }).unwrap();
+        let streamed = streaming
+            .on_closed_bar(ClosedBar {
+                timestamp_ms: index as i64 * 60_000,
+                close: Some(price),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(batch, streamed);
-        assert_eq!(batch["above"].0, signal.map(|value| if value == 1 { 1.0 } else { 0.0 }));
-        assert_eq!(batch["below"].0, signal.map(|value| if value == -1 { 1.0 } else { 0.0 }));
+        assert_eq!(
+            batch["above"].0,
+            signal.map(|value| if value == 1 { 1.0 } else { 0.0 })
+        );
+        assert_eq!(
+            batch["below"].0,
+            signal.map(|value| if value == -1 { 1.0 } else { 0.0 })
+        );
     }
     let before = plan.evaluate_at(&prices, 3);
     let mut changed = prices;
@@ -98,13 +115,15 @@ fn ema_missing_value_resets_warmup_without_forward_fill() {
         &["ema"],
     );
     let prices = [1.0, 2.0, 3.0, f64::NAN, 5.0, 6.0, 7.0];
-    let (warmup, warmup_cause) = plan.evaluate_at_with_candle_sources_diagnostics(
-        &prices,
-        CandlePriceInputs::default(),
-        None,
-        None,
-        5,
-    ).unwrap();
+    let (warmup, warmup_cause) = plan
+        .evaluate_at_with_candle_sources_diagnostics(
+            &prices,
+            CandlePriceInputs::default(),
+            None,
+            None,
+            5,
+        )
+        .unwrap();
     assert_eq!(warmup["ema"].0, None);
     assert_eq!(warmup_cause["ema"].origin_step, "close");
     assert_eq!(warmup_cause["ema"].origin_index, 3);

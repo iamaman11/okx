@@ -76,7 +76,9 @@ pub struct EmaKernel {
 /// The same EMA recurrence feeds registered strategies and composable series.
 /// A first observed value seeds the state; warmup is controlled by the caller.
 pub(crate) fn ema_update(previous: Option<f64>, value: f64, period: usize) -> f64 {
-    previous.map_or(value, |prior| prior + 2.0 / (period + 1) as f64 * (value - prior))
+    previous.map_or(value, |prior| {
+        prior + 2.0 / (period + 1) as f64 * (value - prior)
+    })
 }
 impl EmaKernel {
     pub fn new(params: EmaParameters) -> Result<Self, String> {

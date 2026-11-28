@@ -300,7 +300,11 @@ pub(crate) struct RollingEma {
 
 impl RollingEma {
     pub(crate) fn new(period: usize) -> Self {
-        Self { period, consecutive: 0, previous: None }
+        Self {
+            period,
+            consecutive: 0,
+            previous: None,
+        }
     }
 
     pub(crate) fn push(&mut self, value: Option<f64>) -> Option<f64> {

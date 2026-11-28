@@ -471,8 +471,7 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
     let input_unit = match op {
         ReturnsSeries => U::PriceOrContractsOrNativeVolume,
         RollingMean | RollingMax | RollingMin | RollingRange | RollingZscore | RollingStddev
-        | EmaSeries | ScaleSeries
-        | GreaterThanSeries | LessThanSeries => {
+        | EmaSeries | ScaleSeries | GreaterThanSeries | LessThanSeries => {
             U::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient
         }
         AddSeries => U::PriceOrRatioOrContractsOrNativeVolumeOrCoefficient,
@@ -491,17 +490,17 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
     };
     let output_unit = match op {
         ReturnsSeries | SubtractSeries | DivideSeries => U::Ratio,
-        RollingMean | RollingMax | RollingMin | RollingRange | RollingStddev
-        | EmaSeries | ScaleSeries | AddSeries | Lag => {
-            U::SameAsInput
-        }
+        RollingMean | RollingMax | RollingMin | RollingRange | RollingStddev | EmaSeries
+        | ScaleSeries | AddSeries | Lag => U::SameAsInput,
         RollingPearson | RollingZscore => U::Coefficient,
         And | Or | GreaterThan | GreaterThanSeries | LessThan | LessThanSeries => U::Boolean,
         RisingEdge | FallingEdge => U::Event,
         ForwardReturnLabel => U::OutcomeRatio,
     };
     let period = match op {
-        RollingMean | RollingMax | RollingMin | EmaSeries | Lag | ForwardReturnLabel => Some((1, 1000)),
+        RollingMean | RollingMax | RollingMin | EmaSeries | Lag | ForwardReturnLabel => {
+            Some((1, 1000))
+        }
         RollingRange | RollingStddev | RollingZscore => Some((2, 1000)),
         RollingPearson => Some((30, 1000)),
         _ => None,
@@ -526,8 +525,8 @@ pub fn series_operation_contract(op: SeriesOp) -> SeriesOperationContract {
         RollingZscore | RollingStddev => 6,
         RollingRange => 4,
         RollingPearson => 8,
-        EmaSeries | AddSeries | SubtractSeries | DivideSeries | GreaterThanSeries | LessThanSeries | And
-        | Or => 2,
+        EmaSeries | AddSeries | SubtractSeries | DivideSeries | GreaterThanSeries
+        | LessThanSeries | And | Or => 2,
         _ => 1,
     };
     let causal = op != ForwardReturnLabel;
@@ -603,7 +602,14 @@ mod typed_operation_catalog_tests {
         for contract in contracts {
             let id = serde_json::to_string(&contract.op).unwrap();
             assert!(ids.insert(id), "duplicate operation id");
-            assert_eq!(contract.version, if contract.op == SeriesOp::AddSeries { 2 } else { 1 });
+            assert_eq!(
+                contract.version,
+                if contract.op == SeriesOp::AddSeries {
+                    2
+                } else {
+                    1
+                }
+            );
             assert_eq!(contract.effects, OperationEffect::PureNoIo);
             assert_eq!(contract.output_shape, OperationShape::Series);
             assert!(contract.cost_per_bar > 0);
@@ -1103,7 +1109,11 @@ impl CheckedComposition {
                     if !contract.input_unit.accepts(input_unit, None) {
                         return Err(format!(
                             "{path}.input:UNIT_MISMATCH:expected={}:actual={}",
-                            if step.op == SeriesOp::AddSeries { "numeric_series" } else { "ratio" },
+                            if step.op == SeriesOp::AddSeries {
+                                "numeric_series"
+                            } else {
+                                "ratio"
+                            },
                             composition_unit_name(input_unit)
                         ));
                     }
@@ -1115,7 +1125,11 @@ impl CheckedComposition {
                     {
                         return Err(format!(
                             "{path}.other:UNIT_MISMATCH:expected={}:actual={}",
-                            if step.op == SeriesOp::AddSeries { composition_unit_name(input_unit) } else { "ratio" },
+                            if step.op == SeriesOp::AddSeries {
+                                composition_unit_name(input_unit)
+                            } else {
+                                "ratio"
+                            },
                             composition_unit_name(unit)
                         ));
                     }
@@ -1125,7 +1139,11 @@ impl CheckedComposition {
                     if step.threshold.is_some() {
                         return Err(format!("{path}.threshold:UNEXPECTED"));
                     }
-                    if step.op == SeriesOp::AddSeries { input_unit } else { Unit::Ratio }
+                    if step.op == SeriesOp::AddSeries {
+                        input_unit
+                    } else {
+                        Unit::Ratio
+                    }
                 }
                 SeriesOp::ScaleSeries => {
                     if !contract.input_unit.accepts(input_unit, None) {
@@ -1797,7 +1815,9 @@ impl CheckedComposition {
                 .then(|| self.null_cause_at(values, name, index))
         };
         match step.op {
-            SeriesOp::ScaleSeries => trace(&step.input, at).unwrap_or_else(|| cause("NON_FINITE_RESULT")),
+            SeriesOp::ScaleSeries => {
+                trace(&step.input, at).unwrap_or_else(|| cause("NON_FINITE_RESULT"))
+            }
             SeriesOp::EmaSeries => {
                 let period = step.period.expect("validated EMA period") as usize;
                 if at + 1 < period {
@@ -3935,7 +3955,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             CheckedComposition::compile(contracts, 100).unwrap_err(),
-            "composition.steps[0].input:UNIT_MISMATCH:expected=ratio:actual=contracts"
+            "composition.steps[0].other:UNIT_MISMATCH:expected=contracts:actual=price"
         );
         let zero: CompositionRequest = serde_json::from_value(serde_json::json!({
             "version":COMPOSITION_VERSION,

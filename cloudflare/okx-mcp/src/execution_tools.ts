@@ -105,17 +105,17 @@ ACTION_SCHEMAS.diagnostics[0].allOf=[{anyOf:[{required:['account']},{required:['
 // with real order submission under a single model-callable descriptor.
 const TOOL_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  accounts:{description:'Accounts',readOnlyHint:false,destructiveHint:true},
- strategies:{description:'Live trading',readOnlyHint:false,destructiveHint:true},
+ strategies:{description:'Trading',readOnlyHint:false,destructiveHint:true},
  // `screen` can persist a Research job. A multi-action descriptor must not
  // claim that every action is read-only; it still has no destructive effect.
- market:{description:'Market composition; screen may create job',readOnlyHint:false,destructiveHint:false},
+ market:{description:'Market; screen may write',readOnlyHint:false,destructiveHint:false},
  research:{description:'Research',readOnlyHint:false,destructiveHint:true},
  portfolio:{description:'Portfolio',readOnlyHint:true,destructiveHint:false},
- diagnostics:{description:'Diagnostics',readOnlyHint:true,destructiveHint:false},
+ diagnostics:{description:'Trace',readOnlyHint:true,destructiveHint:false},
 };
 const TRADE_NOTES:Record<string,{description:string;readOnlyHint:boolean;destructiveHint:boolean}>={
  preview:{description:'Preview',readOnlyHint:true,destructiveHint:false},
- execute:{description:'Real order; loss risk; approval/limits/STOP',readOnlyHint:false,destructiveHint:true},
+ execute:{description:'Real order; loss; approval/limits/STOP',readOnlyHint:false,destructiveHint:true},
  status:{description:'Status',readOnlyHint:true,destructiveHint:false},
  cancel:{description:'Cancel',readOnlyHint:false,destructiveHint:true},
  close:{description:'Close',readOnlyHint:false,destructiveHint:true},
