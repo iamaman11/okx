@@ -279,30 +279,23 @@ fn t06_t13_capture_ports_are_bound_independently_per_instrument_and_quote_curren
     let cancellation = super::super::cpu_executor::Cancel::default();
     let mut eth = composed_row(8);
     eth.instrument = "ETH-USDC-SWAP".into();
-    let evidence = publish_composition_source_evidence(
-        &service.artifacts,
-        &eth,
-        &query,
-        &plan,
-        &cancellation,
-    )
-    .unwrap();
+    let evidence =
+        publish_composition_source_evidence(&service.artifacts, &eth, &query, &plan, &cancellation)
+            .unwrap();
     let result = compute_row_planned(eth, &query, None, &plan, true).unwrap();
     let linked = attach_composition_source_evidence(result, evidence).unwrap();
-    let integrity = verify_composition_source_pages(
-        &service.artifacts,
-        &linked,
-        &query,
-        &plan,
-        &cancellation,
-    )
-    .unwrap();
+    let integrity =
+        verify_composition_source_pages(&service.artifacts, &linked, &query, &plan, &cancellation)
+            .unwrap();
     assert_eq!(integrity["quality"], "verified_normalized_sources");
     let id = linked["source_captures"]["open_interest"]["evidence_artifact"]
         .as_str()
         .unwrap();
     let manifest: Value = service.artifacts.read_evidence_json(id).unwrap();
-    assert_eq!(manifest["source_ports"][0]["instrument"]["base_asset"], "ETH");
+    assert_eq!(
+        manifest["source_ports"][0]["instrument"]["base_asset"],
+        "ETH"
+    );
     assert_eq!(
         manifest["source_ports"][0]["instrument"]["quote_currency"],
         "USDC"
@@ -328,14 +321,9 @@ fn t13_legacy_source_pages_remain_readable_but_cannot_claim_typed_port_replay() 
     let cancellation = super::super::cpu_executor::Cancel::default();
     let row = composed_row(8);
     let result = compute_row_planned(row.clone(), &query, None, &plan, true).unwrap();
-    let evidence = publish_composition_source_evidence(
-        &service.artifacts,
-        &row,
-        &query,
-        &plan,
-        &cancellation,
-    )
-    .unwrap();
+    let evidence =
+        publish_composition_source_evidence(&service.artifacts, &row, &query, &plan, &cancellation)
+            .unwrap();
     let mut linked = attach_composition_source_evidence(result, evidence).unwrap();
     let id = linked["source_captures"]["candles"]["evidence_artifact"]
         .as_str()
@@ -345,14 +333,9 @@ fn t13_legacy_source_pages_remain_readable_but_cannot_claim_typed_port_replay() 
     legacy.as_object_mut().unwrap().remove("source_ports");
     let legacy_id = service.artifacts.publish_evidence(&legacy).unwrap().0;
     linked["source_captures"]["candles"]["evidence_artifact"] = json!(legacy_id);
-    let integrity = verify_composition_source_pages(
-        &service.artifacts,
-        &linked,
-        &query,
-        &plan,
-        &cancellation,
-    )
-    .unwrap();
+    let integrity =
+        verify_composition_source_pages(&service.artifacts, &linked, &query, &plan, &cancellation)
+            .unwrap();
     assert_eq!(integrity["quality"], "partial_legacy_source_bindings");
     assert_eq!(integrity["source_port_bindings_verified"], false);
     assert_eq!(integrity["verified_sources"].as_array().unwrap().len(), 3);

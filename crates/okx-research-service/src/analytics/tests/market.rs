@@ -231,7 +231,10 @@ fn t13_composition_evidence_uses_a_new_namespace_without_invalidating_legacy_res
         market_request_schema(&fields, false, false, false)
     );
     assert_eq!(oi_correlated, oi_composed);
-    assert_eq!(funding_composed, "market/518.12.typed-source-ports-composition-v1");
+    assert_eq!(
+        funding_composed,
+        "market/518.12.typed-source-ports-composition-v1"
+    );
     assert_eq!(
         funding_composed,
         market_request_schema(&fields, true, true, true)

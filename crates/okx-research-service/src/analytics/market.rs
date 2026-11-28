@@ -931,12 +931,8 @@ fn verify_one_source_pages<T: Serialize + DeserializeOwned>(
     // v1 pages are still readable and hash-verifiable, but they cannot be
     // promoted to the new bound-port proof by merely copying the old hashes.
     let typed_ports_verified = match manifest["schema"].as_str() {
-        Some("okx.market.normalized-source/v2") => {
-            manifest["source_ports"] == *expected_ports
-        }
-        Some("okx.market.normalized-source/v1") => {
-            manifest.get("source_ports").is_none()
-        }
+        Some("okx.market.normalized-source/v2") => manifest["source_ports"] == *expected_ports,
+        Some("okx.market.normalized-source/v1") => manifest.get("source_ports").is_none(),
         _ => false,
     };
     if expected > 1_000_000
