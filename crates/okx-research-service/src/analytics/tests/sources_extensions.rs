@@ -47,6 +47,39 @@ async fn graph_oos_rejects_a_train_window_without_two_scored_bars_before_any_io(
 }
 
 #[tokio::test]
+async fn graph_source_port_rejects_invalid_instrument_before_job_or_market_io() {
+    let transport = RecordedGet::new(vec![]);
+    let (root, service) = service_with_source(transport.client());
+    let request: ResearchRequest = serde_json::from_value(json!({
+        "action":"graph_backtest","idempotency_key":"typed-source-invalid-instrument",
+        "instruments":["btc-usdt"],"timeframe_ms":CANDLE_INTERVAL_MS,
+        "start_ms":0,"end_ms":100 * CANDLE_INTERVAL_MS,
+        "graph_signal":{
+            "version":"okx.graph-signal/v1",
+            "graph":{"version":"okx.market.composition/v1","steps":[
+                {"id":"gain","op":"returns_series","input":"close"},
+                {"id":"entry","op":"greater_than","input":"gain","threshold":0}
+            ],"result_steps":["entry"]},
+            "signal_step":"entry","target_if_true":1,"target_if_false":0,
+            "missing":"hold"
+        },
+        "costs":{"maker_fee_bps":0,"taker_fee_bps":0,"slippage_bps":0,
+            "funding_mode":"zero_assumption"},
+        "data_mode":"counterfactual"
+    }))
+    .unwrap();
+    assert!(request.valid());
+    assert_eq!(
+        service.research(request).await.unwrap_err(),
+        "composition.bindings.instruments[0]:INVALID_INSTRUMENT"
+    );
+    assert!(service.jobs.snapshot().is_empty());
+    assert!(transport.routes.lock().unwrap().is_empty());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn unavailable_historical_mode_rejects_all_executions_before_sql_or_market_reads() {
     let transport = RecordedGet::new(vec![]);
     let (root, service) = service_with_source(transport.client());

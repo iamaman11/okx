@@ -46,20 +46,32 @@ ValueType = (shape, unit, instrument_scope, timeframe_and_range,
   different dimensions; never silently coerce one into another.
 - **Scope:** instrument/venue and quote/settlement currency matter whenever
   quantities are combined. Two price series with equal `Unit` but differing
-  instruments or quotes are not automatically compatible. Existing source
-  context/validation must be strengthened before cross-source algebra expands.
+  instruments or quotes are not automatically compatible. The native
+  `BoundSeriesSourcePort` now binds the exact instrument, base asset, quote
+  currency, product and closed range **per input port and per instrument**.
+  Multi-instrument Market queries retain independent bindings; this is not
+  permission for a cross-instrument or cross-currency join.
 - **Time:** declare closed-bar grid and event timestamps separately from
   *when the value became knowable*. Closed candle alignment is not proof of
   historical availability for OI or funding. Unknown publication time fails
   closed for causal strategies; future outcomes may only be used for scoring.
 - **Source admission:** the seven existing source names have one closed Rust
   `SeriesSource` enum and versioned `SeriesSourceContract`. Unit, source owner,
-  alignment, swap-only scope, read-only access and availability requirements
+  denomination basis, alignment, swap-only scope, read-only access and availability requirements
   are shared by the compiler and discovery. The Market `input_sources` and
   `source_units` v1 fields remain unchanged and derive from this catalog;
   `source_contracts` exposes its typed detail. The Research graph source list
   derives the current `close`-only subset from the same contracts. A metadata
   flag cannot enable a missing physical input port in the stream evaluator.
+  The bound port is **derived**, not a new persisted plan or separate runtime.
+  Only ports in the projected dependency closure are bound: an unreachable
+  declaration may be type-checked but cannot cause extra source reads or
+  spuriously reject an otherwise executable query.
+  It distinguishes quote-per-base price, unresolved native volume, contract
+  count requiring exchange-reference evidence and dimensionless funding.
+  Quote currency parsed from an instrument is *not* proof of a swap's actual
+  settlement currency. The current Research graph also preflights the same
+  `close` binding before any job admission or source request.
 - **Missing data:** unknown is not zero, false or permission to trade. Warmup,
   gaps, zero denominators, incomplete windows and future-horizon outcomes
   retain specific semantics. Any explicit `flat` signal policy is part of the
@@ -189,8 +201,12 @@ implementation and tests. Do not add a new use-case-specific executor.
 [#667](https://github.com/iamaman11/okx/issues/667) tracks completion of
 Level C. The 21-operation metadata registry, incremental causal parity and
 typed graph preflight, single-graph train/holdout OOS and bounded independent
-cross-artifact export/replay consistency have landed. Remaining gates include
-per-port instrument/currency invariants, installed Research-only T10 and the
+cross-artifact export/replay consistency have landed. Source-port binding now
+checks per-instrument product, quote currency, source denomination and closed
+range at admission. No cross-instrument algebra or unverified currency
+conversion is advertised. Remaining gates include independently proven
+publication/settlement context for additional Research sources, installed
+Research-only T10 and the
 separate live all-429/cancellation acceptance tracked in
 [#666](https://github.com/iamaman11/okx/issues/666).
 

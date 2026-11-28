@@ -66,20 +66,6 @@ fn market_request_schema(
     }
 }
 
-fn validate_composition_source_products(
-    instruments: &[String],
-    oi_composition: bool,
-    funding_composition: bool,
-) -> Result<(), String> {
-    if oi_composition && instruments.iter().any(|id| !id.ends_with("-SWAP")) {
-        return Err("composition.sources.open_interest:UNSUPPORTED_PRODUCT".into());
-    }
-    if funding_composition && instruments.iter().any(|id| !id.ends_with("-SWAP")) {
-        return Err("composition.sources.funding_rate:UNSUPPORTED_PRODUCT".into());
-    }
-    Ok(())
-}
-
 fn market_request_fingerprint(
     request: &MarketRequest,
     page: &Option<Value>,
@@ -235,11 +221,10 @@ impl AnalyticsService {
             compute_request.instruments = names;
             compute_request.universe = None;
         }
-        validate_composition_source_products(
-            &compute_request.instruments,
-            oi_composition,
-            funding_composition,
-        )?;
+        // Product and quote-currency identity are checked by the same
+        // QueryPlan source-port binder as the native composition compiler.
+        // Explicit instruments were already checked before source I/O;
+        // resolved universes are checked below before durable admission.
         let mut identity_page = universe_page.clone();
         if standalone_universe {
             remove_universe_receipt_time(&mut identity_page);
