@@ -68,6 +68,26 @@ fn market_capabilities_discloses_supported_operator_names_and_units() {
         capabilities["composition"]["source_units"]["volume"],
         "native_volume"
     );
+    let registered_sources = okx_analysis::query_plan::series_source_contracts();
+    assert_eq!(
+        capabilities["composition"]["source_contracts"],
+        serde_json::to_value(&registered_sources).unwrap()
+    );
+    assert_eq!(
+        capabilities["composition"]["input_sources"],
+        serde_json::json!(
+            registered_sources
+                .iter()
+                .map(|source| source.id.as_str())
+                .collect::<Vec<_>>()
+        )
+    );
+    for contract in registered_sources {
+        assert_eq!(
+            capabilities["composition"]["source_units"][contract.id.as_str()],
+            serde_json::to_value(contract.unit).unwrap()
+        );
+    }
     assert_eq!(
         capabilities["composition"]["ohlc_policy"],
         "same_instrument_closed_candle_grid_no_forward_fill"

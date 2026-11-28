@@ -482,6 +482,15 @@ impl AnalyticsService {
         // The pure Rust owner publishes this one finite, typed catalog. No
         // manually maintained worker JSON list may drift from the compiler.
         let composition_operations = okx_analysis::query_plan::series_operation_contracts();
+        let composition_sources = okx_analysis::query_plan::series_source_contracts();
+        let composition_input_sources = composition_sources
+            .iter()
+            .map(|contract| contract.id.as_str())
+            .collect::<Vec<_>>();
+        let composition_source_units = composition_sources
+            .iter()
+            .map(|contract| (contract.id.as_str(), contract.unit))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut capabilities = json!({"schema":"okx.market.capabilities/v1",
             "route_owner":"okx-research-service","compute_owner":"okx-strategy-core",
             "portfolio_scenario":true,
@@ -493,8 +502,8 @@ impl AnalyticsService {
             "timeframes_ms":[60000,180000,300000,900000,1800000,3600000,14400000,86400000],
             "operators":operators,
             "composition":{"version":okx_analysis::query_plan::COMPOSITION_VERSION,
-                "available_for":"screen","input_sources":["open","high","low","close","volume","open_interest","funding_rate"],
-                "source_units":{"open":"price","high":"price","low":"price","close":"price","volume":"native_volume","open_interest":"contracts","funding_rate":"ratio"},
+                "available_for":"screen","input_sources":composition_input_sources,
+                "source_units":composition_source_units,"source_contracts":composition_sources,
                 "ohlc_policy":"same_instrument_closed_candle_grid_no_forward_fill",
                 "volume_policy":"venue_native_instrument_volume_spot_base_or_derivative_contracts_no_implicit_conversion",
                 "open_interest_policy":"exact_timestamps_no_forward_fill_publication_time_unverified",

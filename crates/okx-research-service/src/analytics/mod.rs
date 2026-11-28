@@ -644,13 +644,18 @@ fn research_capabilities() -> Value {
         .filter(|contract| !contract.graph_backtest_supported)
         .map(|contract| contract.op)
         .collect::<Vec<_>>();
+    let supported_sources = okx_analysis::query_plan::series_source_contracts()
+        .into_iter()
+        .filter(|contract| contract.graph_backtest_supported)
+        .map(|contract| contract.id.as_str())
+        .collect::<Vec<_>>();
     json!({
         "schema":"okx.research.capabilities/v1",
         "quality":"fresh",
         "strategy_ids":["ema_cross_v1","ema_momentum_confirm_v1","close_breakout_v1"],
         "graph_backtest":{
             "action":"graph_backtest","version":"okx.graph-signal/v1",
-            "input":"okx.market.composition/v1","sources":["close"],
+            "input":"okx.market.composition/v1","sources":supported_sources,
             "execution":"same_next_open_costs_funding_and_decimal_ledger_as_registered_backtest",
             "supported_operators":supported_operators,
             "unavailable_operators":unavailable_operators,

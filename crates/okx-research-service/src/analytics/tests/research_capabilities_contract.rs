@@ -23,6 +23,16 @@ fn graph_backtest_capabilities_follow_the_same_typed_catalog_as_market_and_compi
         json!(unavailable)
     );
     assert_eq!(supported.len(), 20);
+    let graph_sources = okx_analysis::query_plan::series_source_contracts()
+        .into_iter()
+        .filter(|contract| contract.graph_backtest_supported)
+        .map(|contract| contract.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        capabilities["graph_backtest"]["sources"],
+        json!(graph_sources)
+    );
+    assert_eq!(graph_sources, vec!["close"]);
     assert_eq!(
         unavailable,
         vec![okx_research_protocol::strategy_contract::SeriesOp::ForwardReturnLabel]

@@ -13,7 +13,7 @@ remains governed by [the Engine contract](ARCHITECTURE_CONTRACT_V1.md).
 | --- | --- | --- |
 | 21 `SeriesOp` variants | `okx-research-protocol/src/strategy_contract.rs` IDs; `okx-strategy-core/src/query_plan.rs` contracts and checked compiler | Finite versioned `CompositionRequest`; all 21 are representable in a Market graph |
 | 20 causal `SeriesOp` variants | `okx-strategy-core/src/stream.rs` | Bounded incremental `CausalGraphStream`; `forward_return_label` is an outcome **only**, never a signal input |
-| Seven series source names | `CheckedComposition::compile`: `open`, `high`, `low`, `close`, `volume`, `open_interest`, `funding_rate` | Declared types only; availability and publication evidence are **not** inferred from a source name |
+| Seven typed series source ports | `okx-strategy-core::query_plan::SeriesSource` and `SeriesSourceContract`: `open`, `high`, `low`, `close`, `volume`, `open_interest`, `funding_rate` | One finite versioned source/unit/time/scope/alignment catalog consumed by `CheckedComposition`, `QueryPlan`, Market discovery and Research graph discovery; existence is **not** proof of venue publication time |
 | Graph research backtest | `okx-research/src/graph_signal.rs` and `strategy_registry.rs`, served by `okx-research-service` | Only `close` source and supported causal operations; next-open replay through the existing Research accounting path |
 | 16 analytic `Operator` variants | `okx-strategy-core/src/operators.rs`, `query_plan.rs` | Separately registered Market scalar analytics. **Not** 16 additional arbitrary `SeriesStep` nodes |
 | Statistical/economic/portfolio routines | `okx-analysis`, `okx-research` | Reusable native functions and finite Research actions, not general graph opcodes |
@@ -48,6 +48,14 @@ ValueType = (shape, unit, instrument_scope, timeframe_and_range,
   *when the value became knowable*. Closed candle alignment is not proof of
   historical availability for OI or funding. Unknown publication time fails
   closed for causal strategies; future outcomes may only be used for scoring.
+- **Source admission:** the seven existing source names have one closed Rust
+  `SeriesSource` enum and versioned `SeriesSourceContract`. Unit, source owner,
+  alignment, swap-only scope, read-only access and availability requirements
+  are shared by the compiler and discovery. The Market `input_sources` and
+  `source_units` v1 fields remain unchanged and derive from this catalog;
+  `source_contracts` exposes its typed detail. The Research graph source list
+  derives the current `close`-only subset from the same contracts. A metadata
+  flag cannot enable a missing physical input port in the stream evaluator.
 - **Missing data:** unknown is not zero, false or permission to trade. Warmup,
   gaps, zero denominators, incomplete windows and future-horizon outcomes
   retain specific semantics. Any explicit `flat` signal policy is part of the
