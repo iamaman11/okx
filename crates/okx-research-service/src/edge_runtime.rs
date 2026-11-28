@@ -771,6 +771,7 @@ fn graph_field_failure(reason: &str) -> Option<(&str, &str)> {
                 | "OUT_OF_RANGE"
                 | "NONFINITE"
                 | "FORWARD_LABEL_FORBIDDEN"
+                | "SOURCE_UNAVAILABLE"
                 | "UNIT_MISMATCH"
                 | "SIGNAL_MUST_BE_BOOLEAN_OR_EVENT"
                 | "UNKNOWN_OR_FORWARD_STEP"
@@ -1155,6 +1156,11 @@ mod tests {
                 "composition.steps[0].input:UNIT_MISMATCH:expected=boolean:actual=price",
                 "GRAPH_PREFLIGHT_UNIT_MISMATCH",
                 "composition.steps[0].input",
+            ),
+            (
+                "composition.steps[1].other:SOURCE_UNAVAILABLE",
+                "GRAPH_PREFLIGHT_SOURCE_UNAVAILABLE",
+                "composition.steps[1].other",
             ),
             (
                 "graph_signal:SIGNAL_MUST_BE_BOOLEAN_OR_EVENT",

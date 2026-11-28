@@ -150,7 +150,7 @@ async fn graph_preflight_rejects_unsupported_source_without_job_or_venue_get() {
     assert!(request.valid());
     assert_eq!(
         service.research(request).await.unwrap_err(),
-        "composition.stream:SOURCE_NOT_SUPPORTED:volume"
+        "composition.steps[0].input:SOURCE_UNAVAILABLE"
     );
     assert!(service.jobs.snapshot().is_empty());
     assert!(transport.routes.lock().unwrap().is_empty());
