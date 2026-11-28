@@ -9,6 +9,98 @@ use okx_research_protocol::analytics::ResearchResultView;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+/// Export quality is a claim about all proof layers, not just valid SHA pages.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ExportIntegrityQuality {
+    Complete,
+    Partial,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ExportEvidenceScope {
+    ResultPagesSourcesAndReplaySemantics,
+    ResultPagesAndReplaySources,
+    ResultPagesOrPartialSources,
+}
+
+/// Link the replay's immutable summary to its verified pages, and bind graph
+/// declarations even when bounded semantic reexecution cannot run. This is a
+/// structural proof, never a substitute for rerunning the native Rust replay.
+fn verify_replay_manifest_links(
+    inputs: Option<&Value>,
+    manifest: &Value,
+    has_trade_pages: bool,
+) -> Result<bool, String> {
+    if let Some(inputs) = inputs {
+        let graph = inputs.get("graph_spec").filter(|value| !value.is_null());
+        match graph {
+            Some(graph)
+                if graph["graph"].is_object() && manifest["graph_signal"] == graph["graph"] => {}
+            None if manifest["graph_signal"].is_null() => {}
+            _ => return Err("EXPORT_REPLAY_REFERENCE_MISMATCH".into()),
+        }
+        let policy = inputs.get("graph_oos_policy").filter(|value| !value.is_null());
+        match policy {
+            Some(policy)
+                if policy.is_object() && manifest["graph_oos"]["policy"] == *policy => {}
+            None if manifest["graph_oos"].is_null() => {}
+            _ => return Err("EXPORT_REPLAY_REFERENCE_MISMATCH".into()),
+        }
+    }
+    if !has_trade_pages || manifest["summary"].is_null() {
+        return Ok(false);
+    }
+    let summary_trades = manifest["summary"]["trades"]
+        .as_u64()
+        .ok_or("EXPORT_REPLAY_COUNT_MISMATCH")?;
+    if manifest["total_trades"].as_u64() != Some(summary_trades) {
+        return Err("EXPORT_REPLAY_COUNT_MISMATCH".into());
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod replay_link_tests {
+    use super::*;
+
+    #[test]
+    fn structural_graph_links_and_replay_counts_are_checked_without_reexecution() {
+        let inputs = json!({
+            "graph_spec":{"graph":{"version":"graph-test/v1"}},
+            "graph_oos_policy":{"version":"oos-test/v1","split_index":7}
+        });
+        let manifest = json!({
+            "trade_pages":[],"total_trades":3,"summary":{"trades":3},
+            "graph_signal":{"version":"graph-test/v1"},
+            "graph_oos":{"policy":{"version":"oos-test/v1","split_index":7}}
+        });
+        assert_eq!(verify_replay_manifest_links(Some(&inputs), &manifest, true), Ok(true));
+        let mut forged_graph = manifest.clone();
+        forged_graph["graph_signal"]["version"] = json!("other");
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &forged_graph, true).unwrap_err(),
+            "EXPORT_REPLAY_REFERENCE_MISMATCH"
+        );
+        let mut forged_policy = manifest.clone();
+        forged_policy["graph_oos"]["policy"]["split_index"] = json!(8);
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &forged_policy, true).unwrap_err(),
+            "EXPORT_REPLAY_REFERENCE_MISMATCH"
+        );
+        let mut forged_count = manifest.clone();
+        forged_count["summary"]["trades"] = json!(4);
+        assert_eq!(
+            verify_replay_manifest_links(Some(&inputs), &forged_count, true).unwrap_err(),
+            "EXPORT_REPLAY_COUNT_MISMATCH"
+        );
+        let mut legacy = manifest.clone();
+        legacy.as_object_mut().unwrap().remove("summary");
+        assert_eq!(verify_replay_manifest_links(Some(&inputs), &legacy, true), Ok(false));
+    }
+}
+
 pub(super) fn read_verified_result<T: DeserializeOwned>(
     store: &ResearchArtifactStore,
     artifact: &str,
@@ -78,7 +170,7 @@ pub(super) fn verify_export_manifest(
     store: &ResearchArtifactStore,
     manifest: &Value,
 ) -> Result<Value, String> {
-    let experiment = match manifest
+    let (experiment, replay_inputs) = match manifest
         .get("experiment_artifact")
         .filter(|value| !value.is_null())
     {
@@ -126,14 +218,14 @@ pub(super) fn verify_export_manifest(
             let (funding_capture, expected_funding) = verify_experiment_funding(store, &inputs)?;
             let dataset =
                 verify_experiment_dataset(store, &inputs, manifest, expected_funding.as_deref())?;
-            Some(
+            (Some(
                 json!({"artifact":id,"checksum_verified":true,"references_match":true,
                 "reference_capture_verified":reference_id.is_some(),
                 "funding_replay_attribution_verified":expected_funding.is_some(),
                 "dataset":dataset,"funding_capture":funding_capture}),
-            )
+            ), Some(inputs))
         }
-        None => None,
+        None => (None, None),
     };
     let trades = verify_export_pages(store, manifest, "trade_pages", "total_trades", 50)?;
     let rows = verify_export_pages(store, manifest, "row_pages", "total_rows", 50)?;
@@ -147,6 +239,8 @@ pub(super) fn verify_export_manifest(
     if trades.is_none() && rows.is_none() {
         return Err("EXPORT_MANIFEST_INVALID".into());
     }
+    let summary_trades_reconciled =
+        verify_replay_manifest_links(replay_inputs.as_ref(), manifest, trades.is_some())?;
     let dataset_verified = experiment
         .as_ref()
         .is_some_and(|e| e["dataset"]["quality"] == "verified");
@@ -156,19 +250,32 @@ pub(super) fn verify_export_manifest(
             Some("verified" | "not_applicable")
         )
     });
-    let reexecution = if let Some(id) = manifest["experiment_artifact"].as_str() {
-        let inputs: Value = read_verified_result(store, id)?;
-        result_reexecution::verify(store, &inputs, manifest)?
+    let reexecution = if let Some(inputs) = &replay_inputs {
+        result_reexecution::verify(store, inputs, manifest)?
     } else {
         json!({"schema":"okx.research.immutable-reexecution/v1", "quality":"not_verified",
             "reason_code":"LEGACY_EXPERIMENT_INPUTS_NOT_RETAINED"})
     };
+    let sources_verified = dataset_verified && funding_verified;
+    let reexecution_verified = reexecution["quality"] == "verified_reexecution";
+    let complete = sources_verified && reexecution_verified && summary_trades_reconciled;
+    let quality = if complete { ExportIntegrityQuality::Complete } else { ExportIntegrityQuality::Partial };
+    let scope = if complete {
+        ExportEvidenceScope::ResultPagesSourcesAndReplaySemantics
+    } else if sources_verified {
+        ExportEvidenceScope::ResultPagesAndReplaySources
+    } else {
+        ExportEvidenceScope::ResultPagesOrPartialSources
+    };
     Ok(json!({
-        "quality":if dataset_verified && funding_verified {"complete"} else {"partial"},
-        "evidence_scope":if dataset_verified && funding_verified {"result_pages_and_replay_sources"} else {"result_pages_or_partial_sources"},
+        "quality":quality,
+        "evidence_scope":scope,
         "counts_verified":true,
         "checksums_verified":true,"dataset_verified":dataset_verified,
         "funding_capture_verified":funding_verified,
+        "sources_verified":sources_verified,
+        "summary_trades_reconciled":summary_trades_reconciled,
+        "semantic_reexecution_verified":reexecution_verified,
         "trades":trades,"rows":rows,"equity":equity,"experiment":experiment,
         "reexecution":reexecution
     }))

@@ -383,6 +383,13 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
         .await
         .unwrap();
     assert_eq!(export["integrity"]["quality"], "complete");
+    assert_eq!(export["integrity"]["sources_verified"], true);
+    assert_eq!(export["integrity"]["summary_trades_reconciled"], true);
+    assert_eq!(export["integrity"]["semantic_reexecution_verified"], true);
+    assert_eq!(
+        export["integrity"]["evidence_scope"],
+        "result_pages_sources_and_replay_semantics"
+    );
     assert_eq!(
         export["integrity"]["reexecution"]["quality"],
         "verified_reexecution"
@@ -409,6 +416,16 @@ async fn t08_public_breakout_grid_persists_typed_selection_and_rejects_65_before
     assert_eq!(
         verify_export_manifest(&service.artifacts, &changed_selection).unwrap_err(),
         "EXPORT_REEXECUTION_MISMATCH"
+    );
+    let mut forged_count: Value = service
+        .artifacts
+        .read_evidence_json(&service.jobs.get(&id).unwrap().artifact.unwrap())
+        .unwrap();
+    forged_count["summary"]["trades"] =
+        json!(forged_count["summary"]["trades"].as_u64().unwrap() + 1);
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &forged_count).unwrap_err(),
+        "EXPORT_REPLAY_COUNT_MISMATCH"
     );
     assert!(result["metadata"]["grid"]["selected"]["lookback"].is_u64());
     assert_eq!(result["metadata"]["grid"]["split_index"], 140);
@@ -446,6 +463,97 @@ fn t13_reexecution_budget_rejects_large_grids_before_loading_pages() {
     assert_eq!(proof["quality"], "not_verified");
     assert_eq!(proof["reason_code"], "REEXECUTION_BUDGET_EXCEEDED");
     assert_eq!(proof["max_work_units"], 65_536);
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn t13_export_with_verified_sources_but_unverified_budget_is_partial() {
+    let (root, service) = service();
+    let bars = (0..280)
+        .map(|index| replay::Bar {
+            time: index * 60_000,
+            open: 100.0 + index as f64 * 0.2,
+            high: 101.0 + index as f64 * 0.2,
+            low: 99.0 + index as f64 * 0.2,
+            close: 100.5 + index as f64 * 0.2,
+            volume: 10.0,
+            funding_rate: None,
+        })
+        .collect();
+    service
+        .sources
+        .cache
+        .load(
+            cache::SourceKey {
+                source: "candles".into(),
+                instrument: "BTC-USDT".into(),
+                timeframe_ms: 60_000,
+                start_ms: 0,
+                end_ms: 16_800_000,
+                closed_only: true,
+                schema: 1,
+            },
+            || async { Ok(bars) },
+        )
+        .await
+        .unwrap();
+    let request = ResearchRequest::Grid {
+        idempotency_key: "grid-export-proof-budget".into(),
+        instruments: vec!["BTC-USDT".into()],
+        timeframe_ms: 60_000,
+        start_ms: 0,
+        end_ms: 16_800_000,
+        strategy_id: "close_breakout_v1".into(),
+        variants: (2..66)
+            .map(|lookback| okx_research_protocol::analytics::BreakoutParameters { lookback }.into())
+            .collect(),
+        costs: ResearchCosts {
+            maker_fee_bps: 0.0,
+            taker_fee_bps: 0.0,
+            slippage_bps: 0.0,
+            funding_mode: FundingMode::ZeroAssumption,
+        },
+        data_mode: ResearchDataMode::Counterfactual,
+        seed: 7,
+    };
+    let admitted = service.research(request).await.unwrap();
+    let id = admitted["id"].as_str().unwrap().to_owned();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state = service.jobs.get(&id).unwrap();
+            if state.state == jobs::State::Completed {
+                break;
+            }
+            assert_ne!(state.state, jobs::State::Failed, "{:?}", state.error);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let export = service
+        .result_page(id.clone(), None, 50, ResearchResultView::Export)
+        .unwrap();
+    let integrity = &export["integrity"];
+    assert_eq!(integrity["quality"], "partial");
+    assert_eq!(integrity["sources_verified"], true);
+    assert_eq!(integrity["summary_trades_reconciled"], true);
+    assert_eq!(integrity["semantic_reexecution_verified"], false);
+    assert_eq!(integrity["reexecution"]["quality"], "not_verified");
+    assert_eq!(
+        integrity["reexecution"]["reason_code"],
+        "REEXECUTION_BUDGET_EXCEEDED"
+    );
+    let mut forged: Value = service
+        .artifacts
+        .read_evidence_json(&service.jobs.get(&id).unwrap().artifact.unwrap())
+        .unwrap();
+    forged["summary"]["trades"] =
+        json!(forged["summary"]["trades"].as_u64().unwrap() + 1);
+    assert_eq!(
+        verify_export_manifest(&service.artifacts, &forged).unwrap_err(),
+        "EXPORT_REPLAY_COUNT_MISMATCH"
+    );
     drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1330,7 +1438,15 @@ fn t13_export_rechecks_all_replay_dataset_pages_and_exact_content_hash() {
         "code_version":replay::CAUSAL_REPLAY_VERSION
     });
     let verified = verify_export_manifest(&service.artifacts, &manifest).unwrap();
-    assert_eq!(verified["quality"], "complete");
+    assert_eq!(verified["quality"], "partial");
+    assert_eq!(verified["sources_verified"], true);
+    assert_eq!(verified["semantic_reexecution_verified"], false);
+    assert_eq!(verified["summary_trades_reconciled"], false);
+    assert_eq!(verified["reexecution"]["quality"], "not_verified");
+    assert_eq!(
+        verified["reexecution"]["reason_code"],
+        "LEGACY_REPLAY_AUDIT_NOT_RETAINED"
+    );
     assert_eq!(verified["dataset_verified"], true);
     assert_eq!(verified["experiment"]["dataset"]["bar_count"], 4097);
     assert_eq!(verified["experiment"]["dataset"]["pages"], 2);
@@ -1442,7 +1558,9 @@ fn t13_export_and_retention_verify_realized_funding_capture_without_lookahead_cl
         "experiment_artifact":experiment,"code_version":replay::CAUSAL_REPLAY_VERSION
     });
     let verified = verify_export_manifest(&service.artifacts, &manifest).unwrap();
-    assert_eq!(verified["quality"], "complete");
+    assert_eq!(verified["quality"], "partial");
+    assert_eq!(verified["sources_verified"], true);
+    assert_eq!(verified["semantic_reexecution_verified"], false);
     assert_eq!(verified["funding_capture_verified"], true);
     assert_eq!(
         verified["experiment"]["funding_replay_attribution_verified"],
@@ -1581,7 +1699,9 @@ fn t09_t13_export_proves_funding_presence_and_every_replay_bar_from_source_event
         "experiment_artifact":experiment,"code_version":replay::CAUSAL_REPLAY_VERSION
     });
     let result = verify_export_manifest(&service.artifacts, &manifest).unwrap();
-    assert_eq!(result["quality"], "complete");
+    assert_eq!(result["quality"], "partial");
+    assert_eq!(result["sources_verified"], true);
+    assert_eq!(result["semantic_reexecution_verified"], false);
     assert_eq!(
         result["experiment"]["funding_replay_attribution_verified"],
         true

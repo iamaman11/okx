@@ -132,6 +132,31 @@ only a successfully published and verified result may be completed. The
 published result's hashes prove artifact integrity within their verification
 scope, not the full network or request history.
 
+### Independent Research export proof
+
+The existing native Research export returns separate, bounded verification
+layers. `counts_verified` means the immutable trade/row/equity **page counts**
+and SHA identities were inspected; it does not assert that the replay produced
+the correct rows. `summary_trades_reconciled` additionally links a replay
+summary's trade count to its declared, hash-checked trade pages. Experiment
+source and funding provenance are reported by `sources_verified`; graph and
+OOS policy references are structurally bound to immutable experiment inputs
+even if a full replay cannot be repeated.
+
+An export's **integrity `quality: complete`** requires all of:
+
+1. `sources_verified: true` (dataset and applicable funding verification);
+2. `summary_trades_reconciled: true` (cross-artifact count agreement);
+3. `semantic_reexecution_verified: true` (independent bounded native Rust
+   replay, including exact trades/equity, summary and economic audit).
+
+For unsupported versions, missing legacy audit/inputs or work exceeding the
+reexecution budget, the original result remains readable, but the export's
+integrity is `partial` with the concrete reason in `reexecution.reason_code`.
+A successfully published `Completed` job therefore does **not** by itself
+claim an independently verified export. No export quality proves historical
+venue fees, mark prices or the actual publication time of observations.
+
 ## Acceptance rule for one more building block
 
 An operation is *available* only after the following changes land together:
@@ -163,10 +188,11 @@ implementation and tests. Do not add a new use-case-specific executor.
 
 [#667](https://github.com/iamaman11/okx/issues/667) tracks completion of
 Level C. The 21-operation metadata registry, incremental causal parity and
-typed graph preflight have landed. Remaining gates include single-graph
-train/holdout OOS, independent cross-artifact export/replay consistency,
-installed Research-only T10 and the separate live all-429/cancellation
-acceptance tracked in [#666](https://github.com/iamaman11/okx/issues/666).
+typed graph preflight, single-graph train/holdout OOS and bounded independent
+cross-artifact export/replay consistency have landed. Remaining gates include
+per-port instrument/currency invariants, installed Research-only T10 and the
+separate live all-429/cancellation acceptance tracked in
+[#666](https://github.com/iamaman11/okx/issues/666).
 
 Architecture ownership and operational diagnostic constraints remain in
 [ARCHITECTURE.md](ARCHITECTURE.md),
