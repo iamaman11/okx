@@ -1,6 +1,6 @@
 //! Typed K7 analysis plan, independent of storage, transport and venue.
-use crate::operators::{Operator, registry};
 pub use crate::operation_contract::{OperationEffect, OperationShape, TimeBasis};
+use crate::operators::{Operator, registry};
 use crate::stream::{MonotoneWindow, RollingMean, scalar_value};
 use crate::time_series::ClosedRange;
 pub use okx_research_protocol::strategy_contract::{
@@ -669,7 +669,10 @@ mod typed_operation_catalog_tests {
         let contract = series_operation_contract(SeriesOp::ForwardReturnLabel);
         assert_eq!(contract.time_basis, TimeBasis::OutcomeFutureHorizon);
         assert_eq!(contract.output_unit, SeriesUnitRule::OutcomeRatio);
-        assert_eq!(contract.requires, Some(ParameterRequirement::PriorEventStepInWhen));
+        assert_eq!(
+            contract.requires,
+            Some(ParameterRequirement::PriorEventStepInWhen)
+        );
         assert_eq!(contract.warmup, WarmupPolicy::PeriodClosedBars);
         assert!(!contract.causal);
         assert!(!contract.graph_backtest_supported);

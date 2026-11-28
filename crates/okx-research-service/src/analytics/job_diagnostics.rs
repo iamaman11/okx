@@ -102,20 +102,35 @@ enum FailureClass {
 
 fn failure_class(code: &str) -> FailureClass {
     match code {
-        "SOURCE_INVALID" | "NONFINITE_SOURCE" | "CANDLE_RANGE_UNAVAILABLE"
-        | "CANDLE_RANGE_INCOMPLETE" | "CANDLE_INTERIOR_GAP" | "INVALID_FUNDING"
-        | "FUNDING_RANGE_UNAVAILABLE" | "FUNDING_RANGE_INCOMPLETE"
-        | "GLOBAL_RANK_SOURCE_INCOMPLETE" | "LIVE_SOURCE_DEADLINE"
+        "SOURCE_INVALID"
+        | "NONFINITE_SOURCE"
+        | "CANDLE_RANGE_UNAVAILABLE"
+        | "CANDLE_RANGE_INCOMPLETE"
+        | "CANDLE_INTERIOR_GAP"
+        | "INVALID_FUNDING"
+        | "FUNDING_RANGE_UNAVAILABLE"
+        | "FUNDING_RANGE_INCOMPLETE"
+        | "GLOBAL_RANK_SOURCE_INCOMPLETE"
+        | "LIVE_SOURCE_DEADLINE"
         | "MARKET_SOURCE_RETRYABLE" => FailureClass::Source,
-        "RESEARCH_MEMORY_LIMIT" | "CPU_QUEUE_FULL" | "LIMIT_EXCEEDED" | "LIMIT_TOTAL_BARS"
-        | "LIMIT_BARS" | "RESOURCE_BUSY" => FailureClass::Resource,
-        "UNSUPPORTED_STRATEGY" | "UNSUPPORTED_INVERSE_CONTRACT"
-        | "UNSUPPORTED_INSTRUMENT_TYPE" | "CONTRACT_MULTIPLIER_MISSING"
-        | "EMPTY_VARIANTS" | "RANGE_NOT_CLOSED" => FailureClass::Contract,
+        "RESEARCH_MEMORY_LIMIT"
+        | "CPU_QUEUE_FULL"
+        | "LIMIT_EXCEEDED"
+        | "LIMIT_TOTAL_BARS"
+        | "LIMIT_BARS"
+        | "RESOURCE_BUSY" => FailureClass::Resource,
+        "UNSUPPORTED_STRATEGY"
+        | "UNSUPPORTED_INVERSE_CONTRACT"
+        | "UNSUPPORTED_INSTRUMENT_TYPE"
+        | "CONTRACT_MULTIPLIER_MISSING"
+        | "EMPTY_VARIANTS"
+        | "RANGE_NOT_CLOSED" => FailureClass::Contract,
         "RESEARCH_BATCH_ALL_INSTRUMENTS_FAILED" | "RESEARCH_BATCH_SOURCE_RETRYABLE" => {
             FailureClass::Batch
         }
-        "RESULT_EXPIRED_BY_7_DAY_RETENTION" | "JOB_CANCELLED" | "CANCELLED"
+        "RESULT_EXPIRED_BY_7_DAY_RETENTION"
+        | "JOB_CANCELLED"
+        | "CANCELLED"
         | "RESEARCH_INTERRUPTED" => FailureClass::Lifecycle,
         _ => FailureClass::Unclassified,
     }

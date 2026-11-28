@@ -56,7 +56,13 @@ mod tests {
         assert_eq!(scalar.output_shape, OperationShape::Scalar);
         assert_eq!(series.output_shape, OperationShape::Series);
         assert_eq!(scalar.effects, series.effects);
-        assert_eq!(serde_json::to_value(scalar.time_basis).unwrap(), "closed_candles");
-        assert_eq!(serde_json::to_value(series.time_basis).unwrap(), "closed_bar");
+        assert_eq!(
+            serde_json::to_value(scalar.time_basis).unwrap(),
+            "closed_candles"
+        );
+        assert_eq!(
+            serde_json::to_value(series.time_basis).unwrap(),
+            "closed_bar"
+        );
     }
 }

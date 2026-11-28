@@ -717,12 +717,14 @@ fn terminal_reason_classification_matches_live_reason_and_durable_sql_projection
     }
 
     let waiting = "f".repeat(64);
-    jobs.enqueue("waiting-parity".into(), waiting.clone()).unwrap();
+    jobs.enqueue("waiting-parity".into(), waiting.clone())
+        .unwrap();
     assert_eq!(
         jobs.diagnostic_readback(&waiting)["job"]["observed_stage"],
         "admission"
     );
-    jobs.update(&waiting, JobState::Running, None, None).unwrap();
+    jobs.update(&waiting, JobState::Running, None, None)
+        .unwrap();
     assert_eq!(
         jobs.diagnostic_readback(&waiting)["job"]["observed_stage"],
         "execution"

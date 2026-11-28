@@ -682,7 +682,10 @@ mod tests {
         ] {
             let info = registry(op);
             assert_eq!(serde_json::to_value(info.time_basis).unwrap(), time);
-            assert_eq!(serde_json::to_value(info.data_availability).unwrap(), availability);
+            assert_eq!(
+                serde_json::to_value(info.data_availability).unwrap(),
+                availability
+            );
         }
     }
 
