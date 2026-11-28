@@ -1,7 +1,7 @@
 //! Research-only, typed bridge from a causal composition to position intent.
 //! A projection is evidence, never financial authority or an exchange order.
 use okx_analysis::query_plan::{
-    CausalGraphStream, CheckedComposition, CompositionValues, SeriesOp, Unit,
+    CausalGraphStream, CheckedComposition, CompositionValues, SeriesOp, SeriesSource, Unit,
 };
 pub use okx_analysis::query_plan::{GRAPH_SIGNAL_VERSION, GraphSignalSpec, MissingSignalPolicy};
 use std::collections::BTreeMap;
@@ -116,8 +116,34 @@ pub(crate) fn compiled_graph(
 /// Validate the complete causal graph without reading market data or creating
 /// a research job. Returns the minimum valid score_start index.
 pub fn preflight_graph(spec: &GraphSignalSpec, total_bars: u64) -> Result<usize, String> {
-    let (checked, _) = compiled_graph(spec, total_bars)?;
+    let (checked, _) = compiled_graph(spec, total_bars)
+        .map_err(|error| fielded_unavailable_source(spec, error))?;
     Ok(checked.warmup_bars())
+}
+
+/// The streaming owner deliberately exposes only `close`. Convert its
+/// source-name diagnostic into a bounded field-indexed Research preflight
+/// failure, but only for a source from the single Rust contract catalog.
+/// Unknown internal errors remain opaque at the public Edge boundary.
+fn fielded_unavailable_source(spec: &GraphSignalSpec, error: String) -> String {
+    let Some(source_name) = error.strip_prefix("composition.stream:SOURCE_NOT_SUPPORTED:") else {
+        return error;
+    };
+    let Some(source) = SeriesSource::parse(source_name) else {
+        return error;
+    };
+    if source.contract().graph_backtest_supported {
+        return error;
+    }
+    for (index, step) in spec.graph.steps.iter().enumerate() {
+        if step.input == source_name {
+            return format!("composition.steps[{index}].input:SOURCE_UNAVAILABLE");
+        }
+        if step.other.as_deref() == Some(source_name) {
+            return format!("composition.steps[{index}].other:SOURCE_UNAVAILABLE");
+        }
+    }
+    error
 }
 
 impl CheckedGraphSignal {
@@ -317,11 +343,45 @@ mod tests {
     #[test]
     fn preflight_rejects_unavailable_source_and_accepts_incremental_dispersion() {
         let mut unavailable = spec();
-        unavailable.graph.steps[0].input = "volume".into();
+        for source in okx_analysis::query_plan::SERIES_SOURCES {
+            if source.contract().graph_backtest_supported || source == SeriesSource::FundingRate {
+                continue;
+            }
+            unavailable.graph.steps[0].input = source.as_str().into();
+            assert_eq!(
+                preflight_graph(&unavailable, 100).unwrap_err(),
+                "composition.steps[0].input:SOURCE_UNAVAILABLE",
+                "{}",
+                source.as_str()
+            );
+        }
+        unavailable.graph = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[{"id":"buy","op":"greater_than","input":"funding_rate","threshold":0.0}],
+            "result_steps":["buy"]
+        }))
+        .unwrap();
+        unavailable.signal_step = "buy".into();
         assert_eq!(
             preflight_graph(&unavailable, 100).unwrap_err(),
-            "composition.stream:SOURCE_NOT_SUPPORTED:volume"
+            "composition.steps[0].input:SOURCE_UNAVAILABLE"
         );
+        unavailable.graph = serde_json::from_value(serde_json::json!({
+            "version":COMPOSITION_VERSION,
+            "steps":[
+                {"id":"return","op":"returns_series","input":"close"},
+                {"id":"difference","op":"subtract_series","input":"return","other":"funding_rate"},
+                {"id":"buy","op":"greater_than","input":"difference","threshold":0.0}
+            ],
+            "result_steps":["buy"]
+        }))
+        .unwrap();
+        unavailable.signal_step = "buy".into();
+        assert_eq!(
+            preflight_graph(&unavailable, 100).unwrap_err(),
+            "composition.steps[1].other:SOURCE_UNAVAILABLE"
+        );
+        let mut unavailable = spec();
         unavailable.graph.steps[0].input = "close".into();
         unavailable.graph.steps[0].op = SeriesOp::RollingStddev;
         unavailable.graph.steps[0].period = Some(2);
